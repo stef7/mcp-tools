@@ -1,0 +1,15 @@
+{
+  "name": "mcp-tools",
+  "private": true,
+  "workspaces": [
+    "workers/*"
+  ],
+  "scripts": {
+    "check": "npm run check --workspaces",
+    "format": "prettier --write .",
+    "format:check": "prettier --check ."
+  },
+  "devDependencies": {
+    "prettier": "^3.6.2"
+  }
+}
