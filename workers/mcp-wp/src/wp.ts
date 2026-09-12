@@ -136,8 +136,8 @@ export const credsFor = async (base: string, c: Ctx): Promise<Login | null> => {
   let people: Record<string, Person>;
   try {
     people = JSON.parse(c.env.WP_SITES);
-  } catch {
-    return { problem: "WP_SITES is not valid JSON. See secrets.d.ts for the expected shape." };
+  } catch (e) {
+    return { problem: `WP_SITES is not valid JSON — it ${whyNotJson(c.env.WP_SITES, e)}` };
   }
   const host = new URL(base).hostname;
   const entry = people[email]?.[host];
@@ -161,6 +161,26 @@ export const credsFor = async (base: string, c: Ctx): Promise<Login | null> => {
 };
 
 /**
+ * Why some JSON would not parse, in terms you can act on. Smart quotes are the usual culprit:
+ * anything that autocorrects text turns " into a curly pair that JSON.parse rejects.
+ */
+const whyNotJson = (raw: string, e: unknown) => {
+  const curly = /[\u201C\u201D\u2018\u2019]/.exec(raw);
+  const detail = e instanceof Error ? e.message : String(e);
+  if (curly) {
+    return (
+      `contains a curly quote (${curly[0]}) at position ${curly.index}. Something autocorrected ` +
+      'the text. Replace every " and \u2019 with straight ASCII quotes and save again.'
+    );
+  }
+  if (/,\s*[}\]]/.test(raw)) return `has a trailing comma before a closing brace. ${detail}`;
+  if (!raw.trim().startsWith("{")) {
+    return `does not start with "{" — it begins "${raw.trim().slice(0, 20)}". ${detail}`;
+  }
+  return detail;
+};
+
+/**
  * A plain-language account of whether this connector can edit `base`, and what is missing if it
  * cannot. Names the secret it looked for but never its value, and never another person's email.
  */
@@ -176,8 +196,8 @@ export const loginReport = async (base: string, c: Ctx): Promise<string> => {
     let people: Record<string, Record<string, { user?: string; pass?: string }>> | null = null;
     try {
       people = JSON.parse(c.env.WP_SITES);
-    } catch {
-      lines.push("WP_SITES: not valid JSON");
+    } catch (e) {
+      lines.push(`WP_SITES: not valid JSON — it ${whyNotJson(c.env.WP_SITES, e)}`);
     }
     if (people) {
       const mine = email ? people[email] : undefined;
