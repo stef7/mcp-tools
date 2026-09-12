@@ -1,0 +1,46 @@
+name: deploy
+# Deploys only the workers whose folder changed (or all of them when core/ changed,
+# since every worker imports it). Run manually from the Actions tab to force all.
+on:
+  push:
+    branches: [main, claude/mcp-workers-git-typescript-gh73ni]
+  workflow_dispatch:
+    inputs:
+      all:
+        description: Deploy every worker, not just changed ones
+        type: boolean
+        default: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 2 }
+      - uses: actions/setup-node@v4
+        with: { node-version: 22, cache: npm }
+      - run: npm ci
+
+      - id: pick
+        name: Work out which workers to deploy
+        run: |
+          if [ "${{ inputs.all }}" = "true" ] || \
+             git diff --name-only HEAD^ HEAD 2>/dev/null | grep -qE '^(core/|package|tsconfig)'; then
+            dirs=$(ls -d workers/*/)
+          else
+            dirs=$(git diff --name-only HEAD^ HEAD | grep -oE '^workers/[^/]+/' | sort -u)
+          fi
+          echo "dirs=$(echo $dirs | tr '\n' ' ')" >> "$GITHUB_OUTPUT"
+          echo "Deploying: ${dirs:-nothing}"
+
+      - name: Deploy
+        if: steps.pick.outputs.dirs != ''
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          for d in ${{ steps.pick.outputs.dirs }}; do
+            echo "::group::$d"
+            (cd "$d" && npx wrangler types && npx tsc && npx wrangler deploy)
+            echo "::endgroup::"
+          done
