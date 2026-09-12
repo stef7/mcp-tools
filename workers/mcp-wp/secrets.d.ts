@@ -19,7 +19,7 @@ interface Env {
    * read-only, and so is everything if Cloudflare Access is off, because then no identity
    * reaches the worker.
    */
-  WP_SITES?: string;
+  WP_SITES?: string | Record<string, unknown>;
 }
 // The password secrets are looked up by a name read from WP_SITES at runtime, so they cannot be
 // declared here; credsFor reads them through a single narrow cast.

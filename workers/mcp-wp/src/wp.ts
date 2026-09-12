@@ -133,12 +133,8 @@ type Person = Record<string, { user?: string; pass?: string }>;
 export const credsFor = async (base: string, c: Ctx): Promise<Login | null> => {
   const email = await c.email();
   if (!email || !c.env.WP_SITES) return null;
-  let people: Record<string, Person>;
-  try {
-    people = JSON.parse(c.env.WP_SITES);
-  } catch (e) {
-    return { problem: `WP_SITES is not valid JSON — it ${whyNotJson(c.env.WP_SITES, e)}` };
-  }
+  const { people, problem } = readSites(c.env.WP_SITES);
+  if (!people) return { problem: problem ?? "WP_SITES could not be read." };
   const host = new URL(base).hostname;
   const entry = people[email]?.[host];
   if (!entry) return null;
@@ -164,6 +160,20 @@ export const credsFor = async (base: string, c: Ctx): Promise<Login | null> => {
  * Why some JSON would not parse, in terms you can act on. Smart quotes are the usual culprit:
  * anything that autocorrects text turns " into a curly pair that JSON.parse rejects.
  */
+/**
+ * WP_SITES as an object, however the dashboard stored it. A variable can be typed Text or JSON:
+ * a JSON-typed one arrives already parsed, and parsing it again would fail.
+ */
+const readSites = (v: unknown): { people?: Record<string, Person>; problem?: string } => {
+  if (v && typeof v === "object") return { people: v as Record<string, Person> };
+  if (typeof v !== "string") return { problem: `WP_SITES is a ${typeof v}, which cannot be read.` };
+  try {
+    return { people: JSON.parse(v) };
+  } catch (e) {
+    return { problem: `WP_SITES is not valid JSON — it ${whyNotJson(v, e)}` };
+  }
+};
+
 const whyNotJson = (raw: string, e: unknown) => {
   const curly = /[\u201C\u201D\u2018\u2019]/.exec(raw);
   const detail = e instanceof Error ? e.message : String(e);
@@ -193,12 +203,8 @@ export const loginReport = async (base: string, c: Ctx): Promise<string> => {
   ];
   if (!c.env.WP_SITES) lines.push("WP_SITES: not set");
   else {
-    let people: Record<string, Record<string, { user?: string; pass?: string }>> | null = null;
-    try {
-      people = JSON.parse(c.env.WP_SITES);
-    } catch (e) {
-      lines.push(`WP_SITES: not valid JSON — it ${whyNotJson(c.env.WP_SITES, e)}`);
-    }
+    const { people, problem } = readSites(c.env.WP_SITES);
+    if (problem) lines.push(`WP_SITES: ${problem}`);
     if (people) {
       const mine = email ? people[email] : undefined;
       const others = Object.keys(people).filter((k) => k !== email).length;
