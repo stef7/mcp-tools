@@ -24,7 +24,12 @@ import { credsFor, discoverSite, loginReport, siteUrl, slug, usable } from "./wp
  * fails both tests. A data: URI is explicitly allowed and sidesteps them.
  */
 const ICON = {
-  src: "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAyNCAyNCI+PHJlY3Qgd2lkdGg9IjI0IiBoZWlnaHQ9IjI0IiByeD0iNSIgZmlsbD0iIzIxNzU5YiIvPjxwYXRoIGZpbGw9IiNmZmYiIGQ9Ik00IDhoMi4zbDEuNiA2LjRMOS42IDhoMS44bDEuNyA2LjRMMTQuNyA4SDE3bC0yLjggOWgtMmwtMS43LTYuMkw4LjggMTdoLTJ6Ii8+PC9zdmc+",
+  src:
+    "data:image/svg+xml;base64," +
+    "PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAyNCAyNCI+" +
+    "PHJlY3Qgd2lkdGg9IjI0IiBoZWlnaHQ9IjI0IiByeD0iNSIgZmlsbD0iIzIxNzU5YiIvPjxwYXRoIGZp" +
+    "bGw9IiNmZmYiIGQ9Ik00IDhoMi4zbDEuNiA2LjRMOS42IDhoMS44bDEuNyA2LjRMMTQuNyA4SDE3bC0y" +
+    "LjggOWgtMmwtMS43LTYuMkw4LjggMTdoLTJ6Ii8+PC9zdmc+",
   mimeType: "image/svg+xml",
   sizes: ["any"],
 };
