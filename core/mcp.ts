@@ -94,10 +94,12 @@ export type Spec = {
 export type Result = { content: { type: "text"; text: string }[]; isError?: boolean };
 
 /** `initialize` extras: everything but `instructions` goes into `serverInfo`. */
+type Icon = { src: string; mimeType?: string; sizes?: string[]; theme?: "light" | "dark" };
 type Info = {
   title?: string;
   description?: string;
-  icons?: { src: string }[];
+  /** Clients need only render png, jpeg, svg and webp, and prefer same-domain or data: URIs. */
+  icons?: Icon[];
   websiteUrl?: string;
   instructions?: string;
 };
