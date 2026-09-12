@@ -1,0 +1,16 @@
+{
+  "name": "mcp-fetch",
+  "version": "3.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "types": "wrangler types",
+    "check": "wrangler types && tsc",
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy"
+  },
+  "devDependencies": {
+    "typescript": "^7.0.2",
+    "wrangler": "^4.129.1"
+  }
+}

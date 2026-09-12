@@ -4,7 +4,8 @@ Cloudflare Workers that speak MCP, in one TypeScript repo.
 
 ```
 core/mcp.ts             shared plumbing: HTTP MCP endpoint + RPC surface + tool typing
-workers/mcp-wp/         WordPress REST API -> MCP
+workers/mcp-wp/         WordPress REST API -> MCP, read and write
+workers/mcp-fetch/      fetch one URL in the format you ask for, cache it, search what you cached
 workers/mcp-toolkit/    aggregator: its own tools + every worker bound under `services`
 scripts/mock-wp.mjs     fake WordPress for local testing
 ```
@@ -112,6 +113,17 @@ Settings -> Variables and Secrets.
 Sites running **The Events Calendar** are detected from their REST namespaces and get event, venue
 and organiser tools that write through `tribe/events/v1`. The plain post tools stand aside for
 those three types, because writing them through `wp/v2` silently drops the dates, venue and cost.
+
+## mcp-fetch
+
+`fetch_url` takes a URL and a format — `auto`, `markdown`, `text` or `raw` — and returns that URL
+in that format. It does not crawl, follow attachments, read sitemaps or infer what you "really"
+wanted. Original bytes are cached in KV forever, so asking for a different format later costs
+nothing; `force` is the only thing that goes back to the origin. Everything fetched stays
+searchable through `fetch_search`, which never touches the network.
+
+PDFs and Word documents are converted with Workers AI, which needs the `AI` binding, so
+`wrangler dev` for this worker needs a `CLOUDFLARE_API_TOKEN` in the environment.
 
 ## Auth (Cloudflare Access)
 

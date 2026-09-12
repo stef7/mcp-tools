@@ -1,0 +1,17 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "mcp-fetch",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-09-01",
+  "keep_vars": true,
+  "observability": { "enabled": true },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "fetch",
+      "database_id": "ebab875e-7022-4e7a-881e-f57e15e2926d"
+    }
+  ],
+  "kv_namespaces": [{ "binding": "CACHE", "id": "acdda8800378466aa9ecf9caabd317dc" }],
+  "ai": { "binding": "AI" }
+}
