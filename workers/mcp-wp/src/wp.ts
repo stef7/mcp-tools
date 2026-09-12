@@ -160,6 +160,54 @@ export const credsFor = async (base: string, c: Ctx): Promise<Login | null> => {
   return { user: entry.user, pass };
 };
 
+/**
+ * A plain-language account of whether this connector can edit `base`, and what is missing if it
+ * cannot. Names the secret it looked for but never its value, and never another person's email.
+ */
+export const loginReport = async (base: string, c: Ctx): Promise<string> => {
+  const host = new URL(base).hostname;
+  const email = await c.email();
+  const lines = [
+    `site: ${host}`,
+    `signed in as: ${email ?? "(nobody — Cloudflare Access is off)"}`,
+  ];
+  if (!c.env.WP_SITES) lines.push("WP_SITES: not set");
+  else {
+    let people: Record<string, Record<string, { user?: string; pass?: string }>> | null = null;
+    try {
+      people = JSON.parse(c.env.WP_SITES);
+    } catch {
+      lines.push("WP_SITES: not valid JSON");
+    }
+    if (people) {
+      const mine = email ? people[email] : undefined;
+      const others = Object.keys(people).filter((k) => k !== email).length;
+      lines.push(
+        `WP_SITES: valid, ${Object.keys(people).length} identity/identities` +
+          (others ? ` (${others} not you)` : ""),
+      );
+      if (!email) lines.push("no identity, so no entry can be matched");
+      else if (!mine) lines.push(`no entry for ${email} — check it matches your Access email`);
+      else {
+        lines.push(`your hosts: ${Object.keys(mine).join(", ") || "(none)"}`);
+        const entry = mine[host];
+        if (!entry) lines.push(`no entry for ${host} — check the spelling, including any "www."`);
+        else if (!entry.user || !entry.pass)
+          lines.push(`entry for ${host} is missing user or pass`);
+        else {
+          const set = (c.env as unknown as Record<string, unknown>)[entry.pass] !== undefined;
+          lines.push(`entry for ${host}: user ${entry.user}, password from secret ${entry.pass}`);
+          lines.push(`secret ${entry.pass}: ${set ? "set" : "NOT SET — add it, or fix the name"}`);
+        }
+      }
+    }
+  }
+  const login = await credsFor(base, c);
+  lines.push("", usable(login) ? "verdict: editable" : `verdict: read-only`);
+  if (login && !usable(login)) lines.push(login.problem);
+  return lines.join("\n");
+};
+
 /** Explains what to add when a write is attempted on a site this person has no login for. */
 export const needsLogin = (base: string, email?: string) => {
   const host = new URL(base).hostname;

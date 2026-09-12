@@ -19,6 +19,7 @@ import {
   findType,
   get,
   listTerms,
+  loginReport,
   needsLogin,
   usable,
   pluralise,
@@ -161,6 +162,14 @@ export const siteTools = (s: Schema, creds: Creds | null): Tools => {
         remove(id, force === true, type, s, creds),
     };
   }
+
+  tools["login_status"] = {
+    annotations: { readOnlyHint: true },
+    description:
+      `Report whether this connector can edit ${host}, and what is missing if it cannot. ` +
+      "Use it when the create, update and delete tools are absent and you expected them.",
+    run: (_args: unknown, c) => loginReport(s.base, c),
+  };
 
   const taxNames = Object.keys(s.taxonomies).join(", ");
   tools["list_terms"] = {
