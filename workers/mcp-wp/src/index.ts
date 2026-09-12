@@ -16,7 +16,7 @@ import cfg from "../wrangler.json";
 import pkg from "../package.json";
 import { mcpWorker, type Ctx } from "../../../core/mcp";
 import { genericTools, siteTools } from "./tools";
-import { credsFor, discoverSite, siteUrl, slug } from "./wp";
+import { credsFor, discoverSite, siteUrl, slug, usable } from "./wp";
 
 const sitesOf = ({ params }: Ctx) =>
   (params.get("wp") ?? params.get("site") ?? "").split(",").filter(Boolean).map(siteUrl);
@@ -28,7 +28,10 @@ export default mcpWorker({
     const sites = sitesOf(c);
     if (!sites.length) return genericTools;
     const sets = await Promise.all(
-      sites.map(async (base) => siteTools(await discoverSite(base), await credsFor(base, c))),
+      sites.map(async (base) => {
+        const login = await credsFor(base, c);
+        return siteTools(await discoverSite(base), usable(login) ? login : null);
+      }),
     );
     if (sites.length === 1) return sets[0]!;
     return Object.fromEntries(

@@ -92,24 +92,24 @@ Reads are open. Writing needs two things, and both are set in the dashboard on `
 Settings -> Variables and Secrets.
 
 **1. `WP_SITES`, a plain variable** — who may edit what. Readable and editable, because none of it
-is secret. Keyed by Cloudflare Access email, then hostname, then the WordPress username:
+is secret. Keyed by Cloudflare Access email, then hostname. `user` is the WordPress login, `pass`
+is the _name of the secret_ holding that login's password:
 
 ```json
 {
-  "you@example.com": { "apil.au": "claude-mcp" },
-  "paul@example.com": { "apil.au": "paul-mcp", "example.org": "paul" }
+  "you@example.com": { "apil.au": { "user": "claude-mcp", "pass": "APIL_CLAUDE" } },
+  "paul@example.com": { "apil.au": { "user": "paul-mcp", "pass": "APIL_PAUL" } }
 }
 ```
 
-**2. One secret per site**, named after the host: `apil.au` -> `WP_PASS_APIL_AU`. The value is a
-WordPress **Application Password** (Users -> Profile -> Application Passwords), not the account
-password. Adding a site never means retyping the others.
+**2. One secret per login**, named whatever you put in `pass` — here `APIL_CLAUDE` and
+`APIL_PAUL`. The value is a WordPress **Application Password** (Users -> Profile -> Application
+Passwords), not the account password.
 
-Where two people use different logins on the same host, name the secret explicitly:
-
-```json
-{ "you@example.com": { "apil.au": { "user": "claude-mcp", "pass": "WP_PASS_APIL_STEF" } } }
-```
+Secret names are used exactly as written and never derived from the host or username: sanitising
+those into one identifier would let different pairs collide (`apil.au` + `x_y` and `apil.au-x` +
+`y` produce the same key). Naming them yourself also means the variable shows, at a glance, which
+WordPress user and which secret each site is using.
 
 There is no shared fallback. A site nobody is listed against is read-only, and so is everything if
 Cloudflare Access is off, because then no identity reaches the worker. Access identity does not

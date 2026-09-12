@@ -115,34 +115,49 @@ const termLabels = ({ class_list = [] }: Item) => {
 
 // ─── Credentials ───────────────────────────────────────────────────────────────────────────────
 export type Creds = { user: string; pass: string };
-/** One person's logins: host -> username, or host -> {user, pass} to name a different secret. */
-type Person = Record<string, string | { user: string; pass?: string }>;
+/** Either a usable login, or why there isn't one. Misconfiguration explains itself rather than
+ *  throwing, so one bad entry cannot take the other sites on a connector down with it. */
+export type Login = Creds | { problem: string };
+export const usable = (l: Login | null): l is Creds => l !== null && "user" in l;
 
-/** The secret a host's password lives in by default: apil.au -> WP_PASS_APIL_AU. */
-export const passKey = (host: string) => "WP_PASS_" + host.replace(/\W+/g, "_").toUpperCase();
+/** One person's logins: hostname -> the WordPress username and the secret holding its password. */
+type Person = Record<string, { user?: string; pass?: string }>;
 
 /**
- * The login for one host, for whoever is signed in. There is no shared fallback: no Access
- * identity, or no entry for that person, means no write tools. See secrets.d.ts for the shape.
+ * The login for one host, for whoever is signed in. `pass` names a secret and is used exactly as
+ * written: deriving the name from the host and username would be ambiguous, since sanitising both
+ * into one identifier lets different pairs collapse onto the same key. See secrets.d.ts.
+ *
+ * There is no shared fallback: no Access identity, or no entry for that person, means no writes.
  */
-export const credsFor = async (base: string, c: Ctx): Promise<Creds | null> => {
+export const credsFor = async (base: string, c: Ctx): Promise<Login | null> => {
   const email = await c.email();
   if (!email || !c.env.WP_SITES) return null;
   let people: Record<string, Person>;
   try {
     people = JSON.parse(c.env.WP_SITES);
   } catch {
-    throw new Error("WP_SITES is not valid JSON. See secrets.d.ts for the expected shape.");
+    return { problem: "WP_SITES is not valid JSON. See secrets.d.ts for the expected shape." };
   }
   const host = new URL(base).hostname;
   const entry = people[email]?.[host];
   if (!entry) return null;
-  const user = typeof entry === "string" ? entry : entry.user;
-  const key = (typeof entry === "string" ? undefined : entry.pass) ?? passKey(host);
-  const pass = (c.env as unknown as Record<string, string | undefined>)[key];
-  if (!pass)
-    throw new Error(`${host} is configured for ${user}, but the secret ${key} is not set.`);
-  return { user, pass };
+  if (!entry.user || !entry.pass) {
+    return {
+      problem:
+        `The WP_SITES entry for ${host} under ${email} needs both "user" (the WordPress login) ` +
+        'and "pass" (the name of the secret holding its Application Password).',
+    };
+  }
+  const pass = (c.env as unknown as Record<string, string | undefined>)[entry.pass];
+  if (!pass) {
+    return {
+      problem:
+        `${host} is configured for ${entry.user}, but there is no secret named ${entry.pass}. ` +
+        "Add it, or correct the `pass` name in WP_SITES.",
+    };
+  }
+  return { user: entry.user, pass };
 };
 
 /** Explains what to add when a write is attempted on a site this person has no login for. */
@@ -155,8 +170,8 @@ export const needsLogin = (base: string, email?: string) => {
     );
   return (
     `No login configured for ${host} under ${email}, so it is read-only. Add it to the WP_SITES ` +
-    `variable as {"${email}": {"${host}": "your-wp-username"}} and put that user's ` +
-    `Application Password in a secret named ${passKey(host)}.`
+    `variable as {"${email}": {"${host}": {"user": "your-wp-username", "pass": "PICK_A_NAME"}}}, ` +
+    "then add a secret called PICK_A_NAME holding that user's Application Password."
   );
 };
 

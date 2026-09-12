@@ -20,12 +20,14 @@ import {
   get,
   listTerms,
   needsLogin,
+  usable,
   pluralise,
   remove,
   search,
   siteUrl,
   update,
   type Creds,
+  type Login,
   type PostType,
   type Schema,
   type SearchArgs,
@@ -189,8 +191,12 @@ export const siteTools = (s: Schema, creds: Creds | null): Tools => {
 const open = async (url: string, c: Ctx) => {
   const base = siteUrl(url);
   const s = await discoverSite(base);
-  return { base, s, creds: await credsFor(base, c) };
+  return { base, s, login: await credsFor(base, c) };
 };
+
+/** For the write tools: the login, or the sentence explaining why there isn't one. */
+const login = async (base: string, l: Login | null, c: Ctx) =>
+  usable(l) ? l : (l?.problem ?? needsLogin(base, await c.email()));
 
 export const genericTools: Tools = {
   discover_site: tool({
@@ -254,7 +260,8 @@ export const genericTools: Tools = {
       },
     },
     async run({ url, content_type, taxonomy_filters, ...args }, c) {
-      const { s, creds } = await open(url, c);
+      const { s, login: l } = await open(url, c);
+      const creds = usable(l) ? l : null;
       const type = findType(s, content_type);
       if (!type)
         return (
@@ -294,7 +301,8 @@ export const genericTools: Tools = {
       },
     },
     async run({ url, content_type, id }, c) {
-      const { s, creds } = await open(url, c);
+      const { s, login: l } = await open(url, c);
+      const creds = usable(l) ? l : null;
       const type = findType(s, content_type);
       const all = available(Object.values(s.postTypes));
       if (!type) return `Unknown content type "${content_type}". Available: ${all}`;
@@ -352,8 +360,9 @@ export const genericTools: Tools = {
       },
     },
     async run({ url, content_type, ...args }, c) {
-      const { base, s, creds } = await open(url, c);
-      if (!creds) return needsLogin(base, await c.email());
+      const { base, s, login: l } = await open(url, c);
+      const creds = await login(base, l, c);
+      if (typeof creds === "string") return creds;
       const type = findType(s, content_type);
       if (!type) return `Unknown content type "${content_type}".`;
       return create(args, type, s, creds);
@@ -379,8 +388,9 @@ export const genericTools: Tools = {
       },
     },
     async run({ url, content_type, id, ...args }, c) {
-      const { base, s, creds } = await open(url, c);
-      if (!creds) return needsLogin(base, await c.email());
+      const { base, s, login: l } = await open(url, c);
+      const creds = await login(base, l, c);
+      if (typeof creds === "string") return creds;
       const type = findType(s, content_type);
       if (!type) return `Unknown content type "${content_type}".`;
       return update(id, args, type, s, creds);
@@ -408,8 +418,9 @@ export const genericTools: Tools = {
       },
     },
     async run({ url, content_type, id, force }, c) {
-      const { base, s, creds } = await open(url, c);
-      if (!creds) return needsLogin(base, await c.email());
+      const { base, s, login: l } = await open(url, c);
+      const creds = await login(base, l, c);
+      if (typeof creds === "string") return creds;
       const type = findType(s, content_type);
       if (!type) return `Unknown content type "${content_type}".`;
       return remove(id, force === true, type, s, creds);
