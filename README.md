@@ -48,6 +48,8 @@ Rules the core enforces so nothing needs a mapping table:
 | `mcp-toolkit…/?wp=apil.au,crikey.com.au`                    | one set per site, named `wp_<site slug>_<tool>`     |
 | `mcp-wp…/?wp=apil.au&title=APIL`                            | the wp worker alone (`?site=` still works as alias) |
 
+Tools named `create_*`, `update_*` and `delete_*` change the live site. See **Editing a site**.
+
 ## Local development
 
 ```sh
@@ -82,6 +84,34 @@ Bindings live in `wrangler.json`; secrets stay in the dashboard (`keep_vars` kee
 2. Replace `tools` in `src/index.ts`.
 3. Add `{ "binding": "<NAME>", "service": "mcp-<name>" }` to `workers/mcp-toolkit/wrangler.json`.
 4. `npm run check`, commit, connect the new Worker to the repo as above.
+
+## Editing a site
+
+Reads need nothing. Writes appear only for hosts listed in the `WP_SITES` worker secret, and every
+write tool refuses to run until the caller passes `user_confirmed: true`.
+
+```
+WP_SITES = {"apil.au": {"user": "claude-mcp", "pass": "abcd efgh ijkl mnop"}}
+```
+
+`pass` is a WordPress **Application Password** (Users -> Profile -> Application Passwords), not the
+account password. Prefer a dedicated Editor-role user: application passwords inherit every
+capability the user has and cannot be scoped.
+
+To give each person their own login, nest under their Cloudflare Access email. A key containing
+`@` is an email, anything else is a hostname, so the two shapes mix freely:
+
+```
+WP_SITES = {"you@example.com": {"apil.au": {"user": "...", "pass": "..."}}}
+```
+
+Access identity does not cross service bindings, so the worker facing the browser resolves the
+email once and passes it on with every RPC. Set the secret on `mcp-wp`, in the dashboard under
+Settings -> Variables and Secrets.
+
+Sites running **The Events Calendar** are detected from their REST namespaces and get event, venue
+and organiser tools that write through `tribe/events/v1`. The plain post tools stand aside for
+those three types, because writing them through `wp/v2` silently drops the dates, venue and cost.
 
 ## Auth (Cloudflare Access)
 

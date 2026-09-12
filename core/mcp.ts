@@ -50,8 +50,16 @@ export type FromSchema<S> = S extends { enum: readonly (infer E)[] }
           ? Prim[T]
           : unknown;
 
-/** What a tool's `run` receives besides its args: bindings, connector query string, exec ctx. */
-export type Ctx = { env: Env; params: URLSearchParams; exec: ExecutionContext };
+/**
+ * What a tool's `run` receives besides its args: bindings, connector query string, exec ctx, and
+ * who is signed in. `email()` is the Cloudflare Access identity, or undefined when Access is off.
+ */
+export type Ctx = {
+  env: Env;
+  params: URLSearchParams;
+  exec: ExecutionContext;
+  email(): Promise<string | undefined>;
+};
 
 type Annotations = {
   readOnlyHint?: boolean;
@@ -66,6 +74,8 @@ export type Tool<S extends JSONSchema = JSONSchema> = {
   /** JSON Schema of the arguments. Omit for "no arguments". */
   input?: S;
   annotations?: Annotations;
+  /** Anything that changes the world: adds a required `user_confirmed` and enforces it. */
+  confirm?: boolean;
   run(args: FromSchema<S>, c: Ctx): unknown;
 };
 
@@ -95,12 +105,21 @@ type Config = {
   info?: (c: Ctx) => Info;
 };
 
+/**
+ * Everything a call needs beyond its arguments: the connector's query string and the signed-in
+ * user. Access does not propagate its identity over service bindings, so the worker facing the
+ * browser resolves the email once and passes it on with every RPC.
+ */
+type Call = { search?: string | undefined; email?: string | undefined };
+
 /** What a bound worker looks like over RPC (it is another `mcpWorker`). */
 type Remote = {
-  tools(search: string): Promise<Spec[]>;
-  call(name: string, args: unknown, search: string): Promise<Result>;
+  tools(req: Call): Promise<Spec[]>;
+  call(name: string, args: unknown, req: Call): Promise<Result>;
 };
 type Msg = { id?: unknown; method?: string; params?: { name?: string; arguments?: unknown } };
+/** `ctx.access` exists only when Cloudflare Access authenticated this very invocation. */
+type WithAccess = { access?: { getIdentity(): Promise<{ email?: string } | null> } };
 
 const prefixOf = (workerName: string) => workerName.replace(/^mcp-/, "").replaceAll("-", "_") + "_";
 const CORS = {
@@ -120,15 +139,35 @@ const err = (message: string): Result => ({
 });
 const isResult = (v: unknown): v is Result => typeof v === "object" && v !== null && "content" in v;
 
+const CONFIRM = {
+  type: "boolean",
+  description: "Must be true. Set it only once the user has agreed to this exact change.",
+} as const;
+/** Adds the confirmation argument to a write tool's schema, so the client knows to ask. */
+const withConfirm = (input: JSONSchema = { type: "object", properties: {} }): JSONSchema => ({
+  ...input,
+  properties: { ...input.properties, user_confirmed: CONFIRM },
+  required: [...(input.required ?? []), "user_confirmed"],
+});
+
 export const mcpWorker = (cfg: Config) => {
   const prefix = prefixOf(cfg.name);
   const local = (c: Ctx) => (typeof cfg.tools === "function" ? cfg.tools(c) : cfg.tools);
 
   return class extends WorkerEntrypoint<Env> {
-    #ctx = (search: string): Ctx => ({
+    /** Resolved at most once per request, and only if a tool actually asks who is signed in. */
+    #email = (given?: string) => {
+      let asked: Promise<string | undefined> | undefined;
+      return () =>
+        (asked ??= given
+          ? Promise.resolve(given)
+          : Promise.resolve((this.ctx as WithAccess).access?.getIdentity()).then((i) => i?.email));
+    };
+    #ctx = ({ search, email }: Call): Ctx => ({
       env: this.env,
       params: new URLSearchParams(search),
       exec: this.ctx,
+      email: this.#email(email),
     });
     #remotes = () =>
       (cfg.services ?? [])
@@ -139,28 +178,34 @@ export const mcpWorker = (cfg: Config) => {
         .sort((a, b) => b.prefix.length - a.prefix.length);
 
     /** Every tool this worker offers: its own, then each bound worker's. */
-    async tools(search = ""): Promise<Spec[]> {
-      const c = this.#ctx(search);
+    async tools(req: Call = {}): Promise<Spec[]> {
+      const c = this.#ctx(req);
       const sel = c.params.get("tools")?.split(",");
       const own = Object.entries(await local(c)).map(([k, t]) => ({
         name: prefix + k,
-        description: t.description,
+        description: t.confirm ? `${t.description} Changes the site.` : t.description,
         ...t.annotations,
-        inputSchema: t.input ?? { type: "object", properties: {} },
+        inputSchema: t.confirm
+          ? withConfirm(t.input)
+          : (t.input ?? { type: "object", properties: {} }),
       }));
       const wantedRemotes = this.#remotes().filter(
         (r) => !sel || sel.some((s) => (s + "_").startsWith(r.prefix)),
       );
-      const remote = await Promise.all(wantedRemotes.map((r) => r.rpc.tools(search)));
+      const onward = wantedRemotes.length ? await this.#pass(req) : req;
+      const remote = await Promise.all(wantedRemotes.map((r) => r.rpc.tools(onward)));
       return [...own, ...remote.flat()].filter(
         (t) => !sel || sel.some((s) => t.name === s || t.name.startsWith(s + "_")),
       );
     }
 
-    async call(name: string, args: unknown = {}, search = ""): Promise<Result> {
-      const c = this.#ctx(search);
+    async call(name: string, args: unknown = {}, req: Call = {}): Promise<Result> {
+      const c = this.#ctx(req);
       const own = name.startsWith(prefix) && (await local(c))[name.slice(prefix.length)];
       if (own) {
+        if (own.confirm && (args as { user_confirmed?: unknown })?.user_confirmed !== true) {
+          return err(`${name} changes the site. Confirm with the user, then pass user_confirmed.`);
+        }
         try {
           const v = await own.run(args as never, c);
           return isResult(v) ? v : { content: [{ type: "text", text: text(v) }] };
@@ -169,14 +214,17 @@ export const mcpWorker = (cfg: Config) => {
         }
       }
       const r = this.#remotes().find((r) => name.startsWith(r.prefix));
-      return r ? r.rpc.call(name, args, search) : err(`Unknown tool: ${name}`);
+      return r ? r.rpc.call(name, args, await this.#pass(req)) : err(`Unknown tool: ${name}`);
     }
 
-    override async fetch(req: Request): Promise<Response> {
-      const { search } = new URL(req.url);
-      if (req.method === "OPTIONS") return new Response(null, { status: 204, headers: CORS });
-      if (req.method === "GET") {
-        const tools = (await this.tools(search)).map((t) => t.name);
+    /** Resolve the identity before handing the request on: RPC cannot see Access itself. */
+    #pass = async (req: Call): Promise<Call> => ({ ...req, email: await this.#ctx(req).email() });
+
+    override async fetch(request: Request): Promise<Response> {
+      const req: Call = { search: new URL(request.url).search };
+      if (request.method === "OPTIONS") return new Response(null, { status: 204, headers: CORS });
+      if (request.method === "GET") {
+        const tools = (await this.tools(req)).map((t) => t.name);
         return json({
           name: cfg.name,
           version: cfg.version,
@@ -184,21 +232,20 @@ export const mcpWorker = (cfg: Config) => {
           tools,
         });
       }
-      if (req.method !== "POST") return new Response("POST only", { status: 405, headers: CORS });
-      const body = (await req.json().catch(() => null)) as Msg | Msg[] | null;
+      if (request.method !== "POST")
+        return new Response("POST only", { status: 405, headers: CORS });
+      const body = (await request.json().catch(() => null)) as Msg | Msg[] | null;
       if (!body)
         return json(
           { jsonrpc: "2.0", id: null, error: { code: -32700, message: "Parse error" } },
           400,
         );
-      const out = (await Promise.all([body].flat().map((m) => this.#rpc(m, search)))).filter(
-        Boolean,
-      );
+      const out = (await Promise.all([body].flat().map((m) => this.#rpc(m, req)))).filter(Boolean);
       if (!out.length) return new Response(null, { status: 202, headers: CORS });
       return json(Array.isArray(body) ? out : out[0]);
     }
 
-    async #rpc({ id, method, params }: Msg, search: string) {
+    async #rpc({ id, method, params }: Msg, req: Call) {
       if (id == null) return null; // a notification: nothing to answer
       const ok = (result: unknown) => ({ jsonrpc: "2.0", id, result });
       const fail = (code: number, message: string) => ({
@@ -209,7 +256,7 @@ export const mcpWorker = (cfg: Config) => {
       try {
         switch (method) {
           case "initialize": {
-            const { instructions, ...info } = cfg.info?.(this.#ctx(search)) ?? {};
+            const { instructions, ...info } = cfg.info?.(this.#ctx(req)) ?? {};
             return ok({
               protocolVersion: "2025-06-18",
               capabilities: { tools: {} },
@@ -220,9 +267,9 @@ export const mcpWorker = (cfg: Config) => {
           case "ping":
             return ok({});
           case "tools/list":
-            return ok({ tools: await this.tools(search) });
+            return ok({ tools: await this.tools(req) });
           case "tools/call":
-            return ok(await this.call(params?.name ?? "", params?.arguments, search));
+            return ok(await this.call(params?.name ?? "", params?.arguments, req));
           case "resources/list":
             return ok({ resources: [] });
           case "prompts/list":
