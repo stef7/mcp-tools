@@ -35,8 +35,6 @@ import {
   type WriteArgs,
 } from "./wp";
 
-const RO = { readOnlyHint: true, destructiveHint: false, openWorldHint: true };
-
 const SEARCH_PROPS = {
   query: { type: "string", description: "Full-text search query" },
   after: { type: "string", description: "Only items published after this date (e.g. 2025-10-01)" },
@@ -97,7 +95,6 @@ export const siteTools = (s: Schema, creds: Creds | null): Tools => {
     const taxonomies = taxProps(type, s);
 
     tools[`search_${pluralise(type.rest_base)}`] = {
-      annotations: RO,
       description:
         `Search ${type.name} (${type.description || type.slug}). ` +
         "Returns titles, dates, URLs, and excerpts.",
@@ -106,7 +103,6 @@ export const siteTools = (s: Schema, creds: Creds | null): Tools => {
     };
 
     tools[`get_${type.rest_base}`] = {
-      annotations: RO,
       description: `Get a single ${type.name} by ID. Returns full content.`,
       input: {
         type: "object",
@@ -122,6 +118,7 @@ export const siteTools = (s: Schema, creds: Creds | null): Tools => {
     tools[`create_${type.rest_base}`] = {
       description: `Create ${type.name} on ${host}. Creates a draft unless status says otherwise.`,
       confirm: true,
+      annotations: { destructiveHint: false }, // adds something new; nothing is overwritten
       input: { type: "object", properties: { ...WRITE_PROPS, ...taxonomies } },
       run: (args: WriteArgs) => create(args, type, s, creds),
     };
@@ -164,7 +161,6 @@ export const siteTools = (s: Schema, creds: Creds | null): Tools => {
   }
 
   tools["login_status"] = {
-    annotations: { readOnlyHint: true },
     description:
       `Report whether this connector can edit ${host}, and what is missing if it cannot. ` +
       "Use it when the create, update and delete tools are absent and you expected them.",
@@ -173,7 +169,6 @@ export const siteTools = (s: Schema, creds: Creds | null): Tools => {
 
   const taxNames = Object.keys(s.taxonomies).join(", ");
   tools["list_terms"] = {
-    annotations: RO,
     description: `List terms in a taxonomy. Available: ${taxNames}`,
     input: {
       type: "object",
@@ -209,7 +204,6 @@ const login = async (base: string, l: Login | null, c: Ctx) =>
 
 export const genericTools: Tools = {
   discover_site: tool({
-    annotations: RO,
     description:
       "Probe a WordPress site and return its available content types, taxonomies, and term " +
       "counts. Call this first to learn what a site has before searching.",
@@ -243,7 +237,6 @@ export const genericTools: Tools = {
   }),
 
   search_content: tool({
-    annotations: RO,
     description:
       "Search a WordPress site for content. Use discover_site first to find available content " +
       "types and taxonomy filters. Defaults to searching posts.",
@@ -292,7 +285,6 @@ export const genericTools: Tools = {
   }),
 
   get_content: tool({
-    annotations: RO,
     description:
       "Get a single item from a WordPress site by ID. Returns full content. " +
       "Use search_content first to find IDs.",
@@ -320,7 +312,6 @@ export const genericTools: Tools = {
   }),
 
   list_site_terms: tool({
-    annotations: RO,
     description:
       "List terms in a taxonomy on a WordPress site. " +
       "Use discover_site first to find available taxonomies.",
@@ -356,6 +347,7 @@ export const genericTools: Tools = {
     description:
       "Create a post, page or other item on a WordPress site. Creates a draft by default.",
     confirm: true,
+    annotations: { destructiveHint: false },
     input: {
       type: "object",
       required: ["url"],

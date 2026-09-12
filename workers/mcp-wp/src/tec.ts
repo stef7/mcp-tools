@@ -126,7 +126,6 @@ export const tecTools = (s: Schema, creds: Creds | null): Tools => {
     description:
       "List events including past ones, which the search tools hide. Ordered by start date. " +
       "Use this to find the ID of an event that has already happened.",
-    annotations: { readOnlyHint: true },
     input: {
       type: "object",
       properties: {
@@ -183,6 +182,7 @@ export const tecTools = (s: Schema, creds: Creds | null): Tools => {
     tools[`create_${name}`] = {
       description: `Create a ${res.label} in The Events Calendar on ${new URL(s.base).hostname}.`,
       confirm: true,
+      annotations: { destructiveHint: false },
       input: schema(false, res.required),
       run: async (args: Args) => {
         const gaps = missing(args, res);

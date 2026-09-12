@@ -85,7 +85,12 @@ export type Tools = Record<string, { run(args: never, c: Ctx): unknown } & Omit<
 /** Gives `run` typed args from `input` without writing the shape twice. */
 export const tool = <const S extends JSONSchema>(t: Tool<S>) => t;
 
-export type Spec = { name: string; description: string; inputSchema: JSONSchema } & Annotations;
+export type Spec = {
+  name: string;
+  description: string;
+  inputSchema: JSONSchema;
+  annotations: Annotations;
+};
 export type Result = { content: { type: "text"; text: string }[]; isError?: boolean };
 
 /** `initialize` extras: everything but `instructions` goes into `serverInfo`. */
@@ -186,7 +191,13 @@ export const mcpWorker = (cfg: Config) => {
       const own = Object.entries(await local(c)).map(([k, t]) => ({
         name: prefix + k,
         description: t.confirm ? `${t.description} Changes the site.` : t.description,
-        ...t.annotations,
+        // Clients group tools by these, so they follow `confirm` rather than being restated.
+        annotations: {
+          readOnlyHint: !t.confirm,
+          destructiveHint: !!t.confirm,
+          openWorldHint: true,
+          ...t.annotations,
+        },
         inputSchema: t.confirm
           ? withConfirm(t.input)
           : (t.input ?? { type: "object", properties: {} }),

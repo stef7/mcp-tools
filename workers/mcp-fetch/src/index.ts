@@ -219,7 +219,6 @@ export default mcpWorker({
   version: pkg.version,
   tools: {
     url: tool({
-      annotations: { readOnlyHint: true, openWorldHint: true },
       description:
         "Fetch one URL and return its content. The original bytes are cached forever, so asking " +
         "for a different format later never re-downloads. PDFs and Word documents are converted " +
@@ -275,7 +274,6 @@ export default mcpWorker({
     }),
 
     list: tool({
-      annotations: { readOnlyHint: true },
       description:
         "List what has been fetched, optionally narrowed to URLs starting with a prefix.",
       input: {
@@ -303,7 +301,6 @@ export default mcpWorker({
     }),
 
     search: tool({
-      annotations: { readOnlyHint: true },
       description:
         "Full-text search across everything already fetched. Ranked, with the matching lines in " +
         "context. Never goes to the network — fetch a URL first to make it searchable.",
@@ -349,7 +346,6 @@ export default mcpWorker({
     }),
 
     otter_poll: tool({
-      annotations: { readOnlyHint: true, openWorldHint: true },
       description:
         "Poll a live or public Otter.ai transcript by otid. Returns only the lines after `since` " +
         "seconds, plus `next` to pass back on the following call. Start with since=0.",
