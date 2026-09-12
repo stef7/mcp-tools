@@ -176,6 +176,10 @@ export const needsLogin = (base: string, email?: string) => {
 };
 
 // ─── HTTP ──────────────────────────────────────────────────────────────────────────────────────
+/** Workers send no User-Agent unless asked to, and some hosts redirect or challenge requests
+ *  without one. Sent on every request so a site can recognise and allow this worker. */
+const UA = "mcp-wp";
+
 type Json = Record<string, unknown> | unknown[];
 type WpError = { code?: string; message?: string; data?: { status?: number } };
 
@@ -185,7 +189,7 @@ export const api = async (
   creds: Creds | null,
   init: { method?: string; body?: unknown } = {},
 ) => {
-  const headers: Record<string, string> = { Accept: "application/json" };
+  const headers: Record<string, string> = { Accept: "application/json", "User-Agent": UA };
   if (creds) {
     const pass = creds.pass.replace(/\s+/g, ""); // WordPress prints app passwords in groups of 4
     headers["Authorization"] = "Basic " + btoa(`${creds.user}:${pass}`);
@@ -267,10 +271,11 @@ type RawTax = { name: string; rest_base?: string; hierarchical?: boolean };
 export const discoverSite = (base: string) =>
   memo<Schema>(`schema:${base}`, async () => {
     const apiBase = `${base}/wp-json/wp/v2`;
+    const get = (u: string) => fetch(u, { headers: { "User-Agent": UA } });
     const [typesRes, taxRes, rootRes] = await Promise.all([
-      fetch(`${apiBase}/types`),
-      fetch(`${apiBase}/taxonomies`),
-      fetch(`${base}/wp-json/`),
+      get(`${apiBase}/types`),
+      get(`${apiBase}/taxonomies`),
+      get(`${base}/wp-json/`),
     ]);
     if (!typesRes.ok) throw new Error(`Failed to fetch types from ${base}: ${typesRes.status}`);
     if (!taxRes.ok) throw new Error(`Failed to fetch taxonomies from ${base}: ${taxRes.status}`);
@@ -304,9 +309,9 @@ export const discoverSite = (base: string) =>
 
 const getTerms = (apiBase: string, tax: Taxonomy) =>
   memo<Term[]>(`terms:${apiBase}:${tax.rest_base}`, async () => {
-    const res = await fetch(
-      `${apiBase}/${tax.rest_base}?per_page=100&orderby=count&order=desc`,
-    ).catch(() => null);
+    const res = await fetch(`${apiBase}/${tax.rest_base}?per_page=100&orderby=count&order=desc`, {
+      headers: { "User-Agent": UA },
+    }).catch(() => null);
     if (!res?.ok) return [];
     const terms: Term[] = await res.json();
     return terms.map(({ id, name, slug, count }) => ({ id, name, slug, count }));
@@ -323,6 +328,7 @@ export const resolveTerm = async (apiBase: string, tax: Taxonomy, query: string 
   if (hit) return hit.id;
   const res = await fetch(
     `${apiBase}/${tax.rest_base}?search=${encodeURIComponent(q)}&per_page=1`,
+    { headers: { "User-Agent": UA } },
   ).catch(() => null);
   const found: Term[] = res?.ok ? await res.json() : [];
   return found[0]?.id ?? null;
