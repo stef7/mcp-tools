@@ -103,6 +103,8 @@ type Config = {
   services?: { binding: string; service: string }[];
   tools: Tools | ((c: Ctx) => Tools | Promise<Tools>);
   info?: (c: Ctx) => Info;
+  /** Extra detail for the GET page: whatever a human opening the URL in a browser needs. */
+  status?: (c: Ctx) => unknown | Promise<unknown>;
 };
 
 /**
@@ -230,6 +232,7 @@ export const mcpWorker = (cfg: Config) => {
           version: cfg.version,
           endpoint: "POST JSON-RPC here",
           tools,
+          ...(cfg.status ? { status: await cfg.status(this.#ctx(req)) } : {}),
         });
       }
       if (request.method !== "POST")

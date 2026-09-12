@@ -16,7 +16,7 @@ import cfg from "../wrangler.json";
 import pkg from "../package.json";
 import { mcpWorker, type Ctx } from "../../../core/mcp";
 import { genericTools, siteTools } from "./tools";
-import { credsFor, discoverSite, siteUrl, slug, usable } from "./wp";
+import { credsFor, discoverSite, loginReport, siteUrl, slug, usable } from "./wp";
 
 const sitesOf = ({ params }: Ctx) =>
   (params.get("wp") ?? params.get("site") ?? "").split(",").filter(Boolean).map(siteUrl);
@@ -37,6 +37,13 @@ export default mcpWorker({
     return Object.fromEntries(
       sets.flatMap((t, i) => Object.entries(t).map(([k, v]) => [`${slug(sites[i]!)}_${k}`, v])),
     );
+  },
+  /** Opening the URL in a browser says, per site, whether it is editable and what is missing. */
+  async status(c) {
+    const sites = sitesOf(c);
+    if (!sites.length) return "Generic mode. Add ?wp=<hostname> to target a site.";
+    const reports = await Promise.all(sites.map((base) => loginReport(base, c)));
+    return reports.map((r) => r.split("\n"));
   },
   info(c) {
     const sites = sitesOf(c);
