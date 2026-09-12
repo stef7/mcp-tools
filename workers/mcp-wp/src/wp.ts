@@ -115,32 +115,50 @@ const termLabels = ({ class_list = [] }: Item) => {
 
 // ─── Credentials ───────────────────────────────────────────────────────────────────────────────
 export type Creds = { user: string; pass: string };
-type SiteMap = Record<string, Creds | Record<string, Creds>>;
-const isCreds = (v: unknown): v is Creds =>
-  typeof v === "object" && v !== null && "user" in v && "pass" in v;
+/** One person's logins: host -> username, or host -> {user, pass} to name a different secret. */
+type Person = Record<string, string | { user: string; pass?: string }>;
 
-/** The login for one host, from the WP_SITES secret. See secrets.d.ts for the shape. */
+/** The secret a host's password lives in by default: apil.au -> WP_PASS_APIL_AU. */
+export const passKey = (host: string) => "WP_PASS_" + host.replace(/\W+/g, "_").toUpperCase();
+
+/**
+ * The login for one host, for whoever is signed in. There is no shared fallback: no Access
+ * identity, or no entry for that person, means no write tools. See secrets.d.ts for the shape.
+ */
 export const credsFor = async (base: string, c: Ctx): Promise<Creds | null> => {
-  if (!c.env.WP_SITES) return null;
-  let map: SiteMap;
+  const email = await c.email();
+  if (!email || !c.env.WP_SITES) return null;
+  let people: Record<string, Person>;
   try {
-    map = JSON.parse(c.env.WP_SITES);
+    people = JSON.parse(c.env.WP_SITES);
   } catch {
     throw new Error("WP_SITES is not valid JSON. See secrets.d.ts for the expected shape.");
   }
   const host = new URL(base).hostname;
-  const email = await c.email();
-  const mine = email ? map[email] : undefined;
-  const forHost = (mine && !isCreds(mine) ? mine[host] : undefined) ?? map[host];
-  return isCreds(forHost) ? forHost : null;
+  const entry = people[email]?.[host];
+  if (!entry) return null;
+  const user = typeof entry === "string" ? entry : entry.user;
+  const key = (typeof entry === "string" ? undefined : entry.pass) ?? passKey(host);
+  const pass = (c.env as unknown as Record<string, string | undefined>)[key];
+  if (!pass)
+    throw new Error(`${host} is configured for ${user}, but the secret ${key} is not set.`);
+  return { user, pass };
 };
 
-/** Explains what to add when a write is attempted on a site with no login configured. */
-export const needsLogin = (base: string, email?: string) =>
-  `No login configured for ${new URL(base).hostname}, so this site is read-only. Add one to the ` +
-  `WP_SITES worker secret as {"${new URL(base).hostname}": {"user": "...", "pass": "..."}}` +
-  (email ? `, or nested under "${email}" to keep it to you.` : ".") +
-  " `pass` is a WordPress Application Password.";
+/** Explains what to add when a write is attempted on a site this person has no login for. */
+export const needsLogin = (base: string, email?: string) => {
+  const host = new URL(base).hostname;
+  if (!email)
+    return (
+      `Editing needs a signed-in identity and none arrived, so ${host} is read-only. ` +
+      "Turn on Cloudflare Access for this worker."
+    );
+  return (
+    `No login configured for ${host} under ${email}, so it is read-only. Add it to the WP_SITES ` +
+    `variable as {"${email}": {"${host}": "your-wp-username"}} and put that user's ` +
+    `Application Password in a secret named ${passKey(host)}.`
+  );
+};
 
 // ─── HTTP ──────────────────────────────────────────────────────────────────────────────────────
 type Json = Record<string, unknown> | unknown[];

@@ -1,15 +1,24 @@
-/** Secrets are set in the dashboard, so `wrangler types` cannot see them. Declared here instead. */
+/** Set in the dashboard, so `wrangler types` cannot see them. Declared here instead. */
 interface Env {
   /**
-   * Logins for sites you may edit, as JSON. Two shapes, both optional, mixed freely:
+   * Who may edit what, as JSON. A plain variable, not a secret, so you can read it back and
+   * edit it. Keyed by Cloudflare Access email, then by hostname, then the WordPress username:
    *
-   *   { "apil.au": { "user": "claude-mcp", "pass": "abcd efgh ijkl" } }          shared
-   *   { "you@example.com": { "apil.au": { "user": "...", "pass": "..." } } }     per person
+   *   {
+   *     "you@example.com": { "apil.au": "claude-mcp" },
+   *     "paul@example.com": { "apil.au": "paul-mcp", "example.org": "paul" }
+   *   }
    *
-   * `pass` is a WordPress Application Password (Users -> Profile -> Application Passwords).
-   * A key containing "@" is an email, anything else is a hostname, so the shapes never collide.
-   * With Cloudflare Access on, the email is the signed-in identity and cannot be spoofed.
-   * Sites absent from the secret stay read-only.
+   * The password lives in its own secret, named after the host: apil.au -> WP_PASS_APIL_AU.
+   * Where two people use different logins on one host, name the secret explicitly instead:
+   *
+   *   { "you@example.com": { "apil.au": { "user": "claude-mcp", "pass": "WP_PASS_APIL_STEF" } } }
+   *
+   * Passwords are WordPress Application Passwords (Users -> Profile -> Application Passwords).
+   * There is no shared fallback: a site nobody is listed against is read-only, and so is every
+   * site if Cloudflare Access is off, because then no identity reaches the worker.
    */
   WP_SITES?: string;
 }
+// The WP_PASS_<HOST> secrets are looked up by a name built at runtime, so they cannot be
+// declared here; credsFor reads them through a single narrow cast.

@@ -88,42 +88,41 @@ Bindings live in `wrangler.json`; secrets stay in the dashboard (`keep_vars` kee
 
 ## Editing a site
 
-Reads need nothing. Writes appear only for hosts listed in the `WP_SITES` worker secret, and every
-write tool refuses to run until the caller passes `user_confirmed: true`.
-
-```
-WP_SITES = {"apil.au": {"user": "claude-mcp", "pass": "abcd efgh ijkl mnop"}}
-```
-
-`pass` is a WordPress **Application Password** (Users -> Profile -> Application Passwords), not the
-account password. Prefer a dedicated Editor-role user: application passwords inherit every
-capability the user has and cannot be scoped.
-
-To give each person their own login, nest under their Cloudflare Access email. A key containing
-`@` is an email, anything else is a hostname, so the two shapes mix freely:
-
-```
-WP_SITES = {"you@example.com": {"apil.au": {"user": "...", "pass": "..."}}}
-```
-
-Access identity does not cross service bindings, so the worker facing the browser resolves the
-email once and passes it on with every RPC. Set the secret on `mcp-wp`, in the dashboard under
+Reads are open. Writing needs two things, and both are set in the dashboard on `mcp-wp` under
 Settings -> Variables and Secrets.
+
+**1. `WP_SITES`, a plain variable** — who may edit what. Readable and editable, because none of it
+is secret. Keyed by Cloudflare Access email, then hostname, then the WordPress username:
+
+```json
+{
+  "you@example.com": { "apil.au": "claude-mcp" },
+  "paul@example.com": { "apil.au": "paul-mcp", "example.org": "paul" }
+}
+```
+
+**2. One secret per site**, named after the host: `apil.au` -> `WP_PASS_APIL_AU`. The value is a
+WordPress **Application Password** (Users -> Profile -> Application Passwords), not the account
+password. Adding a site never means retyping the others.
+
+Where two people use different logins on the same host, name the secret explicitly:
+
+```json
+{ "you@example.com": { "apil.au": { "user": "claude-mcp", "pass": "WP_PASS_APIL_STEF" } } }
+```
+
+There is no shared fallback. A site nobody is listed against is read-only, and so is everything if
+Cloudflare Access is off, because then no identity reaches the worker. Access identity does not
+cross service bindings, so the worker facing the browser resolves the email once and passes it on
+with every RPC. Write tools simply do not appear when you have no login for a site, and every one
+of them refuses to run until the caller passes `user_confirmed: true`.
+
+Prefer a dedicated Editor-role WordPress user: application passwords inherit every capability the
+account has and cannot be scoped.
 
 Sites running **The Events Calendar** are detected from their REST namespaces and get event, venue
 and organiser tools that write through `tribe/events/v1`. The plain post tools stand aside for
 those three types, because writing them through `wp/v2` silently drops the dates, venue and cost.
-
-## mcp-fetch
-
-`fetch_url` takes a URL and a format — `auto`, `markdown`, `text` or `raw` — and returns that URL
-in that format. It does not crawl, follow attachments, read sitemaps or infer what you "really"
-wanted. Original bytes are cached in KV forever, so asking for a different format later costs
-nothing; `force` is the only thing that goes back to the origin. Everything fetched stays
-searchable through `fetch_search`, which never touches the network.
-
-PDFs and Word documents are converted with Workers AI, which needs the `AI` binding, so
-`wrangler dev` for this worker needs a `CLOUDFLARE_API_TOKEN` in the environment.
 
 ## Auth (Cloudflare Access)
 
