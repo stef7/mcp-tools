@@ -4,6 +4,8 @@ Cloudflare Workers that speak MCP, in one TypeScript repo.
 
 ```
 core/mcp.ts             shared plumbing: HTTP MCP endpoint + RPC surface + tool typing
+core/web.ts             what every worker touching the open web needs: stripHtml, a browser UA
+test/                   vitest, run against the mock rather than anyone's live site
 workers/mcp-wp/         WordPress REST API -> MCP, read and write
 workers/mcp-fetch/      fetch one URL in the format you ask for, cache it, search what you cached
 workers/mcp-toolkit/    aggregator: its own tools + every worker bound under `services`
@@ -56,6 +58,7 @@ Tools named `create_*`, `update_*` and `delete_*` change the live site. See **Ed
 ```sh
 npm install
 npm run check                                   # wrangler types + tsc, every worker
+npm test                                        # the suite, against the mock WordPress
 npm run format                                  # prettier, 100 columns
 node scripts/mock-wp.mjs 8799 &                 # a fake WordPress
 cd workers/mcp-toolkit && npx wrangler dev -c wrangler.json -c ../mcp-wp/wrangler.json

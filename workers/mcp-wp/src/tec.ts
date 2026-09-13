@@ -7,7 +7,8 @@
  * Verified against The Events Calendar 6.17.3.1 (Single_Event.php CREATE_args / EDIT_args).
  */
 import type { JSONSchema, Tools } from "../../../core/mcp";
-import { api, apiError, stripHtml, type Creds, type Schema } from "./wp";
+import { stripHtml } from "../../../core/web";
+import { api, apiError, type Creds, type Schema } from "./wp";
 
 export const NAMESPACE = "tribe/events/v1";
 /** Post types TEC owns. wp/v2 writes for these would silently drop the event meta. */

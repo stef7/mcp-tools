@@ -11,8 +11,7 @@
 import cfg from "../wrangler.json";
 import pkg from "../package.json";
 import { mcpWorker, tool } from "../../../core/mcp";
-
-const UA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36";
+import { BROWSER_UA as UA } from "../../../core/web";
 const SUBSTACK = {
   top: "https://substack.com/api/v1/top/search",
   recent: "https://substack.com/api/v1/recent/search",

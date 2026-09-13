@@ -1,5 +1,6 @@
 /** WordPress: discovery, credentials, and the read/write operations every tool boils down to. */
 import type { Ctx } from "../../../core/mcp";
+import { stripHtml, truncate } from "../../../core/web";
 
 // ─── Shapes ────────────────────────────────────────────────────────────────────────────────────
 export type PostType = {
@@ -53,30 +54,6 @@ export type WriteArgs = {
 };
 
 // ─── Text helpers ──────────────────────────────────────────────────────────────────────────────
-export const stripHtml = (html = "") =>
-  html
-    .replace(/<\/(p|div|h[1-6]|li|tr|blockquote)>/gi, "\n")
-    .replace(/<br\s*\/?>/gi, "\n")
-    .replace(/<[^>]+>/g, "")
-    .replace(/&amp;/g, "&")
-    .replace(/&lt;/g, "<")
-    .replace(/&gt;/g, ">")
-    .replace(/&quot;/g, '"')
-    .replace(/&nbsp;/g, " ")
-    .replace(/&#8217;/g, "’")
-    .replace(/&#8220;/g, "“")
-    .replace(/&#8221;/g, "”")
-    .replace(/&#8211;/g, "–")
-    .replace(/&#8212;/g, "—")
-    .replace(/&#0?39;/g, "'")
-    .replace(/&#x27;/g, "'")
-    .replace(/&#?\w+;/g, " ")
-    .replace(/[ \t]+/g, " ")
-    .replace(/\n{3,}/g, "\n\n")
-    .replace(/^\s+|\s+$/gm, "")
-    .trim();
-const truncate = (s: string, max = 800) =>
-  s.length <= max ? s : s.slice(0, max).replace(/\s+\S*$/, "") + "…";
 export const pluralise = (w: string) =>
   w.endsWith("s") ? w : w.endsWith("y") && !/[aeiou]y$/i.test(w) ? w.slice(0, -1) + "ies" : w + "s";
 const formatDate = (s = "") =>

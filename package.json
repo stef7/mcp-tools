@@ -7,9 +7,12 @@
   "scripts": {
     "check": "npm run check --workspaces",
     "format": "prettier --write .",
-    "format:check": "prettier --check ."
+    "format:check": "prettier --check .",
+    "test": "vitest run"
   },
   "devDependencies": {
-    "prettier": "^3.6.2"
+    "@cloudflare/vitest-pool-workers": "^0.9.11",
+    "prettier": "^3.6.2",
+    "vitest": "^3.2.4"
   }
 }

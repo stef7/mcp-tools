@@ -13,10 +13,7 @@
 import cfg from "../wrangler.json";
 import pkg from "../package.json";
 import { mcpWorker, tool, type Ctx } from "../../../core/mcp";
-
-const UA =
-  "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) " +
-  "Chrome/124.0 Safari/537.36";
+import { BROWSER_UA as UA, stripHtml } from "../../../core/web";
 
 const FORMATS = ["auto", "markdown", "text", "raw"] as const;
 type Format = (typeof FORMATS)[number];
@@ -99,20 +96,7 @@ const bytesFor = async (env: Env, url: string, force: boolean) => {
   return { bytes, ct, cached: false };
 };
 
-// ─── Formatting ────────────────────────────────────────────────────────────────────────────────
-const stripHtml = (html: string) =>
-  html
-    .replace(/<script[\s\S]*?<\/script>/gi, "")
-    .replace(/<style[\s\S]*?<\/style>/gi, "")
-    .replace(/<[^>]+>/g, " ")
-    .replace(/&nbsp;/g, " ")
-    .replace(/&amp;/g, "&")
-    .replace(/&lt;/g, "<")
-    .replace(/&gt;/g, ">")
-    .replace(/[ \t]+/g, " ")
-    .replace(/\n\s*\n\s*\n+/g, "\n\n")
-    .trim();
-
+// ─── Formatting ───────────────────────────────────────────────────────────────────────────────
 const toMarkdown = async (env: Env, bytes: Uint8Array, name: string) => {
   const out = await env.AI.toMarkdown([
     { name, blob: new Blob([bytes as BufferSource], { type: "application/octet-stream" }) },
