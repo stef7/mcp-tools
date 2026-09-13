@@ -178,6 +178,8 @@ export const mcpWorker = (cfg: Config) => {
       exec: this.ctx,
       email: this.#email(email),
     });
+    /** Bound workers that failed during this request, reported on the GET page. */
+    #unreachable: string[] = [];
     #remotes = () =>
       (cfg.services ?? [])
         .map((s) => ({
@@ -208,8 +210,18 @@ export const mcpWorker = (cfg: Config) => {
         (r) => !sel || sel.some((s) => (s + "_").startsWith(r.prefix)),
       );
       const onward = wantedRemotes.length ? await this.#pass(req) : req;
-      const remote = await Promise.all(wantedRemotes.map((r) => r.rpc.tools(onward)));
-      return [...own, ...remote.flat()].filter(
+      // One bound worker being down should cost its own tools, not everybody else's, so a
+      // failure is recorded for the GET page and skipped rather than thrown.
+      const asked = await Promise.allSettled(wantedRemotes.map((r) => r.rpc.tools(onward)));
+      const remote = asked.flatMap((r, i) => {
+        if (r.status === "fulfilled") return r.value;
+        const name = wantedRemotes[i]!.prefix.slice(0, -1);
+        this.#unreachable.push(
+          `${name}: ${r.reason instanceof Error ? r.reason.message : r.reason}`,
+        );
+        return [];
+      });
+      return [...own, ...remote].filter(
         (t) => !sel || sel.some((s) => t.name === s || t.name.startsWith(s + "_")),
       );
     }
@@ -245,6 +257,7 @@ export const mcpWorker = (cfg: Config) => {
           version: cfg.version,
           endpoint: "POST JSON-RPC here",
           tools,
+          ...(this.#unreachable.length ? { unreachable: this.#unreachable } : {}),
           ...(cfg.status ? { status: await cfg.status(this.#ctx(req)) } : {}),
         });
       }
