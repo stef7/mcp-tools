@@ -30,6 +30,8 @@ export const stripHtml = (html = "") =>
     .replace(/&#8221;/g, "”")
     .replace(/&#8211;/g, "–")
     .replace(/&#8212;/g, "—")
+    .replace(/&#8230;/g, "…")
+    .replace(/&#0?38;/g, "&")
     .replace(/&#0?39;/g, "'")
     .replace(/&#x27;/g, "'")
     .replace(/&#?\w+;/g, " ")

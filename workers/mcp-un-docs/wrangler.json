@@ -1,0 +1,8 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "mcp-un-docs",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-09-01",
+  "keep_vars": true,
+  "observability": { "enabled": true }
+}
