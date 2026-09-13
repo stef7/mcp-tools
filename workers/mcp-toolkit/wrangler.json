@@ -5,5 +5,13 @@
   "compatibility_date": "2026-09-01",
   "keep_vars": true,
   "observability": { "enabled": true },
-  "services": [{ "binding": "WP", "service": "mcp-wp" }]
+  "services": [
+    { "binding": "WP", "service": "mcp-wp" },
+    { "binding": "FETCH", "service": "mcp-fetch" },
+    { "binding": "ARCHIVES", "service": "mcp-archives" },
+    { "binding": "UN_DOCS", "service": "mcp-un-docs" },
+    { "binding": "ABC_SEARCH", "service": "mcp-abc-search" },
+    { "binding": "ABC_OMBUDSMAN", "service": "mcp-abc-ombudsman" },
+    { "binding": "DATA_GOV_AU", "service": "mcp-data-gov-au" }
+  ]
 }

@@ -4,9 +4,11 @@
  * Its own tools live below; every worker listed under `services` in wrangler.json is merged in
  * automatically (tool names already carry the worker's prefix, e.g. `wp_search_posts`).
  *
- *  POST /                                  every tool
+ *  POST /                                   every tool
  *  POST /?tools=wp,toolkit_substack_search  only those (a prefix or an exact tool name)
  *  POST /?wp=apil.au,crikey.com.au          params are forwarded, so mcp-wp builds site tools
+ *
+ * A bound worker that is down loses its own tools and nothing else; the GET page names it.
  */
 import cfg from "../wrangler.json";
 import pkg from "../package.json";

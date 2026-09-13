@@ -3,13 +3,18 @@
 Cloudflare Workers that speak MCP, in one TypeScript repo.
 
 ```
-core/mcp.ts             shared plumbing: HTTP MCP endpoint + RPC surface + tool typing
-core/web.ts             what every worker touching the open web needs: stripHtml, a browser UA
-test/                   vitest, run against the mock rather than anyone's live site
-workers/mcp-wp/         WordPress REST API -> MCP, read and write
-workers/mcp-fetch/      fetch one URL in the format you ask for, cache it, search what you cached
-workers/mcp-toolkit/    aggregator: its own tools + every worker bound under `services`
-scripts/mock-wp.mjs     fake WordPress for local testing
+core/mcp.ts                  shared plumbing: HTTP MCP endpoint + RPC surface + tool typing
+core/web.ts                  what a worker touching the open web needs: stripHtml, a browser UA
+test/                        vitest, run against mocks rather than anyone's live service
+workers/mcp-toolkit/         aggregator: its own tools + every worker bound under `services`
+workers/mcp-wp/              WordPress REST API -> MCP, read and write
+workers/mcp-fetch/           fetch one URL in the format you ask for, cache it, search the cache
+workers/mcp-archives/        the Wayback Machine: TimeMap, CDX, Save Page Now
+workers/mcp-un-docs/         UNISPAL, the UN Digital Library, ODS symbols, RightDocs
+workers/mcp-abc-search/      ABC's Algolia index, transcripts included
+workers/mcp-abc-ombudsman/   ABC Ombudsman complaint findings
+workers/mcp-data-gov-au/     data.gov.au over CKAN, including raw SQL
+scripts/mock-wp.mjs          fake WordPress for local testing
 ```
 
 ## A worker is a tools object
@@ -38,7 +43,9 @@ Rules the core enforces so nothing needs a mapping table:
 - `run` may return a string, any JSON value, or a full MCP result (`{ content, isError }`).
 - `tools` may be a function of the request context when tools depend on the connector URL.
 - A worker with `services` in its wrangler.json re-exports those workers' tools and routes calls by
-  prefix. The connector's query string is forwarded, so each worker reads its own params.
+  prefix. The connector's query string is forwarded, so each worker reads its own params. A bound
+  worker that is down loses its own tools and nothing else; the GET page lists what it could not
+  reach.
 
 ## Connector URLs
 
@@ -46,6 +53,7 @@ Rules the core enforces so nothing needs a mapping table:
 | ----------------------------------------------------------- | --------------------------------------------------- |
 | `mcp-toolkit…/`                                             | everything                                          |
 | `mcp-toolkit…/?tools=wp`                                    | only the `wp_*` tools                               |
+| `mcp-toolkit…/?tools=archives,un_docs`                      | two whole toolsets                                  |
 | `mcp-toolkit…/?tools=wp_get_content,toolkit_acast_episodes` | exactly those two                                   |
 | `mcp-toolkit…/?wp=apil.au`                                  | tools generated from that site (posts, events, …)   |
 | `mcp-toolkit…/?wp=apil.au,crikey.com.au`                    | one set per site, named `wp_<site slug>_<tool>`     |
@@ -84,6 +92,7 @@ keeps plain variables too, so `WP_SITES` survives a deploy).
 1. Copy `workers/mcp-wp` to `workers/mcp-<name>`; set `name` in `wrangler.json` and `package.json`.
 2. Replace `tools` in `src/index.ts`.
 3. Add `{ "binding": "<NAME>", "service": "mcp-<name>" }` to `workers/mcp-toolkit/wrangler.json`.
+   The binding name is yours; the prefix comes from `service`, so `mcp-un-docs` gives `un_docs_`.
 4. `npm run check`, commit, push to `main`; the deploy workflow picks the new folder up.
 
 ## Editing a site
