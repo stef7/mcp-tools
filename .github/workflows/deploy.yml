@@ -3,7 +3,7 @@ name: deploy
 # since every worker imports it). Run manually from the Actions tab to force all.
 on:
   push:
-    branches: [main, claude/mcp-workers-git-typescript-gh73ni]
+    branches: [main]
   workflow_dispatch:
     inputs:
       all:
