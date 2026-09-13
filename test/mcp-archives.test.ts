@@ -78,7 +78,8 @@ describe("reading CDX rows", () => {
       ["timestamp", "digest"],
       ["20200304050607", "ABC"],
     ]);
-    expect(Object.keys(r!)).toEqual(["timestamp", "digest"]); // no url: `original` was not asked for
+    // No `url` either: it needs `original`, which this query did not ask for.
+    expect(Object.keys(r!)).toEqual(["timestamp", "digest"]);
   });
 
   it("returns nothing for a header-only or empty response", () => {
