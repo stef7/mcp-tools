@@ -172,6 +172,11 @@ of them refuses to run until the caller passes `user_confirmed: true`.
 Prefer a dedicated Editor-role WordPress user: application passwords inherit every capability the
 account has and cannot be scoped.
 
+A `get_*` tool returns the post body **exactly as WordPress stores it**, markup and all, because
+reading one is usually the first half of editing it — stripping the HTML and writing it back
+would replace the blocks, links and embeds with plain text. Search results still strip, since a
+400-character preview of raw HTML is mostly angle brackets.
+
 Sites running **The Events Calendar** are detected from their REST namespaces and get event, venue
 and organiser tools that write through `tribe/events/v1`. The plain post tools stand aside for
 those three types, because writing them through `wp/v2` silently drops the dates, venue and cost.

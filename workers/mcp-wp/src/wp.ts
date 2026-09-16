@@ -486,6 +486,14 @@ export const search = async (args: SearchArgs, type: PostType, s: Schema, creds:
   return out;
 };
 
+/**
+ * One item, with its body exactly as WordPress stores it.
+ *
+ * The body is deliberately NOT stripped. Reading a post is usually the first half of editing it,
+ * and stripping the markup would mean writing back plain text over the blocks, links, embeds and
+ * shortcodes that were there — destroying the post in the name of making it readable. Search
+ * results still strip, because a 400-character preview of raw HTML is mostly angle brackets.
+ */
 export const get = async (id: number, type: PostType, s: Schema, creds: Creds | null) => {
   const { body } = await call(`${s.apiBase}/${type.rest_base}/${id}`, creds);
   const item = (body ?? {}) as Item;
@@ -494,7 +502,7 @@ export const get = async (id: number, type: PostType, s: Schema, creds: Creds | 
   out += item.status ? ` | ${item.status}\n` : "\n";
   if (item.link) out += `URL: ${item.link}\n`;
   if (termLabels(item)) out += `${termLabels(item)}\n`;
-  out += `\n---\n\n${stripHtml(item.content?.rendered)}`;
+  out += `\n---\n\n${item.content?.rendered ?? ""}`;
   if (out.length > 100_000) {
     out =
       out.slice(0, 100_000) +

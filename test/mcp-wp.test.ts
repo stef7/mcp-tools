@@ -269,3 +269,25 @@ describe("the X-WP-Site header", () => {
     expect(specs.map((t) => t.name)).toContain("wp_search_posts");
   });
 });
+
+describe("reading a post body", () => {
+  it("returns the markup exactly as WordPress stores it", async () => {
+    // Reading is the first half of editing: strip the HTML here and writing it back would
+    // replace the blocks, links and embeds with plain text.
+    const out = await call("wp_get_posts", { id: 1 }, site());
+    expect(out).toContain("<p>Body &amp; text</p>");
+    expect(out).toMatch(/<h1>.*<\/h1>/);
+  });
+
+  it("still strips the preview in a list of results, where markup would be noise", async () => {
+    const out = await call("wp_search_posts", { query: "post" }, site());
+    expect(out).not.toContain("<p>");
+    expect(out).toContain("Excerpt for \u201c"); // entities decoded, tags gone
+  });
+
+  it("leaves the heading line free of markup either way", async () => {
+    const first = (await call("wp_get_posts", { id: 1 }, site())).split("\n")[0]!;
+    expect(first.startsWith("# ")).toBe(true);
+    expect(first).not.toContain("<");
+  });
+});
