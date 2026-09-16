@@ -4,9 +4,9 @@
  * Its own tools live below; every worker listed under `services` in wrangler.json is merged in
  * automatically (tool names already carry the worker's prefix, e.g. `wp_search_posts`).
  *
- *  POST /                                   every tool
- *  POST /?tools=wp,toolkit_substack_search  only those (a prefix or an exact tool name)
- *  POST /?wp=apil.au,crikey.com.au          params are forwarded, so mcp-wp builds site tools
+ *  POST /                           every tool
+ *  POST /?tools=wp,substack_search  only those (a prefix or an exact tool name)
+ *  POST /?wp=apil.au,crikey.com.au  params are forwarded, so mcp-wp builds site tools
  *
  * A bound worker that is down loses its own tools and nothing else; the GET page names it.
  */
@@ -24,6 +24,9 @@ const SUBSTACK = {
 
 export default mcpWorker({
   ...cfg,
+  // Its own three tools are not a "toolkit" of anything, so they carry no prefix. Everything
+  // bound under `services` still arrives with its own.
+  prefix: "",
   version: pkg.version,
   tools: {
     acast_episodes: tool({

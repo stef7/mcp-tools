@@ -6,7 +6,7 @@
  *
  * Every tool name is prefixed with the worker's own name (`mcp-wp` -> `wp_`). A worker that
  * lists `services` in its wrangler config re-exports the tools of each bound worker, routing
- * calls by that prefix. `?tools=wp,toolkit_acast_episodes` on the connector URL narrows the list
+ * calls by that prefix. `?tools=wp,acast_episodes` on the connector URL narrows the list
  * (an entry is a prefix or an exact tool name). The whole query string is forwarded to bound
  * workers, so each can read its own params (mcp-wp reads `?wp=site1,site2`).
  */
@@ -106,6 +106,13 @@ type Info = {
 
 type Config = {
   name: string;
+  /**
+   * What every tool name here starts with. Defaults to the worker's own name (`mcp-wp` gives
+   * `wp_`). Set it to "" for a worker whose tools should read as their own thing rather than as
+   * part of a set — mcp-toolkit does, so its local tools are `acast_episodes`, not
+   * `toolkit_acast_episodes`. Bound workers keep their own prefixes either way.
+   */
+  prefix?: string;
   version?: string;
   services?: { binding: string; service: string }[];
   tools: Tools | ((c: Ctx) => Tools | Promise<Tools>);
@@ -160,7 +167,7 @@ const withConfirm = (input: JSONSchema = { type: "object", properties: {} }): JS
 });
 
 export const mcpWorker = (cfg: Config) => {
-  const prefix = prefixOf(cfg.name);
+  const prefix = cfg.prefix ?? prefixOf(cfg.name);
   const local = (c: Ctx) => (typeof cfg.tools === "function" ? cfg.tools(c) : cfg.tools);
 
   return class extends WorkerEntrypoint<Env> {
@@ -211,8 +218,10 @@ export const mcpWorker = (cfg: Config) => {
       );
       const onward = wantedRemotes.length ? await this.#pass(req) : req;
       // One bound worker being down should cost its own tools, not everybody else's, so a
-      // failure is recorded for the GET page and skipped rather than thrown.
-      const asked = await Promise.allSettled(wantedRemotes.map((r) => r.rpc.tools(onward)));
+      // failure is recorded for the GET page and skipped rather than thrown. The callback is
+      // async so that a binding that is missing outright throws into the promise, not out of
+      // the map.
+      const asked = await Promise.allSettled(wantedRemotes.map(async (r) => r.rpc.tools(onward)));
       const remote = asked.flatMap((r, i) => {
         if (r.status === "fulfilled") return r.value;
         const name = wantedRemotes[i]!.prefix.slice(0, -1);

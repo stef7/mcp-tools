@@ -40,6 +40,7 @@ export default mcpWorker({
 Rules the core enforces so nothing needs a mapping table:
 
 - The object key is the tool name. Exposed as `<worker>_<key>`: worker `mcp-wp` -> `wp_search_posts`.
+  A worker can set `prefix: ""` to drop that, as mcp-toolkit does for its own three tools.
 - `run` may return a string, any JSON value, or a full MCP result (`{ content, isError }`).
 - `tools` may be a function of the request context when tools depend on the connector URL.
 - A worker with `services` in its wrangler.json re-exports those workers' tools and routes calls by
@@ -49,15 +50,15 @@ Rules the core enforces so nothing needs a mapping table:
 
 ## Connector URLs
 
-| URL                                                         | You get                                             |
-| ----------------------------------------------------------- | --------------------------------------------------- |
-| `mcp-toolkit…/`                                             | everything                                          |
-| `mcp-toolkit…/?tools=wp`                                    | only the `wp_*` tools                               |
-| `mcp-toolkit…/?tools=archives,un_docs`                      | two whole toolsets                                  |
-| `mcp-toolkit…/?tools=wp_get_content,toolkit_acast_episodes` | exactly those two                                   |
-| `mcp-toolkit…/?wp=apil.au`                                  | tools generated from that site (posts, events, …)   |
-| `mcp-toolkit…/?wp=apil.au,crikey.com.au`                    | one set per site, named `wp_<site slug>_<tool>`     |
-| `mcp-wp…/?wp=apil.au&title=APIL`                            | the wp worker alone (`?site=` still works as alias) |
+| URL                                                 | You get                                             |
+| --------------------------------------------------- | --------------------------------------------------- |
+| `mcp-toolkit…/`                                     | everything                                          |
+| `mcp-toolkit…/?tools=wp`                            | only the `wp_*` tools                               |
+| `mcp-toolkit…/?tools=archives,un_docs`              | two whole toolsets                                  |
+| `mcp-toolkit…/?tools=wp_get_content,acast_episodes` | exactly those two                                   |
+| `mcp-toolkit…/?wp=apil.au`                          | tools generated from that site (posts, events, …)   |
+| `mcp-toolkit…/?wp=apil.au,crikey.com.au`            | one set per site, named `wp_<site slug>_<tool>`     |
+| `mcp-wp…/?wp=apil.au&title=APIL`                    | the wp worker alone (`?site=` still works as alias) |
 
 Tools named `create_*`, `update_*` and `delete_*` change the live site. See **Editing a site**.
 
