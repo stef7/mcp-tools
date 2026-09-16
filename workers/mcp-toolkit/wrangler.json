@@ -13,6 +13,7 @@
     { "binding": "ABC_SEARCH", "service": "mcp-abc-search" },
     { "binding": "ABC_OMBUDSMAN", "service": "mcp-abc-ombudsman" },
     { "binding": "DATA_GOV_AU", "service": "mcp-data-gov-au" },
-    { "binding": "GHOST", "service": "mcp-ghost" }
+    { "binding": "GHOST", "service": "mcp-ghost" },
+    { "binding": "APIFY", "service": "mcp-apify" }
   ]
 }

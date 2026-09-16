@@ -15,6 +15,7 @@ workers/mcp-abc-search/      ABC's Algolia index, transcripts included
 workers/mcp-abc-ombudsman/   ABC Ombudsman complaint findings
 workers/mcp-data-gov-au/     data.gov.au over CKAN, including raw SQL
 workers/mcp-ghost/           Ghost publications, with member sign-in for paid posts
+workers/mcp-apify/           what Apify is costing you, by service and by Actor
 scripts/mock-wp.mjs          fake WordPress for local testing
 scripts/mock-ghost.mjs       fake Ghost, including the magic-link sign-in
 ```
