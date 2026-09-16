@@ -12,6 +12,7 @@
 import cfg from "../wrangler.json";
 import pkg from "../package.json";
 import { mcpWorker, tool } from "../../../core/mcp";
+import { ICONS } from "../../../core/icons";
 
 const API = "https://api.apify.com/v2";
 
@@ -223,6 +224,7 @@ export const formatByActor = (rows: ActorSpend[], names: Record<string, string>,
 export default mcpWorker({
   ...cfg,
   version: pkg.version,
+  icon: ICONS.apify,
   info: () => ({
     title: "Apify account",
     description: "What Apify is costing you this cycle, and how close you are to your limits.",

@@ -15,24 +15,9 @@
 import cfg from "../wrangler.json";
 import pkg from "../package.json";
 import { mcpWorker, type Ctx } from "../../../core/mcp";
+import { ICONS } from "../../../core/icons";
 import { genericTools, siteTools } from "./tools";
 import { credsFor, discoverSite, loginReport, siteUrl, slug, usable } from "./wp";
-
-/**
- * Served inline rather than linked. The protocol asks that icon URLs come from the same domain as
- * the server and that clients need only support png, jpeg, svg and webp — a site's own favicon.ico
- * fails both tests. A data: URI is explicitly allowed and sidesteps them.
- */
-const ICON = {
-  src:
-    "data:image/svg+xml;base64," +
-    "PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAyNCAyNCI+" +
-    "PHJlY3Qgd2lkdGg9IjI0IiBoZWlnaHQ9IjI0IiByeD0iNSIgZmlsbD0iIzIxNzU5YiIvPjxwYXRoIGZp" +
-    "bGw9IiNmZmYiIGQ9Ik00IDhoMi4zbDEuNiA2LjRMOS42IDhoMS44bDEuNyA2LjRMMTQuNyA4SDE3bC0y" +
-    "LjggOWgtMmwtMS43LTYuMkw4LjggMTdoLTJ6Ii8+PC9zdmc+",
-  mimeType: "image/svg+xml",
-  sizes: ["any"],
-};
 
 /**
  * Which sites this connector is for: the `X-WP-Site` header first, then `?wp=` (or `?site=`).
@@ -47,6 +32,7 @@ const sitesOf = ({ params, headers }: Ctx) =>
 export default mcpWorker({
   ...cfg,
   version: pkg.version,
+  icon: ICONS.wordpress,
   confirmNote: "Changes the site.",
   async tools(c) {
     const sites = sitesOf(c);
@@ -78,7 +64,6 @@ export default mcpWorker({
         description:
           "Query any WordPress site's REST API. Use discover_site to probe a site, then " +
           "search_content, get_content, and list_site_terms to retrieve content.",
-        icons: [ICON],
         instructions:
           "WordPress Explorer: query any WordPress site. Start with discover_site(url) to probe " +
           "a site, then use search_content, get_content, and list_site_terms. The REST API often " +
@@ -90,8 +75,8 @@ export default mcpWorker({
     return {
       title: p.get("title") ?? hosts,
       description: p.get("description") ?? sites.join(", "),
-      // A site may name its own, but ours goes first: it is same-domain and a supported type.
-      icons: [ICON, ...(p.get("icon") ? [{ src: p.get("icon")! }] : [])],
+      // Ours goes first: a site's own favicon is usually an .ico, which no client must render.
+      icons: [ICONS.wordpress, ...(p.get("icon") ? [{ src: p.get("icon")! }] : [])],
       websiteUrl: sites[0]!,
       instructions:
         `Access to ${hosts} via the WordPress REST API. Use search and get tools to find ` +

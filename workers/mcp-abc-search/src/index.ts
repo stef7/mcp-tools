@@ -11,6 +11,7 @@
 import cfg from "../wrangler.json";
 import pkg from "../package.json";
 import { mcpWorker, tool } from "../../../core/mcp";
+import { ICONS } from "../../../core/icons";
 import { filtersFor, formatFacets, formatResults, formatSchema, search } from "./abc";
 
 const DATES = {
@@ -46,6 +47,7 @@ const INCLUDE_TRANSCRIPT = {
 export default mcpWorker({
   ...cfg,
   version: pkg.version,
+  icon: ICONS.abcSearch,
   info: () => ({
     title: "ABC Search",
     description: "Search ABC programs and articles, transcripts included.",

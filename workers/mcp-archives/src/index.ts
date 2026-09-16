@@ -13,6 +13,7 @@
 import cfg from "../wrangler.json";
 import pkg from "../package.json";
 import { mcpWorker, tool } from "../../../core/mcp";
+import { ICONS } from "../../../core/icons";
 import { cdx, cdxOne, rowsOf, wbDate, TIMEMAP, UA, type Row } from "./cdx";
 
 /** Tool arguments are snake_case; CDX wants camelCase. Only the names that actually differ. */
@@ -60,6 +61,7 @@ const snapshot = (row: Row) => ({
 export default mcpWorker({
   ...cfg,
   version: pkg.version,
+  icon: ICONS.archives,
   info: () => ({
     title: "Wayback Machine",
     description: "Find, read and create Internet Archive snapshots.",

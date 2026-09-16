@@ -11,6 +11,7 @@
  * workers, so each can read its own params (mcp-wp reads `?wp=site1,site2`).
  */
 import { WorkerEntrypoint } from "cloudflare:workers";
+import type { Icon } from "./icons";
 
 // ─── JSON Schema -> TypeScript, just the subset MCP tools use ──────────────────────────────────
 export type JSONSchema = {
@@ -99,11 +100,11 @@ export type Spec = {
   description: string;
   inputSchema: JSONSchema;
   annotations: Annotations;
+  icons?: Icon[];
 };
 export type Result = { content: { type: "text"; text: string }[]; isError?: boolean };
 
 /** `initialize` extras: everything but `instructions` goes into `serverInfo`. */
-type Icon = { src: string; mimeType?: string; sizes?: string[]; theme?: "light" | "dark" };
 type Info = {
   title?: string;
   description?: string;
@@ -123,6 +124,12 @@ type Config = {
    */
   prefix?: string;
   version?: string;
+  /**
+   * This worker's mark, from core/icons.ts. It goes on the server *and* on every one of its
+   * tools, which is what makes a toolkit legible: tools arrive over RPC already carrying the
+   * icon of the worker they came from, so nothing here has to map a tool back to its owner.
+   */
+  icon?: Icon;
   services?: { binding: string; service: string }[];
   tools: Tools | ((c: Ctx) => Tools | Promise<Tools>);
   info?: (c: Ctx) => Info;
@@ -168,7 +175,21 @@ type Remote = {
   tools(req: Call): Promise<Spec[]>;
   call(name: string, args: unknown, req: Call): Promise<Result>;
 };
-type Msg = { id?: unknown; method?: string; params?: { name?: string; arguments?: unknown } };
+type Msg = {
+  id?: unknown;
+  method?: string;
+  params?: { name?: string; arguments?: unknown; protocolVersion?: string };
+};
+
+/**
+ * Newest first. Answer with the revision the client asked for when we know it, as the protocol
+ * requires, and otherwise with the newest we speak. This is what icons hang on: `icons`,
+ * `websiteUrl` and a server `description` only exist from 2025-11-25, so a server that always
+ * said "2025-06-18" — as this one used to — was sending them under a revision that has no such
+ * fields, and a client had every reason to drop them.
+ */
+const VERSIONS = ["2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05"];
+const speak = (asked?: string) => (asked && VERSIONS.includes(asked) ? asked : VERSIONS[0]!);
 /** `ctx.access` exists only when Cloudflare Access authenticated this very invocation. */
 type WithAccess = { access?: { getIdentity(): Promise<{ email?: string } | null> } };
 
@@ -254,6 +275,7 @@ export const mcpWorker = (cfg: Config) => {
         inputSchema: t.confirm
           ? withConfirm(t.input)
           : (t.input ?? { type: "object", properties: {} }),
+        ...(cfg.icon && { icons: [cfg.icon] }),
       }));
       const wantedRemotes = this.#remotes().filter(
         (r) => !sel || sel.some((s) => (s + "_").startsWith(r.prefix)),
@@ -339,9 +361,14 @@ export const mcpWorker = (cfg: Config) => {
           case "initialize": {
             const { instructions, ...info } = cfg.info?.(this.#ctx(req)) ?? {};
             return ok({
-              protocolVersion: "2025-06-18",
+              protocolVersion: speak(params?.protocolVersion),
               capabilities: { tools: {} },
-              serverInfo: { name: cfg.name, version: cfg.version ?? "0.0.0", ...info },
+              serverInfo: {
+                name: cfg.name,
+                version: cfg.version ?? "0.0.0",
+                ...(cfg.icon && { icons: [cfg.icon] }),
+                ...info,
+              },
               ...(instructions && { instructions }),
             });
           }

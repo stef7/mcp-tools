@@ -13,6 +13,7 @@
 import cfg from "../wrangler.json";
 import pkg from "../package.json";
 import { mcpWorker, tool, type Ctx } from "../../../core/mcp";
+import { ICONS } from "../../../core/icons";
 import { BROWSER_UA as UA, stripHtml } from "../../../core/web";
 
 const FORMATS = ["auto", "markdown", "text", "raw"] as const;
@@ -201,6 +202,7 @@ const schema = async (c: Ctx) => {
 export default mcpWorker({
   ...cfg,
   version: pkg.version,
+  icon: ICONS.fetch,
   tools: {
     url: tool({
       description:

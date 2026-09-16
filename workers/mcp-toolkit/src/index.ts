@@ -13,6 +13,7 @@
 import cfg from "../wrangler.json";
 import pkg from "../package.json";
 import { mcpWorker, tool } from "../../../core/mcp";
+import { ICONS } from "../../../core/icons";
 import { BROWSER_UA as UA } from "../../../core/web";
 const SUBSTACK = {
   top: "https://substack.com/api/v1/top/search",
@@ -28,6 +29,7 @@ export default mcpWorker({
   // bound under `services` still arrives with its own.
   prefix: "",
   version: pkg.version,
+  icon: ICONS.toolkit,
   tools: {
     acast_episodes: tool({
       description:
