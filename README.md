@@ -95,9 +95,30 @@ keeps plain variables too, so `WP_SITES` survives a deploy).
 
 1. Copy `workers/mcp-wp` to `workers/mcp-<name>`; set `name` in `wrangler.json` and `package.json`.
 2. Replace `tools` in `src/index.ts`.
-3. Add `{ "binding": "<NAME>", "service": "mcp-<name>" }` to `workers/mcp-toolkit/wrangler.json`.
+3. Add a mark to `core/icons.ts` and point `icon:` at it.
+4. Add `{ "binding": "<NAME>", "service": "mcp-<name>" }` to `workers/mcp-toolkit/wrangler.json`.
    The binding name is yours; the prefix comes from `service`, so `mcp-un-docs` gives `un_docs_`.
-4. `npm run check`, commit, push to `main`; the deploy workflow picks the new folder up.
+5. `npm run check`, commit, push to `main`; the deploy workflow picks the new folder up.
+
+## Icons
+
+`core/icons.ts` holds one mark per worker: a coloured rounded square with a white glyph, built by
+`mark("#colour", "AB")`. A worker names one as `icon:`, and core puts it on the server _and_ on
+each of that worker's tools — so a tool arrives at the toolkit already carrying the icon of the
+worker it came from, and a forty-tool list says at a glance what belongs to what.
+
+They are inline `data:` URIs rather than links. The protocol would rather an icon URL sat on the
+server's own domain, but these servers are behind Access, which would answer a client's request
+for an icon URL with a login page. That also rules out a site's own `favicon.ico`: clients are
+only asked to render png, jpeg, svg and webp.
+
+Keep them small — forty tools pay for forty copies. `mcp-wp` is the exception: its _server_ icon
+is the real WordPress mark, three times the size, because that is the one a person sees when
+picking a connector. Its tools still carry the drawn one.
+
+Icons only reach a client that speaks **2025-11-25** or later; so do `websiteUrl` and the server
+`description`. Core answers `initialize` with the revision the client asked for, and otherwise
+with the newest it speaks.
 
 ## One public door
 
