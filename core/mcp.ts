@@ -6,9 +6,14 @@
  *
  * Every tool name is prefixed with the worker's own name (`mcp-wp` -> `wp_`). A worker that
  * lists `services` in its wrangler config re-exports the tools of each bound worker, routing
- * calls by that prefix. `?tools=wp,toolkit_acast_episodes` on the connector URL narrows the list
- * (an entry is a prefix or an exact tool name). The whole query string is forwarded to bound
- * workers, so each can read its own params (mcp-wp reads `?wp=site1,site2`).
+ * calls by that prefix. The whole query string is forwarded to bound workers, so each can read
+ * its own params (mcp-wp reads `?wp=site1,site2`). Two params narrow what a connector offers:
+ *
+ *   ?tools=wp,toolkit_acast_episodes   only these (each entry a name prefix or an exact name)
+ *   ?write=off                         hide every tool that changes anything, and refuse them
+ *
+ * `?write=off` reads each tool's own `confirm` flag rather than its name, so a tool is hidden
+ * because it mutates, not because of what it happens to be called.
  */
 import { WorkerEntrypoint } from "cloudflare:workers";
 
@@ -147,6 +152,8 @@ const err = (message: string): Result => ({
   isError: true,
 });
 const isResult = (v: unknown): v is Result => typeof v === "object" && v !== null && "content" in v;
+/** `?write=off` on the connector URL: offer and accept only tools that change nothing. */
+const readOnly = (c: Ctx) => c.params.get("write") === "off";
 
 const CONFIRM = {
   type: "boolean",
@@ -192,7 +199,8 @@ export const mcpWorker = (cfg: Config) => {
     async tools(req: Call = {}): Promise<Spec[]> {
       const c = this.#ctx(req);
       const sel = c.params.get("tools")?.split(",");
-      const own = Object.entries(await local(c)).map(([k, t]) => ({
+      const entries = Object.entries(await local(c)).filter(([, t]) => !(t.confirm && readOnly(c)));
+      const own = entries.map(([k, t]) => ({
         name: prefix + k,
         description: t.confirm ? `${t.description} Changes the site.` : t.description,
         // Clients group tools by these, so they follow `confirm` rather than being restated.
@@ -230,6 +238,9 @@ export const mcpWorker = (cfg: Config) => {
       const c = this.#ctx(req);
       const own = name.startsWith(prefix) && (await local(c))[name.slice(prefix.length)];
       if (own) {
+        if (own.confirm && readOnly(c)) {
+          return err(`${name} changes things, and this connector is read-only (?write=off).`);
+        }
         if (own.confirm && (args as { user_confirmed?: unknown })?.user_confirmed !== true) {
           return err(`${name} changes the site. Confirm with the user, then pass user_confirmed.`);
         }
