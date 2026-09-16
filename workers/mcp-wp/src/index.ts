@@ -64,6 +64,7 @@ export default mcpWorker({
         description:
           "Query any WordPress site's REST API. Use discover_site to probe a site, then " +
           "search_content, get_content, and list_site_terms to retrieve content.",
+        icons: [ICONS.wordpressLogo],
         instructions:
           "WordPress Explorer: query any WordPress site. Start with discover_site(url) to probe " +
           "a site, then use search_content, get_content, and list_site_terms. The REST API often " +
@@ -76,7 +77,7 @@ export default mcpWorker({
       title: p.get("title") ?? hosts,
       description: p.get("description") ?? sites.join(", "),
       // Ours goes first: a site's own favicon is usually an .ico, which no client must render.
-      icons: [ICONS.wordpress, ...(p.get("icon") ? [{ src: p.get("icon")! }] : [])],
+      icons: [ICONS.wordpressLogo, ...(p.get("icon") ? [{ src: p.get("icon")! }] : [])],
       websiteUrl: sites[0]!,
       instructions:
         `Access to ${hosts} via the WordPress REST API. Use search and get tools to find ` +
