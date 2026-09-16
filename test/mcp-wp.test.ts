@@ -8,7 +8,7 @@
 import { SELF, createExecutionContext, env } from "cloudflare:test";
 import { describe, expect, inject, it } from "vitest";
 import Worker from "../workers/mcp-wp/src/index";
-import { authHeader } from "../workers/mcp-wp/src/wp";
+import { authFrom } from "../workers/mcp-wp/src/wp";
 
 const base = inject("mockBase");
 const ME = "me@example.com";
@@ -182,29 +182,35 @@ describe("the X-WP-Auth header", () => {
   const HDR = { "x-wp-auth": "hdr-user:abcd EFGH 1234" };
   const blog = site(`${base}/blog`);
 
-  it("parses the bare form, for whatever site the connector covers", () => {
-    expect(authHeader("u:p", "apil.au")).toEqual({ user: "u", pass: "p" });
+  it("takes a bare entry as the login for whatever site the connector covers", () => {
+    expect(authFrom({ "x-wp-auth": "u:p" }, "apil.au")).toEqual({ user: "u", pass: "p" });
   });
 
-  it("keeps a password containing spaces or colons intact", () => {
-    // WordPress prints application passwords in groups of four, separated by spaces.
-    expect(authHeader("u:abcd efgh ijkl", "x")).toEqual({ user: "u", pass: "abcd efgh ijkl" });
-    expect(authHeader("u:a:b:c", "x")).toEqual({ user: "u", pass: "a:b:c" });
+  it("keeps a password containing the separators a single header would have needed", () => {
+    // One entry per header is the point: nothing here has to be escaped or avoided.
+    for (const pass of ["a;b", "a,b", "a=b", "a:b", "abcd efgh ijkl"])
+      expect(authFrom({ "x-wp-auth": `u:${pass}` }, "x")).toEqual({ user: "u", pass });
   });
 
-  it("matches the named form only against its own host", () => {
-    const many = "apil.au=a:1; crikey.com.au=b:2";
-    expect(authHeader(many, "apil.au")).toEqual({ user: "a", pass: "1" });
-    expect(authHeader(many, "crikey.com.au")).toEqual({ user: "b", pass: "2" });
-    expect(authHeader(many, "example.org")).toBeNull();
+  it("gives each site its own header, and matches on the host", () => {
+    const many = { "x-wp-auth-a": "apil.au=a:1", "x-wp-auth-b": "crikey.com.au=b:2" };
+    expect(authFrom(many, "apil.au")).toEqual({ user: "a", pass: "1" });
+    expect(authFrom(many, "crikey.com.au")).toEqual({ user: "b", pass: "2" });
+    expect(authFrom(many, "example.org")).toBeNull();
   });
 
-  it("ignores anything it cannot read rather than guessing", () => {
-    expect(authHeader(undefined, "x")).toBeNull();
-    expect(authHeader("", "x")).toBeNull();
-    expect(authHeader("no-colon-here", "x")).toBeNull();
-    expect(authHeader(":no-user", "x")).toBeNull();
-    expect(authHeader("no-pass:", "x")).toBeNull();
+  it("lets a header naming the host beat a bare one, so a default plus an exception works", () => {
+    const both = { "x-wp-auth": "default:pw", "x-wp-auth-apil": "apil.au=special:pw2" };
+    expect(authFrom(both, "apil.au")).toEqual({ user: "special", pass: "pw2" });
+    expect(authFrom(both, "elsewhere.org")).toEqual({ user: "default", pass: "pw" });
+  });
+
+  it("ignores headers that are not logins, and entries it cannot read", () => {
+    expect(authFrom({}, "x")).toBeNull();
+    expect(authFrom({ "x-wp-site": "apil.au" }, "x")).toBeNull();
+    expect(authFrom({ "x-wp-auth": "no-colon-here" }, "x")).toBeNull();
+    expect(authFrom({ "x-wp-auth": ":no-user" }, "x")).toBeNull();
+    expect(authFrom({ "x-wp-auth": "no-pass:" }, "x")).toBeNull();
   });
 
   it("unlocks writes with no Access identity at all", async () => {
@@ -238,17 +244,17 @@ describe("the X-WP-Auth header", () => {
 
   it("is reported by login_status without the password appearing", async () => {
     const out = await call("wp_login_status", {}, site(), ME, HDR);
-    expect(out).toContain("sent, and used — user hdr-user");
+    expect(out).toContain("1 sent, one used — user hdr-user");
     expect(out).toContain("the header wins");
     expect(out).not.toContain("abcd EFGH 1234");
     expect(out).not.toContain("abcdEFGH1234");
   });
 
-  it("says what is wrong when the header names a different host", async () => {
+  it("says what is wrong when every header names a different host", async () => {
     const out = await call("wp_login_status", {}, site(), ME, {
       "x-wp-auth": "somewhere.else=u:p",
     });
-    expect(out).toContain("nothing in it matched");
+    expect(out).toContain("none of them for");
     expect(out).toContain("verdict: editable"); // WP_SITES still covers this one
   });
 });

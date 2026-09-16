@@ -38,8 +38,8 @@ const ICON = {
  * Which sites this connector is for: the `X-WP-Site` header first, then `?wp=` (or `?site=`).
  * The header exists so a connector can be configured entirely in Claude, with no URL to edit.
  */
-const sitesOf = ({ params, header }: Ctx) =>
-  (header("x-wp-site") ?? params.get("wp") ?? params.get("site") ?? "")
+const sitesOf = ({ params, headers }: Ctx) =>
+  (headers["x-wp-site"] ?? params.get("wp") ?? params.get("site") ?? "")
     .split(",")
     .filter(Boolean)
     .map(siteUrl);

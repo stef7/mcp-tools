@@ -60,10 +60,10 @@ export type Ctx = {
   exec: ExecutionContext;
   email(): Promise<string | undefined>;
   /**
-   * A custom header the connector sent, lower-cased name. Connectors allow a handful, which is
-   * how someone supplies a credential of their own without anything being stored here.
+   * The custom headers the connector sent, by lower-cased name. Connectors allow a handful, which
+   * is how someone supplies a credential of their own without anything being stored here.
    */
-  header(name: string): string | undefined;
+  headers: Record<string, string>;
 };
 
 type Annotations = {
@@ -225,7 +225,7 @@ export const mcpWorker = (cfg: Config) => {
       params: new URLSearchParams(search),
       exec: this.ctx,
       email: this.#email(email),
-      header: (name) => headers?.[name.toLowerCase()],
+      headers: headers ?? {},
     });
     /** Bound workers that failed during this request, reported on the GET page. */
     #unreachable: string[] = [];
