@@ -74,8 +74,12 @@ export type Tool<S extends JSONSchema = JSONSchema> = {
   /** JSON Schema of the arguments. Omit for "no arguments". */
   input?: S;
   annotations?: Annotations;
-  /** Anything that changes the world: adds a required `user_confirmed` and enforces it. */
-  confirm?: boolean;
+  /**
+   * Anything that changes the world: adds a required `user_confirmed`, enforces it, and says so
+   * in the description. `true` uses the worker's `confirmNote`; a string says it for this tool,
+   * which is worth doing when "changes data" undersells what will happen.
+   */
+  confirm?: boolean | string;
   run(args: FromSchema<S>, c: Ctx): unknown;
 };
 
@@ -117,6 +121,8 @@ type Config = {
   services?: { binding: string; service: string }[];
   tools: Tools | ((c: Ctx) => Tools | Promise<Tools>);
   info?: (c: Ctx) => Info;
+  /** What `confirm: true` appends to a description. Per-tool strings override it. */
+  confirmNote?: string;
   /** Extra detail for the GET page: whatever a human opening the URL in a browser needs. */
   status?: (c: Ctx) => unknown | Promise<unknown>;
 };
@@ -154,6 +160,7 @@ const err = (message: string): Result => ({
   isError: true,
 });
 const isResult = (v: unknown): v is Result => typeof v === "object" && v !== null && "content" in v;
+const DEFAULT_NOTE = "Changes data rather than only reading it.";
 
 const CONFIRM = {
   type: "boolean",
@@ -168,6 +175,9 @@ const withConfirm = (input: JSONSchema = { type: "object", properties: {} }): JS
 
 export const mcpWorker = (cfg: Config) => {
   const prefix = cfg.prefix ?? prefixOf(cfg.name);
+  /** What this tool warns about, in the description and again if it is called unconfirmed. */
+  const note = (confirm: boolean | string | undefined) =>
+    typeof confirm === "string" ? confirm : (cfg.confirmNote ?? DEFAULT_NOTE);
   const local = (c: Ctx) => (typeof cfg.tools === "function" ? cfg.tools(c) : cfg.tools);
 
   return class extends WorkerEntrypoint<Env> {
@@ -201,7 +211,7 @@ export const mcpWorker = (cfg: Config) => {
       const sel = c.params.get("tools")?.split(",");
       const own = Object.entries(await local(c)).map(([k, t]) => ({
         name: prefix + k,
-        description: t.confirm ? `${t.description} Changes the site.` : t.description,
+        description: t.confirm ? `${t.description} ${note(t.confirm)}` : t.description,
         // Clients group tools by these, so they follow `confirm` rather than being restated.
         annotations: {
           readOnlyHint: !t.confirm,
@@ -240,7 +250,8 @@ export const mcpWorker = (cfg: Config) => {
       const own = name.startsWith(prefix) && (await local(c))[name.slice(prefix.length)];
       if (own) {
         if (own.confirm && (args as { user_confirmed?: unknown })?.user_confirmed !== true) {
-          return err(`${name} changes the site. Confirm with the user, then pass user_confirmed.`);
+          const why = note(own.confirm);
+          return err(`${name}: ${why} Confirm with the user, then pass user_confirmed.`);
         }
         try {
           const v = await own.run(args as never, c);

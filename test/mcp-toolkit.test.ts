@@ -36,7 +36,7 @@ describe("its own tools", () => {
 
 describe("a bound worker it cannot reach", () => {
   it("costs that worker's tools and nothing else", async () => {
-    expect((await tools()).length).toBe(3); // seven services are bound, none of them resolvable
+    expect((await tools()).length).toBe(3); // eight services are bound, none of them resolvable
   });
 
   it("is named on the GET page rather than failing the whole request", async () => {
@@ -51,6 +51,7 @@ describe("a bound worker it cannot reach", () => {
       "archives",
       "data_gov_au",
       "fetch",
+      "ghost",
       "un_docs",
       "wp",
     ]);

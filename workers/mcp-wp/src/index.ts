@@ -40,6 +40,7 @@ const sitesOf = ({ params }: Ctx) =>
 export default mcpWorker({
   ...cfg,
   version: pkg.version,
+  confirmNote: "Changes the site.",
   async tools(c) {
     const sites = sitesOf(c);
     if (!sites.length) return genericTools;

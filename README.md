@@ -14,7 +14,9 @@ workers/mcp-un-docs/         UNISPAL, the UN Digital Library, ODS symbols, Right
 workers/mcp-abc-search/      ABC's Algolia index, transcripts included
 workers/mcp-abc-ombudsman/   ABC Ombudsman complaint findings
 workers/mcp-data-gov-au/     data.gov.au over CKAN, including raw SQL
+workers/mcp-ghost/           Ghost publications, with member sign-in for paid posts
 scripts/mock-wp.mjs          fake WordPress for local testing
+scripts/mock-ghost.mjs       fake Ghost, including the magic-link sign-in
 ```
 
 ## A worker is a tools object
@@ -133,6 +135,33 @@ account has and cannot be scoped.
 Sites running **The Events Calendar** are detected from their REST namespaces and get event, venue
 and organiser tools that write through `tribe/events/v1`. The plain post tools stand aside for
 those three types, because writing them through `wp/v2` silently drops the dates, venue and cost.
+
+## Reading paid Ghost posts
+
+Ghost's Content API never serves gated content: a members-only or paid post comes back with an
+empty `html` whatever key you present. The body only exists in the page Ghost renders for a
+signed-in member, so `mcp-ghost` signs in and reads that.
+
+Ghost members have no passwords, so signing in is a magic link, in two tool calls:
+
+1. `ghost_login` — asks the site to email you a sign-in link.
+2. `ghost_login_complete` — you paste that link back; the worker follows it **itself** and keeps
+   the two cookies Ghost sets in reply.
+
+The link works once. Clicking it first, or a mail scanner following it, spends it on that browser
+instead, and `ghost_login_complete` will say so. Sessions are stored in KV against your Cloudflare
+Access email, so each person reads paid posts on their own subscription. `ghost_session_status`
+says who you are signed in as; `ghost_sign_out` forgets it.
+
+`GHOST_SITES` holds each site's Content API key, which Ghost itself calls safe to expose, so it
+can be a plain variable:
+
+```json
+{ "www.lamestream.com.au": { "key": "79b548ddd5142126203cac8f8f" } }
+```
+
+An entry may still carry `cookie` and `cookie_sig` for a shared session, used when the person has
+none of their own. Prefer signing in.
 
 ## Auth (Cloudflare Access)
 

@@ -1,28 +1,45 @@
 /**
- * Starts the mock WordPress once for the whole run. It has to live in Node rather than inside
- * the worker sandbox, so the port is handed to the tests through vitest's provide/inject.
+ * Starts the mock services once for the whole run. They have to live in Node rather than inside
+ * the worker sandbox, so their ports are handed to the tests through vitest's provide/inject.
  */
 import { spawn } from "node:child_process";
 import type { TestProject } from "vitest/node";
 
-const PORT = 8799;
+const MOCKS = [
+  { name: "wp", script: "scripts/mock-wp.mjs", port: 8799, ready: "/wp-json/" },
+  {
+    name: "ghost",
+    script: "scripts/mock-ghost.mjs",
+    port: 8798,
+    ready: "/members/api/integrity-token/",
+  },
+] as const;
 
-export default async function setup(project: TestProject) {
-  const child = spawn("node", ["scripts/mock-wp.mjs", String(PORT)], { stdio: "ignore" });
+const waitFor = async (url: string) => {
   for (let i = 0; i < 50; i++) {
-    const up = await fetch(`http://localhost:${PORT}/wp-json/`).then(
-      (r) => r.ok,
-      () => false,
-    );
-    if (up) break;
+    if (
+      await fetch(url).then(
+        (r) => r.ok,
+        () => false,
+      )
+    )
+      return true;
     await new Promise((r) => setTimeout(r, 100));
   }
-  project.provide("mockBase", `http://localhost:${PORT}`);
-  return () => child.kill();
+  return false;
+};
+
+export default async function setup(project: TestProject) {
+  const children = MOCKS.map((m) => spawn("node", [m.script, String(m.port)], { stdio: "ignore" }));
+  for (const m of MOCKS) await waitFor(`http://localhost:${m.port}${m.ready}`);
+  project.provide("mockBase", `http://localhost:${MOCKS[0].port}`);
+  project.provide("ghostBase", `http://localhost:${MOCKS[1].port}`);
+  return () => children.forEach((c) => c.kill());
 }
 
 declare module "vitest" {
   interface ProvidedContext {
     mockBase: string;
+    ghostBase: string;
   }
 }
