@@ -3,6 +3,7 @@
   "name": "mcp-un-docs",
   "main": "src/index.ts",
   "compatibility_date": "2026-09-01",
+  "workers_dev": false,
   "keep_vars": true,
   "observability": { "enabled": true }
 }

@@ -3,6 +3,7 @@
   "name": "mcp-ghost",
   "main": "src/index.ts",
   "compatibility_date": "2026-09-01",
+  "workers_dev": false,
   "keep_vars": true,
   "observability": { "enabled": true },
   "kv_namespaces": [{ "binding": "SESSIONS", "id": "d807c3e82bb9465ab4e8348aa7bcedba" }]

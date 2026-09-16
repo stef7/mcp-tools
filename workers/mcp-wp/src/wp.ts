@@ -101,13 +101,46 @@ export const usable = (l: Login | null): l is Creds => l !== null && "user" in l
 type Person = Record<string, { user?: string; pass?: string }>;
 
 /**
- * The login for one host, for whoever is signed in. `pass` names a secret and is used exactly as
- * written: deriving the name from the host and username would be ambiguous, since sanitising both
- * into one identifier lets different pairs collapse onto the same key. See secrets.d.ts.
+ * An `X-WP-Auth` header, which lets someone bring their own login without anything being stored
+ * here. Two forms, and a header may hold several of the second separated by `;`:
  *
- * There is no shared fallback: no Access identity, or no entry for that person, means no writes.
+ *   user:application password              this connector's site, whichever that is
+ *   apil.au=user:application password      that host only
+ *
+ * A bare form on a connector covering several sites applies to all of them, which is right when
+ * the same login works everywhere and wrong otherwise — so name the host when it matters.
+ */
+export const authHeader = (value: string | undefined, host: string): Creds | null => {
+  for (const entry of (value ?? "").split(";")) {
+    const text = entry.trim();
+    if (!text) continue;
+    const named = text.match(/^([^=\s]+)=(.*)$/);
+    if (named && named[1] !== host) continue;
+    const pair = (named ? named[2]! : text).trim();
+    const at = pair.indexOf(":");
+    if (at <= 0) continue;
+    const user = pair.slice(0, at).trim();
+    const pass = pair.slice(at + 1).trim();
+    if (user && pass) return { user, pass };
+  }
+  return null;
+};
+
+/**
+ * The login for one host. An `X-WP-Auth` header wins, because someone who supplied a credential
+ * on this very request means to use it. Otherwise WP_SITES, for whoever is signed in — which is
+ * also the only path that works for anything unattended, since a cron sends no headers.
+ *
+ * In WP_SITES, `pass` names a secret and is used exactly as written: deriving the name from the
+ * host and username would be ambiguous, since sanitising both into one identifier lets different
+ * pairs collapse onto the same key. See secrets.d.ts.
+ *
+ * There is no shared fallback: no header, no Access identity, or no entry for that person, and
+ * the site is read-only.
  */
 export const credsFor = async (base: string, c: Ctx): Promise<Login | null> => {
+  const fromHeader = authHeader(c.header("x-wp-auth"), new URL(base).hostname);
+  if (fromHeader) return fromHeader;
   const email = await c.email();
   if (!email || !c.env.WP_SITES) return null;
   const { people, problem } = readSites(c.env.WP_SITES);
@@ -178,6 +211,20 @@ export const loginReport = async (base: string, c: Ctx): Promise<string> => {
     `site: ${host}`,
     `signed in as: ${email ?? "(nobody — Cloudflare Access is off)"}`,
   ];
+
+  // Never the password, and never the whole header: only whether it was usable, and as whom.
+  const raw = c.header("x-wp-auth");
+  const fromHeader = authHeader(raw, host);
+  if (!raw) lines.push("X-WP-Auth header: not sent");
+  else if (fromHeader) lines.push(`X-WP-Auth header: sent, and used — user ${fromHeader.user}`);
+  else
+    lines.push(
+      `X-WP-Auth header: sent, but nothing in it matched ${host}. Expected ` +
+        `"user:application password", or "${host}=user:application password" when the header ` +
+        "covers several sites.",
+    );
+  if (fromHeader) lines.push("(the header wins, so WP_SITES is not consulted)");
+
   if (!c.env.WP_SITES) lines.push("WP_SITES: not set");
   else {
     const { people, problem } = readSites(c.env.WP_SITES);

@@ -99,10 +99,49 @@ keeps plain variables too, so `WP_SITES` survives a deploy).
    The binding name is yours; the prefix comes from `service`, so `mcp-un-docs` gives `un_docs_`.
 4. `npm run check`, commit, push to `main`; the deploy workflow picks the new folder up.
 
+## One public door
+
+Only `mcp-toolkit` has a `workers.dev` URL. Every other worker sets `"workers_dev": false` and is
+reachable only through the toolkit's service binding, so Cloudflare Access needs to sit on the
+toolkit alone — core resolves the signed-in email there and forwards it over RPC.
+
+A bound worker still uses **its own** secrets: `APIFY_TOKEN` lives on `mcp-apify`, `WP_SITES` on
+`mcp-wp`, the Ghost sessions on `mcp-ghost`. The toolkit holds none of them and never sees them.
+
+`workers_dev: false` removes the `*.workers.dev` URL on deploy. A custom domain added in the
+dashboard is not managed here and has to be removed there.
+
+Point several connectors at the one worker to keep the grouping you want:
+
+| Connector | URL                                                  |
+| --------- | ---------------------------------------------------- |
+| APIL      | `mcp-toolkit…/?wp=apil.au&tools=wp`                  |
+| Research  | `mcp-toolkit…/?tools=archives,un_docs,fetch`         |
+| Media     | `mcp-toolkit…/?tools=abc_search,abc_ombudsman,ghost` |
+
 ## Editing a site
 
-Reads are open. Writing needs two things, and both are set in the dashboard on `mcp-wp` under
-Settings -> Variables and Secrets.
+Reads are open. Writing needs a login, and there are two ways to supply one.
+
+### Either: a header on the connector
+
+Claude connectors allow a few custom headers, and `mcp-wp` reads two of them. Nothing is stored
+on the worker, and the credential stays with whoever configured that connector — so someone can
+be given write access without a Cloudflare account or an entry in anything you maintain.
+
+| Header      | Value                                                                        |
+| ----------- | ---------------------------------------------------------------------------- |
+| `X-WP-Auth` | `user:application password`, or `apil.au=user:pass; crikey.com.au=user:pass` |
+| `X-WP-Site` | `apil.au` — stands in for `?wp=`, so the URL needs no query string           |
+
+The bare form of `X-WP-Auth` applies to every site on that connector, which is right when one
+login works everywhere; name the host when it does not. Spaces in the password are fine —
+WordPress prints them in groups of four and they are stripped before the request goes out.
+
+A header wins over `WP_SITES`. It also only exists while a person's connector is making the
+request: anything unattended sends no headers, so `WP_SITES` is what a scheduled write would use.
+
+### Or: `WP_SITES`, set in the dashboard on `mcp-wp` under Settings -> Variables and Secrets.
 
 **1. `WP_SITES`, a plain variable** — who may edit what. Readable and editable, because none of it
 is secret. Keyed by Cloudflare Access email, then hostname. `user` is the WordPress login, `pass`
@@ -166,7 +205,8 @@ none of their own. Prefer signing in.
 
 ## Auth (Cloudflare Access)
 
-Access runs before the Worker, so unauthenticated hits cost nothing. Per worker:
+Access runs before the Worker, so unauthenticated hits cost nothing. Only `mcp-toolkit` needs it,
+since it is the only worker with a URL:
 
 1. Zero Trust -> Integrations -> Identity providers -> add **One-time PIN** (email code, no
    account needed).

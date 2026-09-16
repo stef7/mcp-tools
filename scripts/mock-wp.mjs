@@ -3,7 +3,11 @@
 // auth on writes so the credential path is exercised too. "/blog" is a second, TEC-less site.
 import { createServer } from "node:http";
 
-const AUTH = "Basic " + Buffer.from("wp-user:secretpass").toString("base64");
+// Two valid logins: the one WP_SITES points at, and one only ever supplied by an X-WP-Auth
+// header, so a test can tell which of the two paths actually sent the credential.
+const LOGINS = ["wp-user:secretpass", "hdr-user:abcdEFGH1234"];
+const AUTH = LOGINS.map((l) => "Basic " + Buffer.from(l).toString("base64"));
+let lastAuth = "";
 let nextId = 500;
 
 const post = (id, title) => ({
@@ -67,7 +71,8 @@ createServer(async (req, res) => {
   const tecSite = !full.startsWith("/blog"); // the "/blog" site has no Events Calendar
   const path = full.replace(/^\/blog/, "");
   const write = req.method !== "GET";
-  const authed = req.headers.authorization === AUTH;
+  const authed = AUTH.includes(req.headers.authorization ?? "");
+  if (authed && write) lastAuth = Buffer.from(req.headers.authorization.slice(6), "base64") + "";
   console.log(req.method, path, write ? (authed ? "(authed)" : "(NO AUTH)") : "");
 
   if (write && !authed) {
@@ -76,6 +81,9 @@ createServer(async (req, res) => {
       message: "You are not currently logged in.",
     });
   }
+
+  // Which credential the last write arrived with. Test-only; a real WordPress has no such thing.
+  if (path === "/__last-auth") return res.writeHead(200).end(lastAuth);
 
   if (path === "/wp-json/" || path === "/wp-json") {
     return send(res, 200, { namespaces: ["wp/v2", ...(tecSite ? ["tribe/events/v1"] : [])] });

@@ -8,6 +8,7 @@
 import { SELF, createExecutionContext, env } from "cloudflare:test";
 import { describe, expect, inject, it } from "vitest";
 import Worker from "../workers/mcp-wp/src/index";
+import { authHeader } from "../workers/mcp-wp/src/wp";
 
 const base = inject("mockBase");
 const ME = "me@example.com";
@@ -24,8 +25,17 @@ const tools = (search: string, email: string | undefined = ME): Promise<Spec[]> 
   wp().tools({ search, email }) as Promise<Spec[]>;
 const names = async (search: string, email?: string) =>
   (await tools(search, email)).map((t) => t.name);
-const call = async (name: string, args: unknown, search: string, email = ME) => {
-  const r = (await wp().call(name, args, { search, email })) as { content: { text: string }[] };
+type Headers = Record<string, string>;
+const call = async (
+  name: string,
+  args: unknown,
+  search: string,
+  email: string | undefined = ME,
+  headers?: Headers,
+) => {
+  const r = (await wp().call(name, args, { search, email, headers })) as {
+    content: { text: string }[];
+  };
   return r.content[0]!.text;
 };
 
@@ -163,5 +173,93 @@ describe("the MCP endpoint", () => {
     const res = await post({ jsonrpc: "2.0", id: 1, method: "tools/list" }, site(base + "/nope"));
     const body = (await res.json()) as { error?: { message: string } };
     expect(body.error?.message).toContain("Failed to fetch types");
+  });
+});
+
+describe("the X-WP-Auth header", () => {
+  // Spaced the way WordPress prints an application password; the worker strips them,
+  // and the mock only accepts the stripped form, so this proves both halves.
+  const HDR = { "x-wp-auth": "hdr-user:abcd EFGH 1234" };
+  const blog = site(`${base}/blog`);
+
+  it("parses the bare form, for whatever site the connector covers", () => {
+    expect(authHeader("u:p", "apil.au")).toEqual({ user: "u", pass: "p" });
+  });
+
+  it("keeps a password containing spaces or colons intact", () => {
+    // WordPress prints application passwords in groups of four, separated by spaces.
+    expect(authHeader("u:abcd efgh ijkl", "x")).toEqual({ user: "u", pass: "abcd efgh ijkl" });
+    expect(authHeader("u:a:b:c", "x")).toEqual({ user: "u", pass: "a:b:c" });
+  });
+
+  it("matches the named form only against its own host", () => {
+    const many = "apil.au=a:1; crikey.com.au=b:2";
+    expect(authHeader(many, "apil.au")).toEqual({ user: "a", pass: "1" });
+    expect(authHeader(many, "crikey.com.au")).toEqual({ user: "b", pass: "2" });
+    expect(authHeader(many, "example.org")).toBeNull();
+  });
+
+  it("ignores anything it cannot read rather than guessing", () => {
+    expect(authHeader(undefined, "x")).toBeNull();
+    expect(authHeader("", "x")).toBeNull();
+    expect(authHeader("no-colon-here", "x")).toBeNull();
+    expect(authHeader(":no-user", "x")).toBeNull();
+    expect(authHeader("no-pass:", "x")).toBeNull();
+  });
+
+  it("unlocks writes with no Access identity at all", async () => {
+    const specs = (await wp().tools({ search: blog, email: undefined, headers: HDR })) as Spec[];
+    expect(specs.map((t) => t.name)).toContain("wp_create_posts");
+  });
+
+  it("wins over WP_SITES, so the header's own login is the one that is sent", async () => {
+    const out = await call(
+      "wp_create_posts",
+      { title: "Via header", user_confirmed: true },
+      site(),
+      ME,
+      HDR,
+    );
+    expect(out).toContain("Created");
+    const seen = await fetch(`${base}/__last-auth`).then((r) => r.text());
+    expect(seen).toBe("hdr-user:abcdEFGH1234");
+  });
+
+  it("leaves WP_SITES in charge when no header is sent", async () => {
+    const out = await call(
+      "wp_create_posts",
+      { title: "Via WP_SITES", user_confirmed: true },
+      site(),
+    );
+    expect(out).toContain("Created");
+    const seen = await fetch(`${base}/__last-auth`).then((r) => r.text());
+    expect(seen).toBe("wp-user:secretpass");
+  });
+
+  it("is reported by login_status without the password appearing", async () => {
+    const out = await call("wp_login_status", {}, site(), ME, HDR);
+    expect(out).toContain("sent, and used — user hdr-user");
+    expect(out).toContain("the header wins");
+    expect(out).not.toContain("abcd EFGH 1234");
+    expect(out).not.toContain("abcdEFGH1234");
+  });
+
+  it("says what is wrong when the header names a different host", async () => {
+    const out = await call("wp_login_status", {}, site(), ME, {
+      "x-wp-auth": "somewhere.else=u:p",
+    });
+    expect(out).toContain("nothing in it matched");
+    expect(out).toContain("verdict: editable"); // WP_SITES still covers this one
+  });
+});
+
+describe("the X-WP-Site header", () => {
+  it("stands in for ?wp=, so a connector needs no query string", async () => {
+    const specs = (await wp().tools({
+      search: "",
+      email: ME,
+      headers: { "x-wp-site": base },
+    })) as Spec[];
+    expect(specs.map((t) => t.name)).toContain("wp_search_posts");
   });
 });

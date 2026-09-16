@@ -59,6 +59,11 @@ export type Ctx = {
   params: URLSearchParams;
   exec: ExecutionContext;
   email(): Promise<string | undefined>;
+  /**
+   * A custom header the connector sent, lower-cased name. Connectors allow a handful, which is
+   * how someone supplies a credential of their own without anything being stored here.
+   */
+  header(name: string): string | undefined;
 };
 
 type Annotations = {
@@ -132,7 +137,31 @@ type Config = {
  * user. Access does not propagate its identity over service bindings, so the worker facing the
  * browser resolves the email once and passes it on with every RPC.
  */
-type Call = { search?: string | undefined; email?: string | undefined };
+type Call = {
+  search?: string | undefined;
+  email?: string | undefined;
+  /** Forwarded custom headers; see `carried` for which ones, and why not all of them. */
+  headers?: Record<string, string> | undefined;
+};
+
+/**
+ * The request headers worth passing on: the `x-` ones a connector was configured with. Cookies,
+ * the Access assertion and the proxy's own forwarding headers are none of a tool's business, and
+ * a bound worker that receives them can leak them somewhere this one cannot see.
+ */
+const PROXY_HEADERS = new Set([
+  "x-forwarded-for",
+  "x-forwarded-proto",
+  "x-forwarded-host",
+  "x-real-ip",
+]);
+export const carried = (headers: Headers): Record<string, string> => {
+  const out: Record<string, string> = {};
+  headers.forEach((value, name) => {
+    if (name.startsWith("x-") && !PROXY_HEADERS.has(name)) out[name] = value;
+  });
+  return out;
+};
 
 /** What a bound worker looks like over RPC (it is another `mcpWorker`). */
 type Remote = {
@@ -147,7 +176,9 @@ const prefixOf = (workerName: string) => workerName.replace(/^mcp-/, "").replace
 const CORS = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
-  "Access-Control-Allow-Headers": "Content-Type, Authorization, Mcp-Session-Id",
+  // `*` covers the custom x- headers a connector may send; Authorization is named because the
+  // wildcard deliberately does not cover it.
+  "Access-Control-Allow-Headers": "Authorization, *",
 };
 const json = (body: unknown, status = 200) =>
   new Response(JSON.stringify(body), {
@@ -189,11 +220,12 @@ export const mcpWorker = (cfg: Config) => {
           ? Promise.resolve(given)
           : Promise.resolve((this.ctx as WithAccess).access?.getIdentity()).then((i) => i?.email));
     };
-    #ctx = ({ search, email }: Call): Ctx => ({
+    #ctx = ({ search, email, headers }: Call): Ctx => ({
       env: this.env,
       params: new URLSearchParams(search),
       exec: this.ctx,
       email: this.#email(email),
+      header: (name) => headers?.[name.toLowerCase()],
     });
     /** Bound workers that failed during this request, reported on the GET page. */
     #unreachable: string[] = [];
@@ -268,7 +300,7 @@ export const mcpWorker = (cfg: Config) => {
     #pass = async (req: Call): Promise<Call> => ({ ...req, email: await this.#ctx(req).email() });
 
     override async fetch(request: Request): Promise<Response> {
-      const req: Call = { search: new URL(request.url).search };
+      const req: Call = { search: new URL(request.url).search, headers: carried(request.headers) };
       if (request.method === "OPTIONS") return new Response(null, { status: 204, headers: CORS });
       if (request.method === "GET") {
         const tools = (await this.tools(req)).map((t) => t.name);
