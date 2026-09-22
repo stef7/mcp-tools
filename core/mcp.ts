@@ -5,8 +5,9 @@
  *  - `tools()` and `call()` : the same tools over RPC, so another worker can aggregate them
  *
  * Every tool name is prefixed with the worker's own name (`mcp-wp` -> `wp_`). A worker that
- * lists `services` in its wrangler config re-exports the tools of each bound worker, routing
- * calls by that prefix. `?tools=wp,acast_episodes` on the connector URL narrows the list
+ * lists `services` in its wrangler config re-exports the tools of each bound worker, routing a
+ * call by that prefix — or, for a name no prefix claims, to whichever bound worker turns out to
+ * list it. `?tools=wp,acast_episodes` on the connector URL narrows the list
  * (an entry is a prefix or an exact tool name). The whole query string is forwarded to bound
  * workers, so each can read its own params (mcp-wp reads `?wp=site1,site2`).
  */
@@ -135,12 +136,19 @@ type Config = {
    * the same list also declares the runtime bindings. Pass it explicitly to break that tie: a
    * binding you only want to `fetch()` should not put its whole tool set on your connector.
    *
-   * `prefix` must be given for a bound worker that sets its own `prefix`, because there is no
-   * way to derive it from the service name. Leave it out and this worker's tools are LISTED
-   * under their real names but every call is routed by the derived prefix, matches nothing,
-   * and comes back `Unknown tool` — listed and uncallable, which looks like a broken server.
+   * A call goes to the bound worker whose prefix claims the name, and — when none does — to
+   * whichever one turns out to list it. That second step is what keeps a bound worker callable
+   * when its prefixes cannot be derived from its service name: one that sets its own `prefix`,
+   * or an aggregator re-exporting the prefixes of the workers bound to *it*, whose set is not
+   * knowable from here at all. Without it such tools are LISTED under their real names while
+   * every call comes back `Unknown tool` — listed and uncallable, which looks like a broken
+   * server.
+   *
+   * Naming `prefix` (a string, or a list for a worker that serves several) skips the lookup,
+   * which is worth doing: the lookup asks every bound worker for its tools, and building that
+   * list can cost a bound worker real work.
    */
-  services?: { binding: string; service: string; prefix?: string }[];
+  services?: { binding: string; service: string; prefix?: string | string[] }[];
   tools: Tools | ((c: Ctx) => Tools | Promise<Tools>);
   info?: (c: Ctx) => Info;
   /** What `confirm: true` appends to a description. Per-tool strings override it. */
@@ -261,14 +269,34 @@ export const mcpWorker = (cfg: Config) => {
     /** Bound workers that failed during this request, reported on the GET page. */
     #unreachable: string[] = [];
     #remotes = () =>
-      (cfg.services ?? [])
-        .map((s) => ({
-          // What the remote actually names its tools, which is only the same as the derived
-          // prefix when it has not set one of its own.
-          prefix: s.prefix ?? prefixOf(s.service),
-          rpc: (this.env as unknown as Record<string, unknown>)[s.binding] as Remote,
-        }))
-        .sort((a, b) => b.prefix.length - a.prefix.length);
+      (cfg.services ?? []).map((s) => ({
+        // What the remote actually names its tools, which is only the same as the derived
+        // prefix when it has not set one of its own. An aggregator answers to several, so this
+        // is a list — and a list that may be incomplete, which `#owner` is there to cover.
+        prefixes: [s.prefix ?? prefixOf(s.service)].flat(),
+        rpc: (this.env as unknown as Record<string, unknown>)[s.binding] as Remote,
+      }));
+
+    /** The bound worker whose prefix claims this name, by the longest match, so nesting is
+     *  unambiguous when one prefix is a prefix of another. */
+    #claimant = (name: string) =>
+      this.#remotes()
+        .flatMap((r) => r.prefixes.map((prefix) => ({ prefix, rpc: r.rpc })))
+        .filter((c) => name.startsWith(c.prefix))
+        .sort((a, b) => b.prefix.length - a.prefix.length)[0]?.rpc;
+
+    /**
+     * Which bound worker lists this name, asked only once no prefix claims it. A worker that is
+     * down, or that never heard of the name, simply does not answer to it.
+     */
+    #owner = async (name: string, onward: Call) => {
+      const asked = await Promise.allSettled(
+        this.#remotes().map(async (r) =>
+          (await r.rpc.tools(onward)).some((t) => t.name === name) ? r.rpc : null,
+        ),
+      );
+      return asked.flatMap((a) => (a.status === "fulfilled" && a.value ? [a.value] : []))[0];
+    };
 
     /** Every tool this worker offers: its own, then each bound worker's. */
     async tools(req: Call = {}): Promise<Spec[]> {
@@ -289,8 +317,15 @@ export const mcpWorker = (cfg: Config) => {
           : (t.input ?? { type: "object", properties: {} }),
         ...(cfg.icon && { icons: [cfg.icon] }),
       }));
+      // Narrowing is an optimisation, so it gives way where it cannot be sure: a selector entry
+      // no prefix here claims may still name tools a bound worker re-exports under a prefix of
+      // its own. Ask everyone in that case and let the filter at the end sort it out.
+      const claimed = (s: string) =>
+        own.some((t) => t.name === s || t.name.startsWith(s + "_")) ||
+        this.#remotes().some((r) => r.prefixes.some((p) => (s + "_").startsWith(p)));
       const wantedRemotes = this.#remotes().filter(
-        (r) => !sel || sel.some((s) => (s + "_").startsWith(r.prefix)),
+        (r) =>
+          !sel || sel.some((s) => r.prefixes.some((p) => (s + "_").startsWith(p)) || !claimed(s)),
       );
       const onward = wantedRemotes.length ? await this.#pass(req) : req;
       // One bound worker being down should cost its own tools, not everybody else's, so a
@@ -300,7 +335,7 @@ export const mcpWorker = (cfg: Config) => {
       const asked = await Promise.allSettled(wantedRemotes.map(async (r) => r.rpc.tools(onward)));
       const remote = asked.flatMap((r, i) => {
         if (r.status === "fulfilled") return r.value;
-        const name = wantedRemotes[i]!.prefix.slice(0, -1);
+        const name = wantedRemotes[i]!.prefixes[0]!.slice(0, -1);
         this.#unreachable.push(
           `${name}: ${r.reason instanceof Error ? r.reason.message : r.reason}`,
         );
@@ -326,8 +361,9 @@ export const mcpWorker = (cfg: Config) => {
           return err(`Error: ${e instanceof Error ? e.message : String(e)}`);
         }
       }
-      const r = this.#remotes().find((r) => name.startsWith(r.prefix));
-      return r ? r.rpc.call(name, args, await this.#pass(req)) : err(`Unknown tool: ${name}`);
+      const onward = await this.#pass(req);
+      const rpc = this.#claimant(name) ?? (await this.#owner(name, onward));
+      return rpc ? rpc.call(name, args, onward) : err(`Unknown tool: ${name}`);
     }
 
     /** Resolve the identity before handing the request on: RPC cannot see Access itself. */
