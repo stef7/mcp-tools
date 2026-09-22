@@ -99,6 +99,16 @@ keeps plain variables too, so `WP_SITES` survives a deploy).
 4. Add `{ "binding": "<NAME>", "service": "mcp-<name>" }` to `workers/mcp-toolkit/wrangler.json`.
    The binding name is yours; the prefix comes from `service`, so `mcp-un-docs` gives `un_docs_`
    and a worker from another repo keeps its own name — `gifthorse` gives `gifthorse_`.
+
+   That derivation is a guess, and a bound worker is free to disagree with it: one that sets its
+   own `prefix`, or that is an aggregator re-exporting the prefixes of the workers bound to _it_,
+   answers to names this repo cannot derive. Its tools are listed under their real names either
+   way, and a call no prefix claims falls back to asking each bound worker which names it lists,
+   so nothing is listed-but-uncallable. Add `"prefix"` — a string, or a list — to skip that
+   lookup, which costs every bound worker a tool list — worth doing once you have confirmed what
+   a worker really answers to, e.g. `"prefix": ["gifthorse_", "acnc_"]`. Declare it wrong and the
+   fallback cannot save you: the call goes to the worker you named and stops there.
+
 5. `npm run check`, commit, push to `main`; the deploy workflow picks the new folder up.
 
 ## Icons

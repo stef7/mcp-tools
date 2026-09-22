@@ -44,7 +44,7 @@ describe("a bound worker it cannot reach", () => {
     const body = (await res.json()) as { tools: string[]; unreachable?: string[] };
     expect(res.status).toBe(200);
     expect(body.tools).toContain("acast_episodes");
-    // Order follows prefix length, which is only there to make routing unambiguous.
+    // Order follows wrangler.json; sorted here so the list reads as a set, not a sequence.
     expect(body.unreachable?.map((u) => u.split(":")[0]).sort()).toEqual([
       "abc_ombudsman",
       "abc_search",
