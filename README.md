@@ -134,7 +134,7 @@ A bound worker still uses **its own** secrets: `APIFY_TOKEN` lives on `mcp-apify
 It invokes the bound worker directly, so a worker with its own Access policy gets no second gate
 here: whoever is on the **toolkit's** policy can call its tools. The forwarded email still drives
 whatever authorisation the bound worker does for itself — `gifthorse`, bound as `GIFTHORSE`,
-checks it, so who may switch monitoring on and off is unchanged — but *reading* is gated by the
+checks it, so who may switch monitoring on and off is unchanged — but _reading_ is gated by the
 toolkit's allowlist alone. Keep the two policies in step, or do not bind the worker.
 
 `workers_dev: false` removes the `*.workers.dev` URL on deploy. A custom domain added in the
