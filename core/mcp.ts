@@ -130,7 +130,17 @@ type Config = {
    * icon of the worker they came from, so nothing here has to map a tool back to its owner.
    */
   icon?: Icon;
-  services?: { binding: string; service: string }[];
+  /**
+   * Workers to merge tools from, normally spread straight out of wrangler.json — which means
+   * the same list also declares the runtime bindings. Pass it explicitly to break that tie: a
+   * binding you only want to `fetch()` should not put its whole tool set on your connector.
+   *
+   * `prefix` must be given for a bound worker that sets its own `prefix`, because there is no
+   * way to derive it from the service name. Leave it out and this worker's tools are LISTED
+   * under their real names but every call is routed by the derived prefix, matches nothing,
+   * and comes back `Unknown tool` — listed and uncallable, which looks like a broken server.
+   */
+  services?: { binding: string; service: string; prefix?: string }[];
   tools: Tools | ((c: Ctx) => Tools | Promise<Tools>);
   info?: (c: Ctx) => Info;
   /** What `confirm: true` appends to a description. Per-tool strings override it. */
@@ -253,7 +263,9 @@ export const mcpWorker = (cfg: Config) => {
     #remotes = () =>
       (cfg.services ?? [])
         .map((s) => ({
-          prefix: prefixOf(s.service),
+          // What the remote actually names its tools, which is only the same as the derived
+          // prefix when it has not set one of its own.
+          prefix: s.prefix ?? prefixOf(s.service),
           rpc: (this.env as unknown as Record<string, unknown>)[s.binding] as Remote,
         }))
         .sort((a, b) => b.prefix.length - a.prefix.length);
