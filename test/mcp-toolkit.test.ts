@@ -53,6 +53,8 @@ describe("a bound worker it cannot reach", () => {
       "data_gov_au",
       "fetch",
       "ghost",
+      // Bound from another repo, so it keeps its own name rather than losing an `mcp-` prefix.
+      "gifthorse",
       "un_docs",
       "wp",
     ]);
