@@ -7,7 +7,9 @@
  *
  * Reads are open. Writes appear only for hosts listed in the WP_SITES secret (see secrets.d.ts)
  * and always require the caller to pass user_confirmed. Sites running The Events Calendar also
- * get event, venue and organiser tools — see tec.ts.
+ * get event, venue and organiser tools — see tec.ts — and sites running WooCommerce get product,
+ * order, customer and coupon tools once there is a login, since WooCommerce reads need one too —
+ * see woo.ts.
  *
  * Optional `?title=&icon=&description=` decorate the connector (single-site mode). `?site=` is
  * accepted as an alias of `?wp=` for old connector URLs.
@@ -69,7 +71,8 @@ export default mcpWorker({
           "WordPress Explorer: query any WordPress site. Start with discover_site(url) to probe " +
           "a site, then use search_content, get_content, and list_site_terms. The REST API often " +
           "returns full content even on paywalled sites. Editing needs a login in the WP_SITES " +
-          "secret, and every write asks you to confirm first.",
+          "secret, and every write asks you to confirm first. WooCommerce shops have *_wc tools, " +
+          "which need a login even to read.",
       };
     const hosts = sites.map((u) => new URL(u).hostname).join(", ");
     const first = new URL(sites[0]!);

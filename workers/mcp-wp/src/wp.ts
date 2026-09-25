@@ -335,7 +335,7 @@ const call = async (
 
 // ─── Cache (6 h, per isolate) ──────────────────────────────────────────────────────────────────
 const cache = new Map<string, { at: number; data: unknown }>();
-const memo = async <T>(key: string, load: () => Promise<T>): Promise<T> => {
+export const memo = async <T>(key: string, load: () => Promise<T>): Promise<T> => {
   const hit = cache.get(key);
   if (hit && Date.now() - hit.at < 6 * 3600_000) return hit.data as T;
   const data = await load();

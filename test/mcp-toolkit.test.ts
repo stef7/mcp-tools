@@ -36,7 +36,7 @@ describe("its own tools", () => {
 
 describe("a bound worker it cannot reach", () => {
   it("costs that worker's tools and nothing else", async () => {
-    expect((await tools()).length).toBe(3); // ten services are bound, none of them resolvable
+    expect((await tools()).length).toBe(3); // nine services are bound, none of them resolvable
   });
 
   it("is named on the GET page rather than failing the whole request", async () => {
@@ -53,8 +53,6 @@ describe("a bound worker it cannot reach", () => {
       "data_gov_au",
       "fetch",
       "ghost",
-      // Bound from another repo, so it keeps its own name rather than losing an `mcp-` prefix.
-      "gifthorse",
       "un_docs",
       "wp",
     ]);
