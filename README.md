@@ -5,6 +5,7 @@ Cloudflare Workers that speak MCP, in one TypeScript repo.
 ```
 core/mcp.ts                  shared plumbing: HTTP MCP endpoint + RPC surface + tool typing
 core/web.ts                  what a worker touching the open web needs: stripHtml, a browser UA
+core/egress.ts               tunnel -> Apify AU residential -> plain fetch, for mcp-fetch and friends
 test/                        vitest, run against mocks rather than anyone's live service
 workers/mcp-toolkit/         aggregator: its own tools + every worker bound under `services`
 workers/mcp-wp/              WordPress REST API -> MCP, read and write
@@ -18,6 +19,7 @@ workers/mcp-ghost/           Ghost publications, with member sign-in for paid po
 workers/mcp-apify/           what Apify is costing you, by service and by Actor
 scripts/mock-wp.mjs          fake WordPress for local testing
 scripts/mock-ghost.mjs       fake Ghost, including the magic-link sign-in
+scripts/tunnel-relay.mjs     runs on the Mac at the far end of the tunnel
 ```
 
 ## A worker is a tools object
@@ -110,6 +112,32 @@ keeps plain variables too, so `WP_SITES` survives a deploy).
    fallback cannot save you: the call goes to the worker you named and stops there.
 
 5. `npm run check`, commit, push to `main`; the deploy workflow picks the new folder up.
+
+## Fetching from an Australian address
+
+`mcp-fetch` downloads through `core/egress.ts`, which tries three routes in order and uses the
+first that answers:
+
+1. **tunnel** — `env.TUNNEL`, a VPC Service binding (`vpc_services` in `mcp-fetch/wrangler.json`)
+   to the `wmac` service: `localhost:8811` on the Mac behind Cloudflare Tunnel `WMac`. Run
+   `node scripts/tunnel-relay.mjs` there. A tunnel that does not answer within 8 seconds is left
+   alone for a minute, so a sleeping Mac costs one slow request, not every request.
+2. **apify** — `apify/rag-web-browser` through Apify's `RESIDENTIAL` proxies with country `AU`.
+   Needs `APIFY_TOKEN` on `mcp-fetch` (its own copy, able to run Actors). It returns HTML only, so
+   URLs ending `.pdf`, `.docx` and the like skip it. HTTP 402 — out of credit or over the monthly
+   cap — moves on to the next route, as does any other Apify failure.
+3. **direct** — the worker's own `fetch`, from a Cloudflare colo.
+
+The site's own answer, a 403 included, is final: the cascade only moves on when a _route_ fails.
+`fetch_url` takes `via` to force one route with no fallback, and records which route served each
+URL (and why earlier ones were skipped) in `docs.meta_json`.
+
+Any other worker can use the same routes without holding the tunnel or the token: bind
+`{ "binding": "FETCH", "service": "mcp-fetch" }` and call `await env.FETCH.egress(url, { headers,
+via })`. It returns the site's `Response` with `x-egress-via` and `x-egress-skipped` headers.
+
+Binding a VPC Service needs the **Connectivity Directory Bind** role on whoever deploys, so the
+`CLOUDFLARE_API_TOKEN` in Actions needs it too, or the `mcp-fetch` deploy fails.
 
 ## Icons
 

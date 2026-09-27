@@ -5,6 +5,9 @@
  * you name a URL and a format, you get that URL in that format. Everything fetched is kept, so
  * `search` can look across whatever you have fetched before without going back to the network.
  *
+ * Every download goes out through core/egress.ts — the tunnel to the Mac, then Apify's AU
+ * residential proxies, then Cloudflare itself — and `egress` offers the same to other workers.
+ *
  * Storage (unchanged from the previous version, so existing cached documents still work):
  *   KV  raw:<url>   the original bytes, forever — re-formatting never re-downloads
  *   D1  docs        one row per URL: the extracted text and where it came from
@@ -15,6 +18,7 @@ import pkg from "../package.json";
 import { mcpWorker, tool, type Ctx } from "../../../core/mcp";
 import { ICONS } from "../../../core/icons";
 import { BROWSER_UA as UA, stripHtml } from "../../../core/web";
+import { egress, ROUTES, type Route } from "../../../core/egress";
 
 const FORMATS = ["auto", "markdown", "text", "raw"] as const;
 type Format = (typeof FORMATS)[number];
@@ -73,28 +77,35 @@ const kindOf = (url: string, ct: string | null) => {
 };
 const isBinary = (kind: string) => kind === "pdf" || kind === "docx";
 
-const download = async (url: string) => {
-  const res = await fetch(url, {
-    headers: { "User-Agent": UA, Accept: "*/*", Referer: new URL(url).origin + "/" },
-  });
-  if (!res.ok) throw new Error(`HTTP ${res.status} fetching ${url}`);
+const browserHeaders = (url: string) => ({
+  "User-Agent": UA,
+  Accept: "*/*",
+  Referer: new URL(url).origin + "/",
+});
+
+const download = async (env: Env, url: string, via?: Route) => {
+  const got = await egress(env, url, { headers: browserHeaders(url), ...(via && { via }) });
+  const res = got.response;
+  const route = got.skipped.length ? `${got.via} (${got.skipped.join("; ")})` : got.via;
+  if (!res.ok) throw new Error(`HTTP ${res.status} fetching ${url} via ${route}`);
   return {
     bytes: new Uint8Array(await res.arrayBuffer()),
     ct: normCt(res.headers.get("content-type")),
+    route,
   };
 };
 
 /** Original bytes, from KV unless `force` says to go back to the origin. */
-const bytesFor = async (env: Env, url: string, force: boolean) => {
+const bytesFor = async (env: Env, url: string, force: boolean, via?: Route) => {
   if (!force) {
     const hit = await env.CACHE.get(`raw:${url}`, "arrayBuffer");
     const ct = await env.CACHE.get(`ct:${url}`);
-    if (hit) return { bytes: new Uint8Array(hit), ct, cached: true };
+    if (hit) return { bytes: new Uint8Array(hit), ct, cached: true, route: "cache" };
   }
-  const { bytes, ct } = await download(url);
+  const { bytes, ct, route } = await download(env, url, via);
   await env.CACHE.put(`raw:${url}`, bytes);
   if (ct) await env.CACHE.put(`ct:${url}`, ct);
-  return { bytes, ct, cached: false };
+  return { bytes, ct, cached: false, route };
 };
 
 // ─── Formatting ───────────────────────────────────────────────────────────────────────────────
@@ -199,7 +210,7 @@ const schema = async (c: Ctx) => {
   return c.env;
 };
 
-export default mcpWorker({
+const Tools = mcpWorker({
   ...cfg,
   version: pkg.version,
   icon: ICONS.fetch,
@@ -226,15 +237,23 @@ export default mcpWorker({
             type: "boolean",
             description: "Re-download instead of using the cached bytes. Default false.",
           },
+          via: {
+            type: "string",
+            enum: [...ROUTES],
+            description:
+              "Omit to let it choose: the tunnel to an Australian home connection, then Apify's " +
+              "Australian residential proxies (HTML only, and paid), then Cloudflare directly. " +
+              "Name one to use only that route, e.g. `direct` to save Apify credit.",
+          },
         },
       },
-      async run({ url, format, force }, c) {
+      async run({ url, format, force, via }, c) {
         const env = await schema(c);
         const fmt: Format = FORMATS.includes(format as Format) ? (format as Format) : "auto";
         try {
-          const { bytes, ct, cached } = await bytesFor(env, url, force === true);
+          const { bytes, ct, cached, route } = await bytesFor(env, url, force === true, via);
           const kind = kindOf(url, ct ?? null);
-          const { text, via } = await render(env, bytes, url, kind, fmt);
+          const { text, via: how } = await render(env, bytes, url, kind, fmt);
           await store(env, {
             url,
             kind,
@@ -242,7 +261,7 @@ export default mcpWorker({
             status: "ok",
             text,
             bytes_len: bytes.length,
-            meta_json: JSON.stringify({ format: fmt, via, cached }),
+            meta_json: JSON.stringify({ format: fmt, via: how, cached, route }),
           });
           return text;
         } catch (e) {
@@ -384,3 +403,20 @@ export default mcpWorker({
       "fetched stays searchable through `search` without hitting the network again.",
   }),
 });
+
+/**
+ * The same routes for any worker that binds this one — `{ "binding": "FETCH", "service":
+ * "mcp-fetch" }` — and calls `await env.FETCH.egress(url)`. It gets the site's Response back,
+ * uncached and untouched, with `x-egress-via` saying which route served it and
+ * `x-egress-skipped` why the ones before it did not. The tunnel, the Apify token and the cost of
+ * both stay here.
+ */
+export default class extends Tools {
+  async egress(url: string, opts: { headers?: Record<string, string>; via?: Route } = {}) {
+    const { response, via, skipped } = await egress(this.env, url, opts);
+    const out = new Response(response.body, response);
+    out.headers.set("x-egress-via", via);
+    if (skipped.length) out.headers.set("x-egress-skipped", skipped.join("; "));
+    return out;
+  }
+}

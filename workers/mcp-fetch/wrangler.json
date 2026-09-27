@@ -14,5 +14,8 @@
     }
   ],
   "kv_namespaces": [{ "binding": "CACHE", "id": "acdda8800378466aa9ecf9caabd317dc" }],
-  "ai": { "binding": "AI" }
+  "ai": { "binding": "AI" },
+  "vpc_services": [
+    { "binding": "TUNNEL", "service_id": "01a0e1f9-8cbe-70a2-9db4-78073bfbe540", "remote": true }
+  ]
 }
