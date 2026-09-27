@@ -243,10 +243,10 @@ const Tools = mcpWorker({
             items: { type: "string", enum: [...ROUTES] },
             description:
               "Routes to try, in order. The next is tried when one cannot connect or the site " +
-              "answers 403, 429, 451 or 503 (a bot check or block). `direct`: Cloudflare's own " +
-              "fetch. `unblocker`: gets past bot checks and CAPTCHAs, paid per page. `tunnel`: " +
-              "an Australian home connection, only while that Mac is on. One route means no " +
-              'fallback. Default ["direct", "unblocker"].',
+              "answers 403, 429, 451 or 503 or with a challenge header. `direct`: Cloudflare's " +
+              "own fetch. `unblocker`: gets past bot checks and CAPTCHAs, paid per page. " +
+              "`tunnel`: an Australian home connection, only while that Mac is on. One route " +
+              'means no fallback. Default ["direct", "unblocker"].',
           },
         },
       },

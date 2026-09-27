@@ -118,9 +118,10 @@ keeps plain variables too, so `WP_SITES` survives a deploy).
 ## Getting past blocks
 
 `mcp-fetch` downloads through `core/egress.ts`, which tries the routes you name, in the order
-you name them. It moves to the next when a route cannot connect, or when the site answers 403,
-429, 451 or 503 — the statuses bot checks, rate limits and geo-blocks hand out. Any other answer,
-404 included, is kept. If every route is blocked, the last blocked answer comes back.
+you name them. It moves to the next when a route cannot connect, or when the answer is a block:
+status 403, 429, 451 or 503, or a challenge header — Cloudflare's `cf-mitigated: challenge`, or
+AWS WAF's `x-amzn-waf-action: challenge` (sent as a 202) or `captcha` (a 405). Only headers are
+checked; the body is never read to decide. Any other answer, 404 included, is kept. If every route is blocked, the last blocked answer comes back.
 
 1. **direct** — the worker's own `fetch`, from a Cloudflare colo. Free.
 2. **unblocker** — Apify Proxy's `UNBLOCKER` group, through `core/proxy.ts`. It handles bot checks

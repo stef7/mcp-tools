@@ -13,7 +13,7 @@
  * failing that `direct,unblocker`: free first, paid only when the free one was turned away.
  *
  * The next route is tried when one cannot get an answer at all, or when the answer is one of
- * BLOCKED — the statuses a bot check or geo-block hands out. Any other answer, a 404 included, is
+ * `blockedBy` — a status a bot check or geo-block hands out, or a challenge header. Any other answer, a 404 included, is
  * the site speaking and is returned. If every route is blocked, the last blocked answer is
  * returned rather than an error, since it is still what the site said. What was passed over comes
  * back in `skipped`, so a caller can see that the unblocker was paid for because Cloudflare got a
@@ -33,6 +33,23 @@ export const DEFAULT_VIA: readonly Route[] = ["direct", "unblocker"];
  * left out — a login wall is not something another IP gets past.
  */
 export const BLOCKED = new Set([403, 429, 451, 503]);
+
+/**
+ * Why this answer is a block, or undefined when it is the site speaking. Headers and status only:
+ * the body is never read, so a good answer streams on untouched.
+ *
+ *   cf-mitigated: challenge       Cloudflare's own marker on every Challenge Page
+ *   x-amzn-waf-action             AWS WAF: `challenge` comes as a 202 and `captcha` as a 405,
+ *                                 neither of which the status list would catch
+ */
+export const blockedBy = (res: Response): string | undefined => {
+  if (res.headers.get("cf-mitigated")?.toLowerCase() === "challenge")
+    return `Cloudflare challenge (HTTP ${res.status})`;
+  const aws = res.headers.get("x-amzn-waf-action")?.toLowerCase();
+  if (aws === "challenge" || aws === "captcha") return `AWS WAF ${aws} (HTTP ${res.status})`;
+  if (BLOCKED.has(res.status)) return `blocked (HTTP ${res.status})`;
+  return undefined;
+};
 
 /** Routes in order, as a list or as `"tunnel,unblocker"`. */
 export type Via = string | readonly string[];
@@ -186,11 +203,12 @@ export const egress = async (
       skipped.push(e.message);
       continue;
     }
-    if (!BLOCKED.has(response.status)) return { response, via, skipped };
+    const why = blockedBy(response);
+    if (!why) return { response, via, skipped };
     // Kept, not read: the next route may do better, and if none does this is the answer.
     await blocked?.response.body?.cancel();
     blocked = { response, via, at: skipped.length };
-    skipped.push(`${via}: blocked (HTTP ${response.status})`);
+    skipped.push(`${via}: ${why}`);
   }
   if (blocked) {
     // Its note describes the very answer being returned, so it was not skipped.

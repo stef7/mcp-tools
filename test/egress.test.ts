@@ -113,6 +113,36 @@ describe("by default", () => {
 });
 
 describe("a blocked answer", () => {
+  const says = (status: number, headers: Record<string, string>) =>
+    (async () => page("challenge", status, headers)) as unknown as typeof fetch;
+  const home = () => tunnel(() => relayed("from home"));
+
+  it.each([
+    [200, { "cf-mitigated": "challenge" }, "Cloudflare challenge (HTTP 200)"],
+    [202, { "x-amzn-waf-action": "challenge" }, "AWS WAF challenge (HTTP 202)"],
+    [405, { "x-amzn-waf-action": "captcha" }, "AWS WAF captcha (HTTP 405)"],
+  ])("is spotted from headers alone: %i %o", async (status, headers, note) => {
+    const got = await egress({ TUNNEL: home() }, URL_, {
+      via: ["direct", "tunnel"],
+      fetch: says(status, headers),
+    });
+    expect(got.via).toBe("tunnel");
+    expect(got.skipped).toEqual([`direct: ${note}`]);
+  });
+
+  it("is not read to be spotted, so a good answer's body is still unread", async () => {
+    const got = await egress({}, URL_, { via: ["direct"], fetch: site().get });
+    expect(got.response.bodyUsed).toBe(false);
+  });
+
+  it("ignores other values of those headers", async () => {
+    const got = await egress({ TUNNEL: home() }, URL_, {
+      via: ["direct", "tunnel"],
+      fetch: says(200, { "x-amzn-waf-action": "allow" }),
+    });
+    expect(got.via).toBe("direct");
+  });
+
   it("gives way to the next route's answer, and is recorded as skipped", async () => {
     const t = tunnel(() => relayed("from home"));
     const got = await egress({ TUNNEL: t }, URL_, {
