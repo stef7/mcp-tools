@@ -18,7 +18,7 @@ export type ProxyFetchOptions = {
   /** Replaced in tests. */
   connect?: typeof tcp;
   timeoutMs?: number;
-  /** Past this many bytes the response is abandoned. Residential traffic is billed by the GB. */
+  /** Past this many bytes the response is abandoned. */
   maxBytes?: number;
 };
 

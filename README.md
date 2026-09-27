@@ -115,7 +115,7 @@ keeps plain variables too, so `WP_SITES` survives a deploy).
 
 5. `npm run check`, commit, push to `main`; the deploy workflow picks the new folder up.
 
-## Fetching from an Australian address
+## Getting past blocks
 
 `mcp-fetch` downloads through `core/egress.ts`, which tries three routes in order and uses the
 first that answers:
@@ -124,12 +124,14 @@ first that answers:
    to the `wmac` service: `localhost:8811` on the Mac behind Cloudflare Tunnel `WMac`. Run
    `node scripts/tunnel-relay.mjs` there. A tunnel that does not answer within 8 seconds is left
    alone for a minute, so a sleeping Mac costs one slow request, not every request.
-2. **unblocker** — Apify Proxy's `RESIDENTIAL` pool pinned to `AU`, through `core/proxy.ts`. A
+2. **unblocker** — Apify Proxy's `UNBLOCKER` group, through `core/proxy.ts`. It handles bot checks
+   and CAPTCHAs and picks the country itself; none is pinned, since Apify says that weakens it. A
    Worker's `fetch` cannot use an HTTP proxy, so this opens a TCP socket to `proxy.apify.com:8000`,
    sends `CONNECT`, and starts TLS to the site inside it with
    `startTls({ expectedServerHostname })`. Needs `APIFY_PROXY_PASSWORD` on `mcp-fetch` — the
-   password on Apify Console -> Proxy, not an API token — and a paid Apify plan. Billed by the
-   GB, so responses over 25 MB are abandoned. Any refusal (407, Apify's 590–599) moves on.
+   password on Apify Console -> Proxy, not an API token — and a paid Apify plan. Billed per
+   successful request. Any refusal (407, Apify's 590–599) moves on. Apify does not say whether
+   Unblocker re-signs HTTPS; if it does, every https URL fails this route with a TLS error.
 3. **direct** — the worker's own `fetch`, from a Cloudflare colo.
 
 The site's own answer, a 403 included, is final: the cascade only moves on when a _route_ fails.

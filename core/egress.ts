@@ -1,10 +1,10 @@
 /**
- * Getting a URL off the open web from an Australian address, cheapest route first.
+ * Getting a URL off the open web past whatever blocks a Cloudflare IP, cheapest route first.
  *
  *   tunnel     the Mac behind Cloudflare Tunnel, via scripts/tunnel-relay.mjs: a home
  *              connection, free, and the best disguise there is. Used whenever it answers.
- *   unblocker  Apify Proxy's residential pool, pinned to Australia, through core/proxy.ts.
- *              Billed by the GB, and returns the site's own bytes, documents included.
+ *   unblocker  Apify Proxy's Unblocker, through core/proxy.ts: it deals with bot checks and
+ *              CAPTCHAs itself and picks the country. Billed per successful request.
  *   direct     the worker's own `fetch`, from whichever Cloudflare colo ran it. Always there.
  *
  * Each route either returns the site's answer — a 403 or 404 included, since that is the site
@@ -79,28 +79,34 @@ const viaTunnel = async (tunnel: Fetcher, url: string, headers: Record<string, s
 
 // ─── unblocker ────────────────────────────────────────────────────────────────────────────────────
 /**
- * Apify Proxy's residential pool in Australia. The group and the country ride in the username;
- * the password is the proxy password from Apify Console -> Proxy, not the API token. External
- * connections need a paid Apify plan.
+ * Apify Proxy's Unblocker. The group rides in the username; the password is the proxy password
+ * from Apify Console -> Proxy, not the API token. External connections need a paid Apify plan.
+ *
+ * No country: Apify says pinning one "can reduce how effectively Unblocker bypasses anti-bot
+ * protection", and getting past the block is the point. The tunnel is the Australian route.
  */
-const APIFY_PROXY = {
-  hostname: "proxy.apify.com",
-  port: 8000,
-  username: "groups-RESIDENTIAL,country-AU",
-};
+const APIFY_PROXY = { hostname: "proxy.apify.com", port: 8000, username: "groups-UNBLOCKER" };
 
 const viaUnblocker = async (password: string, url: string, opts: EgressOptions) => {
   try {
     return await proxyFetch({ ...APIFY_PROXY, password }, url, {
       ...(opts.headers && { headers: opts.headers }),
       ...(opts.connect && { connect: opts.connect }),
+      // Bot challenges take a while to get through.
+      timeoutMs: 60_000,
     });
   } catch (e) {
-    // Apify does not document what it answers once residential traffic runs out, so every
-    // refusal moves on; the status says which it was.
+    // Apify does not document what it answers once Unblocker units run out, so every refusal
+    // moves on; the status says which it was.
     if (e instanceof ProxyError && e.status === 407)
-      throw new Pass("unblocker: refused (407): wrong password, or no paid plan or traffic left");
-    throw new Pass(`unblocker: ${e instanceof Error ? e.message : String(e)}`);
+      throw new Pass("unblocker: refused (407): wrong password, or no paid plan or units left");
+    const message = e instanceof Error ? e.message : String(e);
+    // Nor does it say whether Unblocker re-signs HTTPS to do its work. If it does, every https
+    // URL fails here, and a Worker has no way to accept a certificate it cannot verify.
+    const tls = /tls|ssl|certificate/i.test(message)
+      ? " (every https URL failing like this means Unblocker re-signs HTTPS, which a Worker cannot accept)"
+      : "";
+    throw new Pass(`unblocker: ${message}${tls}`);
   }
 };
 

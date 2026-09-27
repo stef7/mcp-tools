@@ -46,7 +46,7 @@ const waitForPort = async (port: number) => {
 
 export default async function setup(project: TestProject) {
   // The proxy accepts only the username production sends, so a passing test proves what that is.
-  const args = { proxy: ["groups-RESIDENTIAL,country-AU:secret"] } as Record<string, string[]>;
+  const args = { proxy: ["groups-UNBLOCKER:secret"] } as Record<string, string[]>;
   const children = MOCKS.map((m) =>
     spawn("node", [m.script, String(m.port), ...(args[m.name] ?? [])], { stdio: "ignore" }),
   );

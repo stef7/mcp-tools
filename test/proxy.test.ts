@@ -13,7 +13,7 @@ const port = () => inject("proxyPort");
 const proxy = () => ({
   hostname: "127.0.0.1",
   port: port(),
-  username: "groups-RESIDENTIAL,country-AU",
+  username: "groups-UNBLOCKER",
   password: "secret",
 });
 
@@ -75,7 +75,7 @@ describe("the unblocker route in the cascade", () => {
     connect({ hostname: "127.0.0.1", port: port() }, opts);
   const site = (async () => new Response("from cloudflare")) as unknown as typeof fetch;
 
-  it("gets the page through the proxy, as the AU residential username", async () => {
+  it("gets the page through the proxy, as the Unblocker username", async () => {
     const got = await egress({ APIFY_PROXY_PASSWORD: "secret" }, "http://site.test/plain", {
       connect: toMock,
       fetch: site,
@@ -92,7 +92,7 @@ describe("the unblocker route in the cascade", () => {
     expect(got.via).toBe("direct");
     expect(got.skipped).toEqual([
       "tunnel: not bound",
-      "unblocker: refused (407): wrong password, or no paid plan or traffic left",
+      "unblocker: refused (407): wrong password, or no paid plan or units left",
     ]);
   });
 
