@@ -13,6 +13,7 @@ const MOCKS = [
     port: 8798,
     ready: "/members/api/integrity-token/",
   },
+  { name: "proxy", script: "scripts/mock-proxy.mjs", port: 8797, ready: null },
 ] as const;
 
 const waitFor = async (url: string) => {
@@ -29,11 +30,34 @@ const waitFor = async (url: string) => {
   return false;
 };
 
+const waitForPort = async (port: number) => {
+  for (let i = 0; i < 50; i++) {
+    if (
+      await fetch(`http://127.0.0.1:${port}/`).then(
+        () => true,
+        () => false,
+      )
+    )
+      return true;
+    await new Promise((r) => setTimeout(r, 100));
+  }
+  return false;
+};
+
 export default async function setup(project: TestProject) {
-  const children = MOCKS.map((m) => spawn("node", [m.script, String(m.port)], { stdio: "ignore" }));
-  for (const m of MOCKS) await waitFor(`http://localhost:${m.port}${m.ready}`);
+  // The proxy accepts only the username production sends, so a passing test proves what that is.
+  const args = { proxy: ["groups-UNBLOCKER:secret"] } as Record<string, string[]>;
+  const children = MOCKS.map((m) =>
+    spawn("node", [m.script, String(m.port), ...(args[m.name] ?? [])], { stdio: "ignore" }),
+  );
+  for (const m of MOCKS) {
+    // The proxy answers every request, so any response at all means it is up.
+    if (m.ready) await waitFor(`http://localhost:${m.port}${m.ready}`);
+    else await waitForPort(m.port);
+  }
   project.provide("mockBase", `http://localhost:${MOCKS[0].port}`);
   project.provide("ghostBase", `http://localhost:${MOCKS[1].port}`);
+  project.provide("proxyPort", MOCKS[2].port);
   return () => children.forEach((c) => c.kill());
 }
 
@@ -41,5 +65,6 @@ declare module "vitest" {
   interface ProvidedContext {
     mockBase: string;
     ghostBase: string;
+    proxyPort: number;
   }
 }
