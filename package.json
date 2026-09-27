@@ -11,8 +11,14 @@
     "test": "vitest run"
   },
   "devDependencies": {
-    "@cloudflare/vitest-pool-workers": "^0.9.11",
+    "@cloudflare/vitest-pool-workers": "^0.22.0",
     "prettier": "^3.6.2",
-    "vitest": "^3.2.4"
+    "vitest": "^4.1.11"
+  },
+  "overrides": {
+    "@cloudflare/vitest-pool-workers": {
+      "miniflare": "5.20260907.0-alpha"
+    },
+    "sharp": "0.35.4"
   }
 }
