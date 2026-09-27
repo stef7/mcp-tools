@@ -5,35 +5,54 @@
  * URL it is handed from this machine's own connection.
  *
  *   node scripts/tunnel-relay.mjs [port]      default 8811
+ *   ALLOW_DOMAINS=example.org,acnc.gov.au     optional: refuse every other domain
  *
  *   GET /fetch?url=<absolute url>   the site's answer: status, headers and body as received
  *   GET /health                     "ok", for checking by hand
  *
  * Listens on loopback only, so the one way in is through the tunnel, and from there only a
  * Worker holding the binding. It still refuses private and loopback addresses — including at each
- * redirect — so a URL typed into a tool cannot be used to look around the home network.
+ * redirect — so a URL typed into a tool cannot be used to look around the home network. The check
+ * runs inside the socket's own DNS lookup, so the address checked is the address connected to: a
+ * name that answers public for the check and private for the connection gets nowhere.
+ *
+ * `ALLOW_DOMAINS` narrows it further: a comma-separated list, each entry also covering its
+ * subdomains, checked at every hop as well.
  *
  * Everything the relay says itself carries `x-relay-error`; a response it passes on carries
  * `x-relay-status`. That is how the Worker tells "the site said 502" from "the relay could not
  * get there". Needs Node 18 or later, and nothing from npm.
  */
-import { createServer } from "node:http";
-import { lookup } from "node:dns/promises";
+import http from "node:http";
+import https from "node:https";
+import { lookup } from "node:dns";
 import { isIP } from "node:net";
+import { pipeline } from "node:stream/promises";
+import { createBrotliDecompress, createGunzip, createInflate } from "node:zlib";
 
 const PORT = Number(process.argv[2] ?? 8811);
 const MAX_REDIRECTS = 10;
 const TIMEOUT_MS = 30_000;
+const ALLOW = (process.env.ALLOW_DOMAINS ?? "")
+  .split(",")
+  .map((d) =>
+    d
+      .trim()
+      .toLowerCase()
+      .replace(/^\.+|\.+$/g, ""),
+  )
+  .filter(Boolean);
 
 /** What a caller may pass through to the site. Anything else stays behind. */
 const FORWARD = ["user-agent", "accept", "accept-language", "referer"];
-/** Undici decodes the body, so the encoding and length it arrived with no longer describe it. */
-const DROP = new Set([
-  "content-encoding",
-  "content-length",
-  "transfer-encoding",
-  "connection",
-  "keep-alive",
+/** Hop-by-hop headers, and the length, which no longer describes a body the relay decoded. */
+const DROP = new Set(["content-length", "transfer-encoding", "connection", "keep-alive"]);
+/** The encodings asked for, and how to undo each. Anything else is passed on still encoded. */
+const DECODERS = new Map([
+  ["gzip", createGunzip],
+  ["x-gzip", createGunzip],
+  ["br", createBrotliDecompress],
+  ["deflate", createInflate],
 ]);
 
 const privateV4 = (ip) => {
@@ -51,35 +70,78 @@ const privateV4 = (ip) => {
 };
 const privateV6 = (ip) => {
   const v = ip.toLowerCase();
-  if (v.startsWith("::ffff:")) return privateV4(v.slice(7));
+  if (v.startsWith("::ffff:")) return isIP(v.slice(7)) === 4 ? privateV4(v.slice(7)) : true;
   return v === "::" || v === "::1" || /^f[cd]/.test(v) || /^fe[89ab]/.test(v);
 };
 const isPrivate = (ip) => (isIP(ip) === 4 ? privateV4(ip) : privateV6(ip));
 
-/** Throws unless every address the host resolves to is public. */
-const checkPublic = async (url) => {
+/**
+ * The outgoing socket's DNS lookup: every address the name resolves to must be public, and the
+ * socket connects to one of those same addresses.
+ */
+const publicLookup = (hostname, options, callback) => {
+  lookup(hostname, { ...options, all: true }, (err, addrs) => {
+    if (err) return callback(err);
+    const bad = addrs.find((a) => isPrivate(a.address));
+    if (bad)
+      return callback(new Error(`refusing ${hostname}: ${bad.address} is a private address`));
+    if (!addrs.length) return callback(new Error(`${hostname} has no address`));
+    if (options.all) return callback(null, addrs);
+    callback(null, addrs[0].address, addrs[0].family);
+  });
+};
+
+/** Scheme, address literal and allow-list, before anything is sent. */
+const checkUrl = (url) => {
   if (url.protocol !== "http:" && url.protocol !== "https:") {
     throw new Error(`refusing ${url.protocol} URLs`);
   }
-  const host = url.hostname.replace(/^\[|\]$/g, "");
-  const addrs = isIP(host) ? [{ address: host }] : await lookup(host, { all: true });
-  const bad = addrs.find((a) => isPrivate(a.address));
-  if (bad) throw new Error(`refusing ${host}: ${bad.address} is a private address`);
+  const host = url.hostname.replace(/^\[|\]$/g, "").toLowerCase();
+  // A literal address never goes through the lookup, so it is checked here instead.
+  if (isIP(host) && isPrivate(host)) throw new Error(`refusing ${host}: a private address`);
+  if (ALLOW.length && !ALLOW.some((d) => host === d || host.endsWith(`.${d}`))) {
+    throw new Error(`refusing ${host}: not in ALLOW_DOMAINS`);
+  }
+};
+
+const get = (url, headers) =>
+  new Promise((resolve, reject) => {
+    const client = url.protocol === "https:" ? https : http;
+    client
+      .request(
+        url,
+        { headers, lookup: publicLookup, signal: AbortSignal.timeout(TIMEOUT_MS) },
+        resolve,
+      )
+      .on("error", reject)
+      .end();
+  });
+
+/** The whole body, decoded when it came in an encoding the relay asked for. */
+const readBody = async (res) => {
+  const decoder = DECODERS.get(
+    String(res.headers["content-encoding"] ?? "")
+      .trim()
+      .toLowerCase(),
+  );
+  const chunks = [];
+  await pipeline(res, ...(decoder ? [decoder()] : []), async (source) => {
+    for await (const chunk of source) chunks.push(chunk);
+  });
+  return { body: Buffer.concat(chunks), decoded: Boolean(decoder) };
 };
 
 const relay = async (target, incoming) => {
-  const headers = { "accept-language": "en-AU,en;q=0.9" };
+  const headers = { "accept-language": "en-AU,en;q=0.9", "accept-encoding": "gzip, deflate, br" };
   for (const name of FORWARD) if (incoming[name]) headers[name] = incoming[name];
   let url = new URL(target);
   for (let hop = 0; hop <= MAX_REDIRECTS; hop++) {
-    await checkPublic(url);
-    const res = await fetch(url, {
-      headers,
-      redirect: "manual",
-      signal: AbortSignal.timeout(TIMEOUT_MS),
-    });
-    const next = res.status >= 300 && res.status < 400 && res.headers.get("location");
-    if (!next) return { res, finalUrl: url.href };
+    checkUrl(url);
+    const res = await get(url, headers);
+    const next = res.statusCode >= 300 && res.statusCode < 400 && res.headers.location;
+    if (!next) return { res, finalUrl: url.href, ...(await readBody(res)) };
+    // Drained, not read; an error on the way out must not take the process down with it.
+    res.on("error", () => {}).resume();
     url = new URL(next, url);
   }
   throw new Error(`more than ${MAX_REDIRECTS} redirects`);
@@ -97,14 +159,16 @@ const server = async (req, out) => {
   const target = url.searchParams.get("url");
   if (!target) return fail(out, 400, "missing ?url=");
   try {
-    const { res, finalUrl } = await relay(target, req.headers);
-    const headers = { "x-relay-status": String(res.status), "x-relay-final-url": finalUrl };
-    res.headers.forEach((value, name) => {
-      if (!DROP.has(name) && name !== "set-cookie") headers[name] = value;
-    });
-    out.writeHead(res.status, headers);
-    out.end(Buffer.from(await res.arrayBuffer()));
-    console.log(`${res.status} ${target}`);
+    const { res, finalUrl, body, decoded } = await relay(target, req.headers);
+    const headers = { "x-relay-status": String(res.statusCode), "x-relay-final-url": finalUrl };
+    for (const [name, value] of Object.entries(res.headers)) {
+      if (DROP.has(name) || name === "set-cookie") continue;
+      if (decoded && name === "content-encoding") continue;
+      headers[name] = value;
+    }
+    out.writeHead(res.statusCode, headers);
+    out.end(body);
+    console.log(`${res.statusCode} ${target}`);
   } catch (e) {
     const message = String(e?.cause?.message ?? e?.message ?? e).replace(/[\r\n]+/g, " ");
     console.log(`ERR ${target}: ${message}`);
@@ -114,7 +178,8 @@ const server = async (req, out) => {
 
 // The VPC Service points at `localhost`, which cloudflared may resolve to either family.
 for (const host of ["127.0.0.1", "::1"]) {
-  createServer(server)
+  http
+    .createServer(server)
     .on("error", (e) => console.log(`not listening on ${host}: ${e.message}`))
     .listen(PORT, host, () => console.log(`tunnel relay on ${host}:${PORT}`));
 }

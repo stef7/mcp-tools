@@ -142,8 +142,9 @@ checked; the body is never read to decide. Any other answer, 404 included, is ke
 3. **tunnel** — a home connection in Australia, only while the Mac is on. `env.TUNNEL` is a VPC
    Service binding (`vpc_services` in `mcp-fetch/wrangler.json`) to the `wmac` service:
    `localhost:8811` on the Mac behind Cloudflare Tunnel `WMac`. Run `node scripts/tunnel-relay.mjs`
-   there. A tunnel that does not answer within 8 seconds is left alone for a minute, so a sleeping
-   Mac costs one slow request, not every request.
+   there; `ALLOW_DOMAINS=a.org,b.gov.au` limits it to those domains and their subdomains. A tunnel
+   that does not answer within 8 seconds is left alone for a minute, so a sleeping Mac costs one
+   slow request, not every request.
 
 The order is `via`: a list, `["tunnel", "unblocker", "direct"]`, or the same as a string,
 `"tunnel,unblocker,direct"`. One route means no fallback, so `["tunnel"]` fails when the Mac is
