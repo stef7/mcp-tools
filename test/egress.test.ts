@@ -245,6 +245,24 @@ describe("the tunnel", () => {
   });
 });
 
+describe("the browser", () => {
+  it("asks the same relay for the page loaded in Chrome", async () => {
+    const t = tunnel(() => relayed("rendered"));
+    const got = await egress({ TUNNEL: t }, URL_, { via: ["browser"], fetch: site().get });
+    expect(got.via).toBe("browser");
+    expect(await got.response.text()).toBe("rendered");
+    expect(t.seen).toEqual([`http://relay/fetch?url=${encodeURIComponent(URL_)}&mode=browser`]);
+  });
+
+  it("moves on when the relay will not open that domain", async () => {
+    const no = "refusing example.org: not in BROWSER_ALLOW_DOMAINS";
+    const t = tunnel(() => page(no, 502, { "x-relay-error": no }));
+    const got = await egress({ TUNNEL: t }, URL_, { via: "browser,direct", fetch: site().get });
+    expect(got.via).toBe("direct");
+    expect(got.skipped).toEqual([`browser: ${no}`]);
+  });
+});
+
 describe("via", () => {
   it("takes a comma-separated string as well as a list", async () => {
     const t = tunnel(() => relayed("from home"));
@@ -273,7 +291,7 @@ describe("via", () => {
 
   it("refuses a name it does not know rather than skipping it", async () => {
     await expect(egress({}, URL_, { via: ["tunel", "direct"], fetch: site().get })).rejects.toThrow(
-      "Unknown route tunel; use unblocker, tunnel, direct.",
+      "Unknown route tunel; use unblocker, tunnel, browser, direct.",
     );
   });
 
