@@ -1,12 +1,14 @@
 /**
- * Getting a URL off the open web past whatever blocks a Cloudflare IP, in this order:
+ * Getting a URL off the open web past whatever blocks a Cloudflare IP. By default:
  *
  *   unblocker  Apify Proxy's Unblocker, through core/proxy.ts: it deals with bot checks and
  *              CAPTCHAs itself and picks the country. Billed per successful request.
- *   tunnel     only with `tunnel: true`. The Mac behind Cloudflare Tunnel, via
- *              scripts/tunnel-relay.mjs: a home connection in Australia, for when the unblocker
- *              has no quota left.
  *   direct     the worker's own `fetch`, from whichever Cloudflare colo ran it. Always there.
+ *
+ * With `tunnel: true`, only:
+ *
+ *   tunnel     the Mac behind Cloudflare Tunnel, via scripts/tunnel-relay.mjs: a home
+ *              connection in Australia, for when the unblocker has no quota left.
  *
  * Each route either returns the site's answer — a 403 or 404 included, since that is the site
  * speaking, not the route failing — or says why it could not, and the next one is tried. What was
@@ -19,9 +21,9 @@ import { ProxyError, proxyFetch, type ProxyFetchOptions } from "./proxy";
 export const ROUTES = ["unblocker", "tunnel", "direct"] as const;
 export type Route = (typeof ROUTES)[number];
 
-/** The tunnel only when asked for: it depends on the Mac being awake, and on its connection. */
+/** The tunnel only when asked for, and then alone: it depends on the Mac being awake. */
 const orderFor = (opts: EgressOptions): readonly Route[] =>
-  opts.via ? [opts.via] : ROUTES.filter((r) => r !== "tunnel" || opts.tunnel);
+  opts.tunnel ? ["tunnel"] : opts.via ? [opts.via] : ["unblocker", "direct"];
 
 /** Just the part of a VPC Service binding this uses, so a test can pass a plain object. */
 type Fetcher = { fetch(input: string, init?: RequestInit): Promise<Response> };
@@ -33,8 +35,8 @@ export type EgressOptions = {
   /** One route and no fallback. Omit for the cascade. */
   via?: Route;
   /**
-   * Try the tunnel between the unblocker and a plain fetch: for when the unblocker is out of
-   * quota and a home connection might still get through. Off unless asked for.
+   * The tunnel and nothing else — a home connection, for when the unblocker is out of quota. If
+   * the tunnel is down this fails rather than falling back. Wins over `via`.
    */
   tunnel?: boolean;
   /** The direct route's fetch; tests replace it. */

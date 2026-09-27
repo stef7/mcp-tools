@@ -5,8 +5,8 @@
  * you name a URL and a format, you get that URL in that format. Everything fetched is kept, so
  * `search` can look across whatever you have fetched before without going back to the network.
  *
- * Every download goes out through core/egress.ts — Apify's Unblocker, then (if asked)
- * the tunnel to the Mac, then Cloudflare itself — and `egress` offers the same to other workers.
+ * Every download goes out through core/egress.ts — Apify's Unblocker, then Cloudflare
+ * itself, or with `tunnel: true` the tunnel to the Mac alone — and `egress` offers the same to other workers.
  *
  * Storage (unchanged from the previous version, so existing cached documents still work):
  *   KV  raw:<url>   the original bytes, forever — re-formatting never re-downloads
@@ -253,8 +253,8 @@ const Tools = mcpWorker({
           tunnel: {
             type: "boolean",
             description:
-              "Also try `tunnel` (an Australian home connection) after the unblocker and before " +
-              "`direct`. For when the unblocker is out of quota. Default false.",
+              "Fetch through `tunnel` (an Australian home connection) and nothing else; fails " +
+              "if the tunnel is offline. For when the unblocker is out of quota. Default false.",
           },
         },
       },
