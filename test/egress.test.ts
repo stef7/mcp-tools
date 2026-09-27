@@ -218,12 +218,15 @@ describe("the tunnel", () => {
     ]);
   });
 
-  it("counts a 5xx the relay did not mark as nothing listening", async () => {
-    const t = tunnel(() => page("Bad Gateway", 502));
-    await expect(egress({ TUNNEL: t }, URL_, { ...alone, fetch: site().get })).rejects.toThrow(
-      "tunnel: relay not answering (HTTP 502)",
-    );
-  });
+  it.each([502, 404])(
+    "counts an answer the relay did not mark (HTTP %i) as the relay not answering",
+    async (status) => {
+      const t = tunnel(() => page("not the relay", status));
+      await expect(egress({ TUNNEL: t }, URL_, { ...alone, fetch: site().get })).rejects.toThrow(
+        `tunnel: relay not answering (HTTP ${status})`,
+      );
+    },
+  );
 
   it("is not written off when only the site was unreachable", async () => {
     const t = tunnel(() => page("ENOTFOUND", 502, { "x-relay-error": "getaddrinfo ENOTFOUND" }));

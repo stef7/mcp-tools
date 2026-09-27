@@ -124,11 +124,12 @@ const viaTunnel = async (tunnel: Fetcher, url: string, headers: Record<string, s
     tunnelDownUntil = Date.now() + DOWN_FOR_MS;
     throw new Pass(`tunnel: ${e instanceof Error ? e.message : String(e)}`);
   }
-  // The relay marks everything it says itself. An unmarked 5xx is cloudflared finding nothing
-  // listening on the port: the Mac is up, the relay is not.
+  // The relay marks everything it says itself. An unmarked answer is not the relay: a 5xx is
+  // cloudflared finding nothing listening on the port, and anything else is some other program
+  // on it (`python -m http.server` answers every URL with a 404). The Mac is up, the relay is not.
   const relayError = res.headers.get("x-relay-error");
   if (relayError) throw new Pass(`tunnel: ${relayError}`);
-  if (!res.headers.has("x-relay-status") && res.status >= 500) {
+  if (!res.headers.has("x-relay-status")) {
     tunnelDownUntil = Date.now() + DOWN_FOR_MS;
     throw new Pass(`tunnel: relay not answering (HTTP ${res.status})`);
   }
