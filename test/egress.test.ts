@@ -47,33 +47,134 @@ beforeEach(resetTunnel);
 
 const NO_UNBLOCKER = "unblocker: no APIFY_PROXY_PASSWORD";
 
+/** The worker's own fetch, answering with this status. */
+const siteSays = (status: number) => {
+  const seen: string[] = [];
+  const get = (async (input: RequestInfo | URL) => {
+    seen.push(String(input));
+    return page(`cloudflare got ${status}`, status);
+  }) as typeof fetch;
+  return { seen, get };
+};
+
 describe("by default", () => {
-  it("never touches the tunnel", async () => {
+  it("fetches directly, and never touches the tunnel or the unblocker", async () => {
     const t = tunnel(() => relayed("from home"));
-    const got = await egress({ TUNNEL: t }, URL_, { fetch: site().get });
+    const got = await egress({ TUNNEL: t, ...unreachable }, URL_, {
+      fetch: site().get,
+      connect: noSocket,
+    });
     expect(got.via).toBe("direct");
-    expect(got.skipped).toEqual([NO_UNBLOCKER]);
+    expect(await got.response.text()).toBe("from cloudflare");
+    expect(got.skipped).toEqual([]);
     expect(t.seen).toEqual([]);
   });
 
-  it("falls back to Cloudflare when the unblocker cannot be reached", async () => {
-    const got = await egress(unreachable, URL_, { fetch: site().get, connect: noSocket });
+  it.each([403, 429, 451, 503])("tries the unblocker when the site answers %i", async (status) => {
+    let asked = false;
+    const got = await egress(unreachable, URL_, {
+      fetch: siteSays(status).get,
+      connect: (() => {
+        asked = true;
+        throw new Error("no proxy here");
+      }) as never,
+    });
+    expect(asked).toBe(true);
+    // The unblocker failed too, so the site's own answer comes back rather than an error.
     expect(got.via).toBe("direct");
-    expect(await got.response.text()).toBe("from cloudflare");
-    expect(got.skipped).toEqual([
-      "unblocker: proxy request failed, cannot connect to the specified address",
-    ]);
+    expect(got.response.status).toBe(status);
+    expect(got.skipped).toEqual(["unblocker: no proxy here"]);
+  });
+
+  it.each([200, 301, 401, 404, 500])(
+    "keeps a %i without paying for the unblocker",
+    async (status) => {
+      let asked = false;
+      const got = await egress(unreachable, URL_, {
+        fetch: siteSays(status).get,
+        connect: (() => {
+          asked = true;
+          throw new Error("no proxy here");
+        }) as never,
+      });
+      expect(asked).toBe(false);
+      expect(got.response.status).toBe(status);
+    },
+  );
+
+  it("tries the unblocker when the direct fetch cannot connect at all", async () => {
+    const broken = (async () => {
+      throw new TypeError("fetch failed");
+    }) as unknown as typeof fetch;
+    await expect(egress(unreachable, URL_, { fetch: broken, connect: noSocket })).rejects.toThrow(
+      "No route could fetch https://example.org/page: direct: fetch failed; unblocker: proxy request failed",
+    );
   });
 });
 
-describe("with tunnel: true", () => {
-  const on = { tunnel: true } as const;
+describe("a blocked answer", () => {
+  const says = (status: number, headers: Record<string, string>) =>
+    (async () => page("challenge", status, headers)) as unknown as typeof fetch;
+  const home = () => tunnel(() => relayed("from home"));
 
-  it("uses only the tunnel, and asks the relay for the URL", async () => {
+  it.each([
+    [200, { "cf-mitigated": "challenge" }, "Cloudflare challenge (HTTP 200)"],
+    [202, { "x-amzn-waf-action": "challenge" }, "AWS WAF challenge (HTTP 202)"],
+    [405, { "x-amzn-waf-action": "captcha" }, "AWS WAF captcha (HTTP 405)"],
+  ])("is spotted from headers alone: %i %o", async (status, headers, note) => {
+    const got = await egress({ TUNNEL: home() }, URL_, {
+      via: ["direct", "tunnel"],
+      fetch: says(status, headers),
+    });
+    expect(got.via).toBe("tunnel");
+    expect(got.skipped).toEqual([`direct: ${note}`]);
+  });
+
+  it("is not read to be spotted, so a good answer's body is still unread", async () => {
+    const got = await egress({}, URL_, { via: ["direct"], fetch: site().get });
+    expect(got.response.bodyUsed).toBe(false);
+  });
+
+  it("ignores other values of those headers", async () => {
+    const got = await egress({ TUNNEL: home() }, URL_, {
+      via: ["direct", "tunnel"],
+      fetch: says(200, { "x-amzn-waf-action": "allow" }),
+    });
+    expect(got.via).toBe("direct");
+  });
+
+  it("gives way to the next route's answer, and is recorded as skipped", async () => {
+    const t = tunnel(() => relayed("from home"));
+    const got = await egress({ TUNNEL: t }, URL_, {
+      via: ["direct", "tunnel"],
+      fetch: siteSays(403).get,
+    });
+    expect(got.via).toBe("tunnel");
+    expect(await got.response.text()).toBe("from home");
+    expect(got.skipped).toEqual(["direct: blocked (HTTP 403)"]);
+  });
+
+  it("is returned when every route is blocked: the last one's, with the earlier ones skipped", async () => {
+    const t = tunnel(() => relayed("home got 429", 429));
+    const got = await egress({ TUNNEL: t }, URL_, {
+      via: ["direct", "tunnel"],
+      fetch: siteSays(403).get,
+    });
+    expect(got.via).toBe("tunnel");
+    expect(got.response.status).toBe(429);
+    expect(await got.response.text()).toBe("home got 429");
+    expect(got.skipped).toEqual(["direct: blocked (HTTP 403)"]);
+  });
+});
+
+describe("the tunnel", () => {
+  const alone = { via: ["tunnel"] } as const;
+
+  it("is used first when named first, and asks the relay for the URL", async () => {
     const t = tunnel(() => relayed("from home"));
     const s = site();
     const got = await egress({ TUNNEL: t, ...unreachable }, URL_, {
-      ...on,
+      via: ["tunnel", "unblocker", "direct"],
       fetch: s.get,
       connect: noSocket,
     });
@@ -84,68 +185,112 @@ describe("with tunnel: true", () => {
     expect(s.seen).toEqual([]);
   });
 
-  it("passes the site's own error through", async () => {
-    const t = tunnel(() => relayed("forbidden", 403));
-    const got = await egress({ TUNNEL: t }, URL_, { ...on, fetch: site().get });
+  it("passes the site's own answer through", async () => {
+    const t = tunnel(() => relayed("not found", 404));
+    const got = await egress({ TUNNEL: t }, URL_, { via: ["tunnel", "direct"], fetch: site().get });
     expect(got.via).toBe("tunnel");
-    expect(got.response.status).toBe(403);
+    expect(got.response.status).toBe(404);
   });
 
-  it("fails when the tunnel is offline, and remembers it is down", async () => {
+  it("alone, fails when offline, and remembers it is down", async () => {
     const s = site();
-    await expect(egress({ TUNNEL: dead }, URL_, { ...on, fetch: s.get })).rejects.toThrow(
+    await expect(egress({ TUNNEL: dead }, URL_, { ...alone, fetch: s.get })).rejects.toThrow(
       "No route could fetch https://example.org/page: tunnel: Network connection lost.",
     );
     const up = tunnel(() => relayed("from home"));
-    await expect(egress({ TUNNEL: up }, URL_, { ...on, fetch: s.get })).rejects.toThrow(
+    await expect(egress({ TUNNEL: up }, URL_, { ...alone, fetch: s.get })).rejects.toThrow(
       "tunnel: down in the last minute",
     );
     expect(up.seen).toEqual([]);
     expect(s.seen).toEqual([]);
   });
 
-  it("fails on a 5xx the relay did not mark: nothing listening", async () => {
+  it("offline, hands over to the next route named", async () => {
+    const got = await egress({ TUNNEL: dead, ...unreachable }, URL_, {
+      via: ["tunnel", "unblocker", "direct"],
+      fetch: site().get,
+      connect: noSocket,
+    });
+    expect(got.via).toBe("direct");
+    expect(got.skipped).toEqual([
+      "tunnel: Network connection lost.",
+      "unblocker: proxy request failed, cannot connect to the specified address",
+    ]);
+  });
+
+  it("counts a 5xx the relay did not mark as nothing listening", async () => {
     const t = tunnel(() => page("Bad Gateway", 502));
-    await expect(egress({ TUNNEL: t }, URL_, { ...on, fetch: site().get })).rejects.toThrow(
+    await expect(egress({ TUNNEL: t }, URL_, { ...alone, fetch: site().get })).rejects.toThrow(
       "tunnel: relay not answering (HTTP 502)",
     );
   });
 
-  it("fails when the relay could not reach the site, without writing the tunnel off", async () => {
+  it("is not written off when only the site was unreachable", async () => {
     const t = tunnel(() => page("ENOTFOUND", 502, { "x-relay-error": "getaddrinfo ENOTFOUND" }));
     const get = site().get;
-    await expect(egress({ TUNNEL: t }, URL_, { ...on, fetch: get })).rejects.toThrow(
+    await expect(egress({ TUNNEL: t }, URL_, { ...alone, fetch: get })).rejects.toThrow(
       "tunnel: getaddrinfo ENOTFOUND",
     );
-    await expect(egress({ TUNNEL: t }, URL_, { ...on, fetch: get })).rejects.toThrow();
+    await expect(egress({ TUNNEL: t }, URL_, { ...alone, fetch: get })).rejects.toThrow();
     expect(t.seen).toHaveLength(2);
   });
 
-  it("fails when the tunnel is not bound", async () => {
-    await expect(egress({}, URL_, { ...on, fetch: site().get })).rejects.toThrow(
+  it("says so when it is not bound", async () => {
+    await expect(egress({}, URL_, { ...alone, fetch: site().get })).rejects.toThrow(
       "tunnel: not bound",
     );
   });
-
-  it("wins over via", async () => {
-    await expect(
-      egress({ TUNNEL: dead }, URL_, { ...on, via: "direct", fetch: site().get }),
-    ).rejects.toThrow("tunnel:");
-  });
 });
 
-describe("naming a route", () => {
-  it("uses only that route", async () => {
+describe("via", () => {
+  it("takes a comma-separated string as well as a list", async () => {
+    const t = tunnel(() => relayed("from home"));
+    const got = await egress({ TUNNEL: t }, URL_, { via: " Tunnel , direct", fetch: site().get });
+    expect(got.via).toBe("tunnel");
+  });
+
+  it("uses only the one route named, with no fallback", async () => {
     const got = await egress({ TUNNEL: tunnel(() => relayed("home")) }, URL_, {
-      via: "direct",
+      via: ["direct"],
       fetch: site().get,
     });
     expect(got.via).toBe("direct");
+    await expect(egress({}, URL_, { via: "unblocker", fetch: site().get })).rejects.toThrow(
+      "No route could fetch https://example.org/page: unblocker: no APIFY_PROXY_PASSWORD",
+    );
   });
 
-  it("fails rather than falling back", async () => {
+  it("tries a route named twice only once", async () => {
+    const t = tunnel(() => page("Bad Gateway", 502));
     await expect(
-      egress({ TUNNEL: dead }, URL_, { via: "tunnel", fetch: site().get }),
-    ).rejects.toThrow("No route could fetch https://example.org/page: tunnel: Network");
+      egress({ TUNNEL: t }, URL_, { via: ["tunnel", "tunnel"], fetch: site().get }),
+    ).rejects.toThrow();
+    expect(t.seen).toHaveLength(1);
+  });
+
+  it("refuses a name it does not know rather than skipping it", async () => {
+    await expect(egress({}, URL_, { via: ["tunel", "direct"], fetch: site().get })).rejects.toThrow(
+      "Unknown route tunel; use unblocker, tunnel, direct.",
+    );
+  });
+
+  it("falls back to the worker's EGRESS_VIA, then to direct,unblocker", async () => {
+    const t = tunnel(() => relayed("from home"));
+    const set = await egress({ TUNNEL: t, EGRESS_VIA: "tunnel,direct" }, URL_, {
+      fetch: site().get,
+    });
+    expect(set.via).toBe("tunnel");
+    const unset = await egress({ TUNNEL: t }, URL_, { fetch: siteSays(403).get });
+    expect(unset.via).toBe("direct");
+    expect(unset.skipped).toEqual([NO_UNBLOCKER]);
+  });
+
+  it("from the call wins over EGRESS_VIA", async () => {
+    const t = tunnel(() => relayed("from home"));
+    const got = await egress({ TUNNEL: t, EGRESS_VIA: "tunnel" }, URL_, {
+      via: ["direct"],
+      fetch: site().get,
+    });
+    expect(got.via).toBe("direct");
   });
 });

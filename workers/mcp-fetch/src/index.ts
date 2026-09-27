@@ -5,8 +5,9 @@
  * you name a URL and a format, you get that URL in that format. Everything fetched is kept, so
  * `search` can look across whatever you have fetched before without going back to the network.
  *
- * Every download goes out through core/egress.ts — Apify's Unblocker, then Cloudflare
- * itself, or with `tunnel: true` the tunnel to the Mac alone — and `egress` offers the same to other workers.
+ * Every download goes out through core/egress.ts — by default Cloudflare itself, then Apify's
+ * Unblocker if the site blocks it; `via` picks the routes and their order — and `egress` offers the same to
+ * other workers.
  *
  * Storage (unchanged from the previous version, so existing cached documents still work):
  *   KV  raw:<url>   the original bytes, forever — re-formatting never re-downloads
@@ -18,7 +19,7 @@ import pkg from "../package.json";
 import { mcpWorker, tool, type Ctx } from "../../../core/mcp";
 import { ICONS } from "../../../core/icons";
 import { BROWSER_UA as UA, stripHtml } from "../../../core/web";
-import { egress, ROUTES, type Route } from "../../../core/egress";
+import { egress, ROUTES, type Via } from "../../../core/egress";
 
 const FORMATS = ["auto", "markdown", "text", "raw"] as const;
 type Format = (typeof FORMATS)[number];
@@ -83,14 +84,8 @@ const browserHeaders = (url: string) => ({
   Referer: new URL(url).origin + "/",
 });
 
-type Pick = { via?: Route | undefined; tunnel?: boolean | undefined };
-
-const download = async (env: Env, url: string, pick: Pick) => {
-  const got = await egress(env, url, {
-    headers: browserHeaders(url),
-    ...(pick.via && { via: pick.via }),
-    ...(pick.tunnel && { tunnel: true }),
-  });
+const download = async (env: Env, url: string, via?: Via) => {
+  const got = await egress(env, url, { headers: browserHeaders(url), ...(via && { via }) });
   const res = got.response;
   const route = got.skipped.length ? `${got.via} (${got.skipped.join("; ")})` : got.via;
   if (!res.ok) throw new Error(`HTTP ${res.status} fetching ${url} via ${route}`);
@@ -102,13 +97,13 @@ const download = async (env: Env, url: string, pick: Pick) => {
 };
 
 /** Original bytes, from KV unless `force` says to go back to the origin. */
-const bytesFor = async (env: Env, url: string, force: boolean, pick: Pick) => {
+const bytesFor = async (env: Env, url: string, force: boolean, via?: Via) => {
   if (!force) {
     const hit = await env.CACHE.get(`raw:${url}`, "arrayBuffer");
     const ct = await env.CACHE.get(`ct:${url}`);
     if (hit) return { bytes: new Uint8Array(hit), ct, cached: true, route: "cache" };
   }
-  const { bytes, ct, route } = await download(env, url, pick);
+  const { bytes, ct, route } = await download(env, url, via);
   await env.CACHE.put(`raw:${url}`, bytes);
   if (ct) await env.CACHE.put(`ct:${url}`, ct);
   return { bytes, ct, cached: false, route };
@@ -244,28 +239,22 @@ const Tools = mcpWorker({
             description: "Re-download instead of using the cached bytes. Default false.",
           },
           via: {
-            type: "string",
-            enum: [...ROUTES],
+            type: "array",
+            items: { type: "string", enum: [...ROUTES] },
             description:
-              "Omit to let it choose: `unblocker` (gets past bot checks and CAPTCHAs; paid per " +
-              "page), then `direct` (Cloudflare). Name one to use only that route.",
-          },
-          tunnel: {
-            type: "boolean",
-            description:
-              "Fetch through `tunnel` (an Australian home connection) and nothing else; fails " +
-              "if the tunnel is offline. For when the unblocker is out of quota. Default false.",
+              "Routes to try, in order. The next is tried when one cannot connect or the site " +
+              "answers 403, 429, 451 or 503 or with a challenge header. `direct`: Cloudflare's " +
+              "own fetch. `unblocker`: gets past bot checks and CAPTCHAs, paid per page. " +
+              "`tunnel`: an Australian home connection, only while that Mac is on. One route " +
+              'means no fallback. Default ["direct", "unblocker"].',
           },
         },
       },
-      async run({ url, format, force, via, tunnel }, c) {
+      async run({ url, format, force, via }, c) {
         const env = await schema(c);
         const fmt: Format = FORMATS.includes(format as Format) ? (format as Format) : "auto";
         try {
-          const { bytes, ct, cached, route } = await bytesFor(env, url, force === true, {
-            via,
-            tunnel,
-          });
+          const { bytes, ct, cached, route } = await bytesFor(env, url, force === true, via);
           const kind = kindOf(url, ct ?? null);
           const { text, via: how } = await render(env, bytes, url, kind, fmt);
           await store(env, {
@@ -420,16 +409,13 @@ const Tools = mcpWorker({
 
 /**
  * The same routes for any worker that binds this one — `{ "binding": "FETCH", "service":
- * "mcp-fetch" }` — and calls `await env.FETCH.egress(url)`. It gets the site's Response back,
- * uncached and untouched, with `x-egress-via` saying which route served it and
- * `x-egress-skipped` why the ones before it did not. The tunnel, the Apify token and the cost of
- * both stay here.
+ * "mcp-fetch" }` — and calls `await env.FETCH.egress(url, { via: ["tunnel", "direct"] })`. It
+ * gets the site's Response back, uncached and untouched, with `x-egress-via` saying which route
+ * served it and `x-egress-skipped` why the ones before it did not. The tunnel, the proxy password
+ * and the cost of both stay here.
  */
 export default class extends Tools {
-  async egress(
-    url: string,
-    opts: { headers?: Record<string, string>; via?: Route; tunnel?: boolean } = {},
-  ) {
+  async egress(url: string, opts: { headers?: Record<string, string>; via?: Via } = {}) {
     const { response, via, skipped } = await egress(this.env, url, opts);
     const out = new Response(response.body, response);
     out.headers.set("x-egress-via", via);

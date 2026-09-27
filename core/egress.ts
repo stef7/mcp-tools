@@ -1,19 +1,23 @@
 /**
- * Getting a URL off the open web past whatever blocks a Cloudflare IP. By default:
+ * Getting a URL off the open web past whatever blocks a Cloudflare IP, through whichever routes
+ * the caller names, in the order it names them:
  *
  *   unblocker  Apify Proxy's Unblocker, through core/proxy.ts: it deals with bot checks and
  *              CAPTCHAs itself and picks the country. Billed per successful request.
+ *   tunnel     the Mac behind Cloudflare Tunnel, via scripts/tunnel-relay.mjs: a home
+ *              connection in Australia. Only as good as the Mac is awake.
  *   direct     the worker's own `fetch`, from whichever Cloudflare colo ran it. Always there.
  *
- * With `tunnel: true`, only:
+ * `via` is that order: `["tunnel", "unblocker", "direct"]`, or the same as a comma-separated
+ * string. One name means that route and no fallback. Unset, it is the worker's `EGRESS_VIA`, and
+ * failing that `direct,unblocker`: free first, paid only when the free one was turned away.
  *
- *   tunnel     the Mac behind Cloudflare Tunnel, via scripts/tunnel-relay.mjs: a home
- *              connection in Australia, for when the unblocker has no quota left.
- *
- * Each route either returns the site's answer — a 403 or 404 included, since that is the site
- * speaking, not the route failing — or says why it could not, and the next one is tried. What was
- * passed over comes back in `skipped`, so a caller can see that a page came from Cloudflare only
- * because the unblocker was out of credit.
+ * The next route is tried when one cannot get an answer at all, or when the answer is one of
+ * `blockedBy` — a status a bot check or geo-block hands out, or a challenge header. Any other answer, a 404 included, is
+ * the site speaking and is returned. If every route is blocked, the last blocked answer is
+ * returned rather than an error, since it is still what the site said. What was passed over comes
+ * back in `skipped`, so a caller can see that the unblocker was paid for because Cloudflare got a
+ * 403.
  */
 
 import { ProxyError, proxyFetch, type ProxyFetchOptions } from "./proxy";
@@ -21,24 +25,66 @@ import { ProxyError, proxyFetch, type ProxyFetchOptions } from "./proxy";
 export const ROUTES = ["unblocker", "tunnel", "direct"] as const;
 export type Route = (typeof ROUTES)[number];
 
-/** The tunnel only when asked for, and then alone: it depends on the Mac being awake. */
-const orderFor = (opts: EgressOptions): readonly Route[] =>
-  opts.tunnel ? ["tunnel"] : opts.via ? [opts.via] : ["unblocker", "direct"];
+export const DEFAULT_VIA: readonly Route[] = ["direct", "unblocker"];
+
+/**
+ * Answers that mean "not you", not "not here": 403 and 429 from bot checks and rate limits, 451
+ * from geo-blocks, 503 from challenge pages (Cloudflare's "Just a moment…" among them). A 401 is
+ * left out — a login wall is not something another IP gets past.
+ */
+export const BLOCKED = new Set([403, 429, 451, 503]);
+
+/**
+ * Why this answer is a block, or undefined when it is the site speaking. Headers and status only:
+ * the body is never read, so a good answer streams on untouched.
+ *
+ *   cf-mitigated: challenge       Cloudflare's own marker on every Challenge Page
+ *   x-amzn-waf-action             AWS WAF: `challenge` comes as a 202 and `captcha` as a 405,
+ *                                 neither of which the status list would catch
+ */
+export const blockedBy = (res: Response): string | undefined => {
+  if (res.headers.get("cf-mitigated")?.toLowerCase() === "challenge")
+    return `Cloudflare challenge (HTTP ${res.status})`;
+  const aws = res.headers.get("x-amzn-waf-action")?.toLowerCase();
+  if (aws === "challenge" || aws === "captcha") return `AWS WAF ${aws} (HTTP ${res.status})`;
+  if (BLOCKED.has(res.status)) return `blocked (HTTP ${res.status})`;
+  return undefined;
+};
+
+/** Routes in order, as a list or as `"tunnel,unblocker"`. */
+export type Via = string | readonly string[];
+
+/**
+ * The order to try, from `via`: names checked, duplicates dropped, empty meaning "not given".
+ * An unknown name is an error rather than something to skip, since a typo would otherwise
+ * quietly fall through to a route the caller never asked for.
+ */
+export const parseVia = (via: Via | undefined): Route[] | undefined => {
+  const names = (typeof via === "string" ? via.split(",") : (via ?? []))
+    .map((n) => n.trim().toLowerCase())
+    .filter(Boolean);
+  const bad = names.filter((n) => !(ROUTES as readonly string[]).includes(n));
+  if (bad.length) throw new Error(`Unknown route ${bad.join(", ")}; use ${ROUTES.join(", ")}.`);
+  return names.length ? [...new Set(names as Route[])] : undefined;
+};
+
+const orderFor = (env: EgressEnv, opts: EgressOptions) =>
+  parseVia(opts.via) ?? parseVia(env.EGRESS_VIA) ?? DEFAULT_VIA;
 
 /** Just the part of a VPC Service binding this uses, so a test can pass a plain object. */
 type Fetcher = { fetch(input: string, init?: RequestInit): Promise<Response> };
 
-export type EgressEnv = { TUNNEL?: Fetcher; APIFY_PROXY_PASSWORD?: string };
+export type EgressEnv = {
+  TUNNEL?: Fetcher;
+  APIFY_PROXY_PASSWORD?: string;
+  /** This worker's default order, e.g. "tunnel,unblocker,direct". */
+  EGRESS_VIA?: string;
+};
 
 export type EgressOptions = {
   headers?: Record<string, string>;
-  /** One route and no fallback. Omit for the cascade. */
-  via?: Route;
-  /**
-   * The tunnel and nothing else — a home connection, for when the unblocker is out of quota. If
-   * the tunnel is down this fails rather than falling back. Wins over `via`.
-   */
-  tunnel?: boolean;
+  /** Routes to try, in order; see the top of this file. */
+  via?: Via;
   /** The direct route's fetch; tests replace it. */
   fetch?: typeof fetch;
   /** The proxy route's TCP connect; tests replace it. */
@@ -135,21 +181,39 @@ export const egress = async (
     unblocker: env.APIFY_PROXY_PASSWORD
       ? () => viaUnblocker(env.APIFY_PROXY_PASSWORD!, url, opts)
       : "unblocker: no APIFY_PROXY_PASSWORD",
-    direct: () => get(url, { headers }),
+    direct: () =>
+      get(url, { headers }).catch((e: unknown) => {
+        throw new Pass(`direct: ${e instanceof Error ? e.message : String(e)}`);
+      }),
   };
   const skipped: string[] = [];
-  for (const via of orderFor(opts)) {
+  /** The latest blocked answer, and where its note sits in `skipped`. */
+  let blocked: { response: Response; via: Route; at: number } | undefined;
+  for (const via of orderFor(env, opts)) {
     const route = routes[via];
     if (typeof route === "string") {
       skipped.push(route);
       continue;
     }
+    let response: Response;
     try {
-      return { response: await route(), via, skipped };
+      response = await route();
     } catch (e) {
       if (!(e instanceof Pass)) throw e;
       skipped.push(e.message);
+      continue;
     }
+    const why = blockedBy(response);
+    if (!why) return { response, via, skipped };
+    // Kept, not read: the next route may do better, and if none does this is the answer.
+    await blocked?.response.body?.cancel();
+    blocked = { response, via, at: skipped.length };
+    skipped.push(`${via}: ${why}`);
+  }
+  if (blocked) {
+    // Its note describes the very answer being returned, so it was not skipped.
+    skipped.splice(blocked.at, 1);
+    return { response: blocked.response, via: blocked.via, skipped };
   }
   throw new Error(`No route could fetch ${url}: ${skipped.join("; ")}`);
 };

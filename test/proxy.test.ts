@@ -77,6 +77,7 @@ describe("the unblocker route in the cascade", () => {
 
   it("gets the page through the proxy, as the Unblocker username", async () => {
     const got = await egress({ APIFY_PROXY_PASSWORD: "secret" }, "http://site.test/plain", {
+      via: ["unblocker", "direct"],
       connect: toMock,
       fetch: site,
     });
@@ -86,6 +87,7 @@ describe("the unblocker route in the cascade", () => {
 
   it("falls back to Cloudflare when the proxy refuses", async () => {
     const got = await egress({ APIFY_PROXY_PASSWORD: "wrong" }, "http://site.test/plain", {
+      via: ["unblocker", "direct"],
       connect: toMock,
       fetch: site,
     });
@@ -97,6 +99,7 @@ describe("the unblocker route in the cascade", () => {
 
   it("falls back when the proxy cannot reach the site", async () => {
     const got = await egress({ APIFY_PROXY_PASSWORD: "secret" }, "http://site.test/upstream", {
+      via: ["unblocker", "direct"],
       connect: toMock,
       fetch: site,
     });
