@@ -1,10 +1,10 @@
 /**
- * APIFY_TOKEN pays for the middle route in core/egress.ts: a page through Apify's Australian
- * residential proxies when the tunnel is down. Set it in the dashboard under Settings -> Variables
- * and Secrets. Leave it unset and that route is skipped — pages go straight from Cloudflare
- * instead. Secrets are per worker, so this is a separate copy from mcp-apify's, and it needs
- * permission to run Actors, which mcp-apify's read-only token should not have.
+ * APIFY_PROXY_PASSWORD pays for the middle route in core/egress.ts: Apify Proxy's Australian
+ * residential pool when the tunnel is down. It is the password on Apify Console -> Proxy, not an
+ * API token, and it only works from outside Apify on a paid plan. Set it in the dashboard under
+ * Settings -> Variables and Secrets. Leave it unset and that route is skipped — pages go straight
+ * from Cloudflare instead.
  */
 interface Env {
-  APIFY_TOKEN?: string;
+  APIFY_PROXY_PASSWORD?: string;
 }

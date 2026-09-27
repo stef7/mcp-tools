@@ -5,7 +5,8 @@ Cloudflare Workers that speak MCP, in one TypeScript repo.
 ```
 core/mcp.ts                  shared plumbing: HTTP MCP endpoint + RPC surface + tool typing
 core/web.ts                  what a worker touching the open web needs: stripHtml, a browser UA
-core/egress.ts               tunnel -> AU residential proxy -> plain fetch, for mcp-fetch and friends
+core/egress.ts               tunnel -> unblocker -> plain fetch, for mcp-fetch and friends
+core/proxy.ts                fetch through an HTTP proxy over a raw socket (CONNECT + startTls)
 test/                        vitest, run against mocks rather than anyone's live service
 workers/mcp-toolkit/         aggregator: its own tools + every worker bound under `services`
 workers/mcp-wp/              WordPress REST API -> MCP, read and write
@@ -20,6 +21,7 @@ workers/mcp-apify/           what Apify is costing you, by service and by Actor
 scripts/mock-wp.mjs          fake WordPress for local testing
 scripts/mock-ghost.mjs       fake Ghost, including the magic-link sign-in
 scripts/tunnel-relay.mjs     runs on the Mac at the far end of the tunnel
+scripts/mock-proxy.mjs       fake Apify Proxy, for the proxy tests
 ```
 
 ## A worker is a tools object
@@ -122,17 +124,19 @@ first that answers:
    to the `wmac` service: `localhost:8811` on the Mac behind Cloudflare Tunnel `WMac`. Run
    `node scripts/tunnel-relay.mjs` there. A tunnel that does not answer within 8 seconds is left
    alone for a minute, so a sleeping Mac costs one slow request, not every request.
-2. **proxy** — `apify/rag-web-browser` through Apify's `RESIDENTIAL` proxies with country `AU`.
-   Needs `APIFY_TOKEN` on `mcp-fetch` (its own copy, able to run Actors). It returns HTML only, so
-   URLs ending `.pdf`, `.docx` and the like skip it. HTTP 402 — out of credit or over the monthly
-   cap — moves on to the next route, as does any other Apify failure.
+2. **unblocker** — Apify Proxy's `RESIDENTIAL` pool pinned to `AU`, through `core/proxy.ts`. A
+   Worker's `fetch` cannot use an HTTP proxy, so this opens a TCP socket to `proxy.apify.com:8000`,
+   sends `CONNECT`, and starts TLS to the site inside it with
+   `startTls({ expectedServerHostname })`. Needs `APIFY_PROXY_PASSWORD` on `mcp-fetch` — the
+   password on Apify Console -> Proxy, not an API token — and a paid Apify plan. Billed by the
+   GB, so responses over 25 MB are abandoned. Any refusal (407, Apify's 590–599) moves on.
 3. **direct** — the worker's own `fetch`, from a Cloudflare colo.
 
 The site's own answer, a 403 included, is final: the cascade only moves on when a _route_ fails.
-`fetch_url` takes `via` to force one route with no fallback, and records which route served each
-URL (and why earlier ones were skipped) in `docs.meta_json`.
+`fetch_url` takes `via` (`tunnel`, `unblocker` or `direct`) to force one route with no fallback,
+and records which route served each URL (and why earlier ones were skipped) in `docs.meta_json`.
 
-Any other worker can use the same routes without holding the tunnel or the token: bind
+Any other worker can use the same routes without holding the tunnel or the password: bind
 `{ "binding": "FETCH", "service": "mcp-fetch" }` and call `await env.FETCH.egress(url, { headers,
 via })`. It returns the site's `Response` with `x-egress-via` and `x-egress-skipped` headers.
 
