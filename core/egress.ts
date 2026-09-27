@@ -1,14 +1,16 @@
 /**
- * Getting a URL off the open web past whatever blocks a Cloudflare IP. By default:
+ * Getting a URL off the open web past whatever blocks a Cloudflare IP, through whichever routes
+ * the caller names, in the order it names them:
  *
  *   unblocker  Apify Proxy's Unblocker, through core/proxy.ts: it deals with bot checks and
  *              CAPTCHAs itself and picks the country. Billed per successful request.
+ *   tunnel     the Mac behind Cloudflare Tunnel, via scripts/tunnel-relay.mjs: a home
+ *              connection in Australia. Only as good as the Mac is awake.
  *   direct     the worker's own `fetch`, from whichever Cloudflare colo ran it. Always there.
  *
- * With `tunnel: true`, only:
- *
- *   tunnel     the Mac behind Cloudflare Tunnel, via scripts/tunnel-relay.mjs: a home
- *              connection in Australia, for when the unblocker has no quota left.
+ * `via` is that order: `["tunnel", "unblocker", "direct"]`, or the same as a comma-separated
+ * string. One name means that route and no fallback. Unset, it is the worker's `EGRESS_VIA`, and
+ * failing that `unblocker,direct`.
  *
  * Each route either returns the site's answer — a 403 or 404 included, since that is the site
  * speaking, not the route failing — or says why it could not, and the next one is tried. What was
@@ -21,24 +23,42 @@ import { ProxyError, proxyFetch, type ProxyFetchOptions } from "./proxy";
 export const ROUTES = ["unblocker", "tunnel", "direct"] as const;
 export type Route = (typeof ROUTES)[number];
 
-/** The tunnel only when asked for, and then alone: it depends on the Mac being awake. */
-const orderFor = (opts: EgressOptions): readonly Route[] =>
-  opts.tunnel ? ["tunnel"] : opts.via ? [opts.via] : ["unblocker", "direct"];
+export const DEFAULT_VIA: readonly Route[] = ["unblocker", "direct"];
+
+/** Routes in order, as a list or as `"tunnel,unblocker"`. */
+export type Via = string | readonly string[];
+
+/**
+ * The order to try, from `via`: names checked, duplicates dropped, empty meaning "not given".
+ * An unknown name is an error rather than something to skip, since a typo would otherwise
+ * quietly fall through to a route the caller never asked for.
+ */
+export const parseVia = (via: Via | undefined): Route[] | undefined => {
+  const names = (typeof via === "string" ? via.split(",") : (via ?? []))
+    .map((n) => n.trim().toLowerCase())
+    .filter(Boolean);
+  const bad = names.filter((n) => !(ROUTES as readonly string[]).includes(n));
+  if (bad.length) throw new Error(`Unknown route ${bad.join(", ")}; use ${ROUTES.join(", ")}.`);
+  return names.length ? [...new Set(names as Route[])] : undefined;
+};
+
+const orderFor = (env: EgressEnv, opts: EgressOptions) =>
+  parseVia(opts.via) ?? parseVia(env.EGRESS_VIA) ?? DEFAULT_VIA;
 
 /** Just the part of a VPC Service binding this uses, so a test can pass a plain object. */
 type Fetcher = { fetch(input: string, init?: RequestInit): Promise<Response> };
 
-export type EgressEnv = { TUNNEL?: Fetcher; APIFY_PROXY_PASSWORD?: string };
+export type EgressEnv = {
+  TUNNEL?: Fetcher;
+  APIFY_PROXY_PASSWORD?: string;
+  /** This worker's default order, e.g. "tunnel,unblocker,direct". */
+  EGRESS_VIA?: string;
+};
 
 export type EgressOptions = {
   headers?: Record<string, string>;
-  /** One route and no fallback. Omit for the cascade. */
-  via?: Route;
-  /**
-   * The tunnel and nothing else — a home connection, for when the unblocker is out of quota. If
-   * the tunnel is down this fails rather than falling back. Wins over `via`.
-   */
-  tunnel?: boolean;
+  /** Routes to try, in order; see the top of this file. */
+  via?: Via;
   /** The direct route's fetch; tests replace it. */
   fetch?: typeof fetch;
   /** The proxy route's TCP connect; tests replace it. */
@@ -138,7 +158,7 @@ export const egress = async (
     direct: () => get(url, { headers }),
   };
   const skipped: string[] = [];
-  for (const via of orderFor(opts)) {
+  for (const via of orderFor(env, opts)) {
     const route = routes[via];
     if (typeof route === "string") {
       skipped.push(route);
