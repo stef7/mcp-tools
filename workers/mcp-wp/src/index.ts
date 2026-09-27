@@ -16,20 +16,10 @@
  */
 import cfg from "../wrangler.json";
 import pkg from "../package.json";
-import { mcpWorker, type Ctx } from "../../../core/mcp";
+import { mcpWorker } from "../../../core/mcp";
 import { ICONS } from "../../../core/icons";
 import { genericTools, siteTools } from "./tools";
-import { credsFor, discoverSite, loginReport, siteUrl, slug, usable } from "./wp";
-
-/**
- * Which sites this connector is for: the `X-WP-Site` header first, then `?wp=` (or `?site=`).
- * The header exists so a connector can be configured entirely in Claude, with no URL to edit.
- */
-const sitesOf = ({ params, headers }: Ctx) =>
-  (headers["x-wp-site"] ?? params.get("wp") ?? params.get("site") ?? "")
-    .split(",")
-    .filter(Boolean)
-    .map(siteUrl);
+import { credsFor, discoverSite, loginReport, sitesOf, slug, usable } from "./wp";
 
 export default mcpWorker({
   ...cfg,

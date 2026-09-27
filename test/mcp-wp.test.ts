@@ -8,7 +8,6 @@
 import { SELF, createExecutionContext, env } from "cloudflare:test";
 import { describe, expect, inject, it } from "vitest";
 import Worker from "../workers/mcp-wp/src/index";
-import { authFrom } from "../workers/mcp-wp/src/wp";
 
 const base = inject("mockBase");
 const ME = "me@example.com";
@@ -176,53 +175,20 @@ describe("the MCP endpoint", () => {
   });
 });
 
-describe("the login headers", () => {
+describe("the X-API-Key header", () => {
   // Spaced the way WordPress prints an application password; the worker strips them,
   // and the mock only accepts the stripped form, so this proves both halves.
-  const HDR = { "x-auth-token": "hdr-user:abcd EFGH 1234" };
+  const HDR = { "x-api-key": "hdr-user:abcd EFGH 1234" };
   const blog = site(`${base}/blog`);
-
-  it("takes a bare entry as the login for whatever site the connector covers", () => {
-    expect(authFrom({ "x-auth-token": "u:p" }, "apil.au")).toEqual({ user: "u", pass: "p" });
-  });
-
-  it("keeps a password containing the separators a single header would have needed", () => {
-    // One entry per header is the point: nothing here has to be escaped or avoided.
-    for (const pass of ["a;b", "a,b", "a=b", "a:b", "abcd efgh ijkl"])
-      expect(authFrom({ "x-api-key": `u:${pass}` }, "x")).toEqual({ user: "u", pass });
-  });
-
-  it("gives each site its own header, and matches on the host", () => {
-    const many = { "x-auth-token": "apil.au=a:1", "x-api-key": "crikey.com.au=b:2" };
-    expect(authFrom(many, "apil.au")).toEqual({ user: "a", pass: "1" });
-    expect(authFrom(many, "crikey.com.au")).toEqual({ user: "b", pass: "2" });
-    expect(authFrom(many, "example.org")).toBeNull();
-  });
-
-  it("lets a header naming the host beat a bare one, so a default plus an exception works", () => {
-    const both = { "x-auth-token": "default:pw", "x-api-key": "apil.au=special:pw2" };
-    expect(authFrom(both, "apil.au")).toEqual({ user: "special", pass: "pw2" });
-    expect(authFrom(both, "elsewhere.org")).toEqual({ user: "default", pass: "pw" });
-  });
-
-  it("ignores headers that are not logins, and entries it cannot read", () => {
-    expect(authFrom({}, "x")).toBeNull();
-    expect(authFrom({ "x-wp-site": "apil.au" }, "x")).toBeNull();
-    expect(authFrom({ "x-auth-token": "no-colon-here" }, "x")).toBeNull();
-    expect(authFrom({ "x-auth-token": ":no-user" }, "x")).toBeNull();
-    expect(authFrom({ "x-api-key": "no-pass:" }, "x")).toBeNull();
-    // The old name is gone: Claude connectors could never send it.
-    expect(authFrom({ "x-wp-auth": "u:p" }, "x")).toBeNull();
-  });
-
-  it("prefers X-Auth-Token when both headers hold a bare login", () => {
-    const two = { "x-api-key": "second:pw", "x-auth-token": "first:pw" };
-    expect(authFrom(two, "x")).toEqual({ user: "first", pass: "pw" });
-  });
 
   it("unlocks writes with no Access identity at all", async () => {
     const specs = (await wp().tools({ search: blog, email: undefined, headers: HDR })) as Spec[];
     expect(specs.map((t) => t.name)).toContain("wp_create_posts");
+  });
+
+  it("keeps a password containing colons, equals signs and the like", async () => {
+    const out = await call("wp_login_status", {}, site(), ME, { "x-api-key": "u:a:b=c;d" });
+    expect(out).toContain("X-API-Key: used — user u");
   });
 
   it("wins over WP_SITES, so the header's own login is the one that is sent", async () => {
@@ -249,31 +215,42 @@ describe("the login headers", () => {
     expect(seen).toBe("wp-user:secretpass");
   });
 
+  it("is ignored on a connector for several sites, since one login cannot be everyone's", async () => {
+    const both = `?wp=${encodeURIComponent(`${base},${base}/blog`)}`;
+    const specs = (await wp().tools({ search: both, email: undefined, headers: HDR })) as Spec[];
+    expect(specs.some((t) => t.name.includes("_create_"))).toBe(false);
+  });
+
+  it("is never sent to a URL a generic-mode tool call names", async () => {
+    // Straight to the worker: `call` would swap an undefined email for ME.
+    const r = (await wp().call(
+      "wp_create_content",
+      { url: base, title: "Nope", user_confirmed: true },
+      { search: "", email: undefined, headers: HDR },
+    )) as { content: { text: string }[] };
+    expect(r.content[0]!.text).toContain("read-only");
+  });
+
   it("is reported by login_status without the password appearing", async () => {
     const out = await call("wp_login_status", {}, site(), ME, HDR);
-    expect(out).toContain("x-auth-token sent, one used — user hdr-user");
+    expect(out).toContain("X-API-Key: used — user hdr-user");
     expect(out).toContain("the header wins");
     expect(out).not.toContain("abcd EFGH 1234");
     expect(out).not.toContain("abcdEFGH1234");
   });
 
-  it("says what is wrong when every header names a different host", async () => {
-    const out = await call("wp_login_status", {}, site(), ME, {
-      "x-auth-token": "somewhere.else=u:p",
-    });
-    expect(out).toContain("none of them for");
+  it("says so when it cannot be read", async () => {
+    const out = await call("wp_login_status", {}, site(), ME, { "x-api-key": "no-colon" });
+    expect(out).toContain("unreadable");
     expect(out).toContain("verdict: editable"); // WP_SITES still covers this one
   });
-});
 
-describe("the X-WP-Site header", () => {
-  it("stands in for ?wp=, so a connector needs no query string", async () => {
-    const specs = (await wp().tools({
-      search: "",
-      email: ME,
-      headers: { "x-wp-site": base },
-    })) as Spec[];
-    expect(specs.map((t) => t.name)).toContain("wp_search_posts");
+  it("is the only header read: the old ones are gone", async () => {
+    const old = { "x-wp-auth": "hdr-user:abcdEFGH1234", "x-auth-token": "hdr-user:abcdEFGH1234" };
+    const specs = (await wp().tools({ search: blog, email: undefined, headers: old })) as Spec[];
+    expect(specs.some((t) => t.name.includes("_create_"))).toBe(false);
+    const viaSite = (await wp().tools({ search: "", headers: { "x-wp-site": base } })) as Spec[];
+    expect(viaSite.map((t) => t.name)).toContain("wp_discover_site"); // generic mode, not a site
   });
 });
 
