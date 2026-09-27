@@ -5,7 +5,7 @@ Cloudflare Workers that speak MCP, in one TypeScript repo.
 ```
 core/mcp.ts                  shared plumbing: HTTP MCP endpoint + RPC surface + tool typing
 core/web.ts                  what a worker touching the open web needs: stripHtml, a browser UA
-core/egress.ts               tunnel -> unblocker -> plain fetch, for mcp-fetch and friends
+core/egress.ts               unblocker -> (tunnel, if asked) -> plain fetch, for mcp-fetch and others
 core/proxy.ts                fetch through an HTTP proxy over a raw socket (CONNECT + startTls)
 test/                        vitest, run against mocks rather than anyone's live service
 workers/mcp-toolkit/         aggregator: its own tools + every worker bound under `services`
@@ -117,14 +117,10 @@ keeps plain variables too, so `WP_SITES` survives a deploy).
 
 ## Getting past blocks
 
-`mcp-fetch` downloads through `core/egress.ts`, which tries three routes in order and uses the
+`mcp-fetch` downloads through `core/egress.ts`, which tries these routes in order and uses the
 first that answers:
 
-1. **tunnel** — `env.TUNNEL`, a VPC Service binding (`vpc_services` in `mcp-fetch/wrangler.json`)
-   to the `wmac` service: `localhost:8811` on the Mac behind Cloudflare Tunnel `WMac`. Run
-   `node scripts/tunnel-relay.mjs` there. A tunnel that does not answer within 8 seconds is left
-   alone for a minute, so a sleeping Mac costs one slow request, not every request.
-2. **unblocker** — Apify Proxy's `UNBLOCKER` group, through `core/proxy.ts`. It handles bot checks
+1. **unblocker** — Apify Proxy's `UNBLOCKER` group, through `core/proxy.ts`. It handles bot checks
    and CAPTCHAs and picks the country itself; none is pinned, since Apify says that weakens it. A
    Worker's `fetch` cannot use an HTTP proxy, so this opens a TCP socket to `proxy.apify.com:8000`,
    sends `CONNECT`, and starts TLS to the site inside it with
@@ -132,15 +128,23 @@ first that answers:
    password on Apify Console -> Proxy, not an API token — and a paid Apify plan. Billed per
    successful request. Any refusal (407, Apify's 590–599) moves on. Apify does not say whether
    Unblocker re-signs HTTPS; if it does, every https URL fails this route with a TLS error.
+2. **tunnel** — only with `tunnel: true`, for when the unblocker is out of quota and a home
+   connection might still get through. `env.TUNNEL` is a VPC Service binding (`vpc_services` in
+   `mcp-fetch/wrangler.json`) to the `wmac` service: `localhost:8811` on the Mac behind Cloudflare
+   Tunnel `WMac`. Run `node scripts/tunnel-relay.mjs` there. A tunnel that does not answer within
+   8 seconds is left alone for a minute, so a sleeping Mac costs one slow request, not every
+   request.
 3. **direct** — the worker's own `fetch`, from a Cloudflare colo.
 
 The site's own answer, a 403 included, is final: the cascade only moves on when a _route_ fails.
-`fetch_url` takes `via` (`tunnel`, `unblocker` or `direct`) to force one route with no fallback,
-and records which route served each URL (and why earlier ones were skipped) in `docs.meta_json`.
+`fetch_url` takes `tunnel: true` to add the tunnel, and `via` (`unblocker`, `tunnel` or `direct`)
+to force one route with no fallback. It records which route served each URL, and why earlier
+ones were skipped, in `docs.meta_json`.
 
 Any other worker can use the same routes without holding the tunnel or the password: bind
-`{ "binding": "FETCH", "service": "mcp-fetch" }` and call `await env.FETCH.egress(url, { headers,
-via })`. It returns the site's `Response` with `x-egress-via` and `x-egress-skipped` headers.
+`{ "binding": "FETCH", "service": "mcp-fetch" }` and call
+`await env.FETCH.egress(url, { headers, via, tunnel })`. It returns the site's `Response` with
+`x-egress-via` and `x-egress-skipped` headers.
 
 Binding a VPC Service needs the **Connectivity Directory Bind** role on whoever deploys, so the
 `CLOUDFLARE_API_TOKEN` in Actions needs it too, or the `mcp-fetch` deploy fails.

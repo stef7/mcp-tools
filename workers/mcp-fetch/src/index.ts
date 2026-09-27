@@ -5,8 +5,8 @@
  * you name a URL and a format, you get that URL in that format. Everything fetched is kept, so
  * `search` can look across whatever you have fetched before without going back to the network.
  *
- * Every download goes out through core/egress.ts — the tunnel to the Mac, then Apify's
- * Unblocker, then Cloudflare itself — and `egress` offers the same to other workers.
+ * Every download goes out through core/egress.ts — Apify's Unblocker, then (if asked)
+ * the tunnel to the Mac, then Cloudflare itself — and `egress` offers the same to other workers.
  *
  * Storage (unchanged from the previous version, so existing cached documents still work):
  *   KV  raw:<url>   the original bytes, forever — re-formatting never re-downloads
@@ -83,8 +83,14 @@ const browserHeaders = (url: string) => ({
   Referer: new URL(url).origin + "/",
 });
 
-const download = async (env: Env, url: string, via?: Route) => {
-  const got = await egress(env, url, { headers: browserHeaders(url), ...(via && { via }) });
+type Pick = { via?: Route | undefined; tunnel?: boolean | undefined };
+
+const download = async (env: Env, url: string, pick: Pick) => {
+  const got = await egress(env, url, {
+    headers: browserHeaders(url),
+    ...(pick.via && { via: pick.via }),
+    ...(pick.tunnel && { tunnel: true }),
+  });
   const res = got.response;
   const route = got.skipped.length ? `${got.via} (${got.skipped.join("; ")})` : got.via;
   if (!res.ok) throw new Error(`HTTP ${res.status} fetching ${url} via ${route}`);
@@ -96,13 +102,13 @@ const download = async (env: Env, url: string, via?: Route) => {
 };
 
 /** Original bytes, from KV unless `force` says to go back to the origin. */
-const bytesFor = async (env: Env, url: string, force: boolean, via?: Route) => {
+const bytesFor = async (env: Env, url: string, force: boolean, pick: Pick) => {
   if (!force) {
     const hit = await env.CACHE.get(`raw:${url}`, "arrayBuffer");
     const ct = await env.CACHE.get(`ct:${url}`);
     if (hit) return { bytes: new Uint8Array(hit), ct, cached: true, route: "cache" };
   }
-  const { bytes, ct, route } = await download(env, url, via);
+  const { bytes, ct, route } = await download(env, url, pick);
   await env.CACHE.put(`raw:${url}`, bytes);
   if (ct) await env.CACHE.put(`ct:${url}`, ct);
   return { bytes, ct, cached: false, route };
@@ -241,17 +247,25 @@ const Tools = mcpWorker({
             type: "string",
             enum: [...ROUTES],
             description:
-              "Omit to let it choose: `tunnel` (an Australian home connection), then `unblocker` " +
-              "(gets past bot checks and CAPTCHAs; paid per page), then `direct` (Cloudflare). Name " +
-              "one to use only that route, e.g. `direct` to save unblocker credit.",
+              "Omit to let it choose: `unblocker` (gets past bot checks and CAPTCHAs; paid per " +
+              "page), then `direct` (Cloudflare). Name one to use only that route.",
+          },
+          tunnel: {
+            type: "boolean",
+            description:
+              "Also try `tunnel` (an Australian home connection) after the unblocker and before " +
+              "`direct`. For when the unblocker is out of quota. Default false.",
           },
         },
       },
-      async run({ url, format, force, via }, c) {
+      async run({ url, format, force, via, tunnel }, c) {
         const env = await schema(c);
         const fmt: Format = FORMATS.includes(format as Format) ? (format as Format) : "auto";
         try {
-          const { bytes, ct, cached, route } = await bytesFor(env, url, force === true, via);
+          const { bytes, ct, cached, route } = await bytesFor(env, url, force === true, {
+            via,
+            tunnel,
+          });
           const kind = kindOf(url, ct ?? null);
           const { text, via: how } = await render(env, bytes, url, kind, fmt);
           await store(env, {
@@ -412,7 +426,10 @@ const Tools = mcpWorker({
  * both stay here.
  */
 export default class extends Tools {
-  async egress(url: string, opts: { headers?: Record<string, string>; via?: Route } = {}) {
+  async egress(
+    url: string,
+    opts: { headers?: Record<string, string>; via?: Route; tunnel?: boolean } = {},
+  ) {
     const { response, via, skipped } = await egress(this.env, url, opts);
     const out = new Response(response.body, response);
     out.headers.set("x-egress-via", via);

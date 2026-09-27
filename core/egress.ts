@@ -1,10 +1,11 @@
 /**
- * Getting a URL off the open web past whatever blocks a Cloudflare IP, cheapest route first.
+ * Getting a URL off the open web past whatever blocks a Cloudflare IP, in this order:
  *
- *   tunnel     the Mac behind Cloudflare Tunnel, via scripts/tunnel-relay.mjs: a home
- *              connection, free, and the best disguise there is. Used whenever it answers.
  *   unblocker  Apify Proxy's Unblocker, through core/proxy.ts: it deals with bot checks and
  *              CAPTCHAs itself and picks the country. Billed per successful request.
+ *   tunnel     only with `tunnel: true`. The Mac behind Cloudflare Tunnel, via
+ *              scripts/tunnel-relay.mjs: a home connection in Australia, for when the unblocker
+ *              has no quota left.
  *   direct     the worker's own `fetch`, from whichever Cloudflare colo ran it. Always there.
  *
  * Each route either returns the site's answer — a 403 or 404 included, since that is the site
@@ -15,8 +16,12 @@
 
 import { ProxyError, proxyFetch, type ProxyFetchOptions } from "./proxy";
 
-export const ROUTES = ["tunnel", "unblocker", "direct"] as const;
+export const ROUTES = ["unblocker", "tunnel", "direct"] as const;
 export type Route = (typeof ROUTES)[number];
+
+/** The tunnel only when asked for: it depends on the Mac being awake, and on its connection. */
+const orderFor = (opts: EgressOptions): readonly Route[] =>
+  opts.via ? [opts.via] : ROUTES.filter((r) => r !== "tunnel" || opts.tunnel);
 
 /** Just the part of a VPC Service binding this uses, so a test can pass a plain object. */
 type Fetcher = { fetch(input: string, init?: RequestInit): Promise<Response> };
@@ -27,6 +32,11 @@ export type EgressOptions = {
   headers?: Record<string, string>;
   /** One route and no fallback. Omit for the cascade. */
   via?: Route;
+  /**
+   * Try the tunnel between the unblocker and a plain fetch: for when the unblocker is out of
+   * quota and a home connection might still get through. Off unless asked for.
+   */
+  tunnel?: boolean;
   /** The direct route's fetch; tests replace it. */
   fetch?: typeof fetch;
   /** The proxy route's TCP connect; tests replace it. */
@@ -126,7 +136,7 @@ export const egress = async (
     direct: () => get(url, { headers }),
   };
   const skipped: string[] = [];
-  for (const via of opts.via ? [opts.via] : ROUTES) {
+  for (const via of orderFor(opts)) {
     const route = routes[via];
     if (typeof route === "string") {
       skipped.push(route);

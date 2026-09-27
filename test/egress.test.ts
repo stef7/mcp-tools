@@ -45,70 +45,83 @@ const noSocket = (() => {
 
 beforeEach(resetTunnel);
 
-describe("the cascade", () => {
-  it("uses the tunnel when it answers, and asks the relay for the URL", async () => {
+const NO_UNBLOCKER = "unblocker: no APIFY_PROXY_PASSWORD";
+
+describe("by default", () => {
+  it("never touches the tunnel", async () => {
+    const t = tunnel(() => relayed("from home"));
+    const got = await egress({ TUNNEL: t }, URL_, { fetch: site().get });
+    expect(got.via).toBe("direct");
+    expect(got.skipped).toEqual([NO_UNBLOCKER]);
+    expect(t.seen).toEqual([]);
+  });
+
+  it("falls back to Cloudflare when the unblocker cannot be reached", async () => {
+    const got = await egress(unreachable, URL_, { fetch: site().get, connect: noSocket });
+    expect(got.via).toBe("direct");
+    expect(await got.response.text()).toBe("from cloudflare");
+    expect(got.skipped).toEqual([
+      "unblocker: proxy request failed, cannot connect to the specified address",
+    ]);
+  });
+});
+
+describe("with tunnel: true", () => {
+  const on = { tunnel: true } as const;
+
+  it("tries the tunnel after the unblocker, and asks the relay for the URL", async () => {
     const t = tunnel(() => relayed("from home"));
     const s = site();
     const got = await egress({ TUNNEL: t, ...unreachable }, URL_, {
+      ...on,
       fetch: s.get,
       connect: noSocket,
     });
     expect(got.via).toBe("tunnel");
     expect(await got.response.text()).toBe("from home");
-    expect(got.skipped).toEqual([]);
+    expect(got.skipped).toEqual([
+      "unblocker: proxy request failed, cannot connect to the specified address",
+    ]);
     expect(t.seen).toEqual([`http://relay/fetch?url=${encodeURIComponent(URL_)}`]);
     expect(s.seen).toEqual([]);
   });
 
   it("passes the site's own error through rather than trying elsewhere", async () => {
     const t = tunnel(() => relayed("forbidden", 403));
-    const got = await egress({ TUNNEL: t }, URL_, { fetch: site().get });
+    const got = await egress({ TUNNEL: t }, URL_, { ...on, fetch: site().get });
     expect(got.via).toBe("tunnel");
     expect(got.response.status).toBe(403);
   });
 
   it("moves on when the tunnel is down, and remembers it is down", async () => {
     const s = site();
-    const first = await egress({ TUNNEL: dead }, URL_, { fetch: s.get });
+    const first = await egress({ TUNNEL: dead }, URL_, { ...on, fetch: s.get });
     expect(first.via).toBe("direct");
-    expect(first.skipped[0]).toBe("tunnel: Network connection lost.");
+    expect(first.skipped).toEqual([NO_UNBLOCKER, "tunnel: Network connection lost."]);
 
     const up = tunnel(() => relayed("from home"));
-    const second = await egress({ TUNNEL: up }, URL_, { fetch: s.get });
-    expect(second.skipped[0]).toBe("tunnel: down in the last minute");
+    const second = await egress({ TUNNEL: up }, URL_, { ...on, fetch: s.get });
+    expect(second.skipped[1]).toBe("tunnel: down in the last minute");
     expect(up.seen).toEqual([]);
   });
 
   it("treats a 5xx the relay did not mark as nothing listening", async () => {
     const t = tunnel(() => page("Bad Gateway", 502));
-    const got = await egress({ TUNNEL: t }, URL_, { fetch: site().get });
-    expect(got.skipped[0]).toBe("tunnel: relay not answering (HTTP 502)");
+    const got = await egress({ TUNNEL: t }, URL_, { ...on, fetch: site().get });
+    expect(got.skipped[1]).toBe("tunnel: relay not answering (HTTP 502)");
     expect(got.via).toBe("direct");
   });
 
   it("moves on when the relay could not reach the site, without writing the tunnel off", async () => {
     const t = tunnel(() => page("ENOTFOUND", 502, { "x-relay-error": "getaddrinfo ENOTFOUND" }));
-    await egress({ TUNNEL: t }, URL_, { fetch: site().get });
-    await egress({ TUNNEL: t }, URL_, { fetch: site().get });
+    await egress({ TUNNEL: t }, URL_, { ...on, fetch: site().get });
+    await egress({ TUNNEL: t }, URL_, { ...on, fetch: site().get });
     expect(t.seen).toHaveLength(2);
   });
 
-  it("falls back to Cloudflare when the unblocker cannot be reached", async () => {
-    const got = await egress({ TUNNEL: dead, ...unreachable }, URL_, {
-      fetch: site().get,
-      connect: noSocket,
-    });
-    expect(got.via).toBe("direct");
-    expect(await got.response.text()).toBe("from cloudflare");
-    expect(got.skipped).toEqual([
-      "tunnel: Network connection lost.",
-      "unblocker: proxy request failed, cannot connect to the specified address",
-    ]);
-  });
-
-  it("says which routes were never configured", async () => {
-    const got = await egress({}, URL_, { fetch: site().get });
-    expect(got.skipped).toEqual(["tunnel: not bound", "unblocker: no APIFY_PROXY_PASSWORD"]);
+  it("says so when the tunnel is not bound", async () => {
+    const got = await egress({}, URL_, { ...on, fetch: site().get });
+    expect(got.skipped).toEqual([NO_UNBLOCKER, "tunnel: not bound"]);
   });
 });
 
@@ -121,7 +134,7 @@ describe("naming a route", () => {
     expect(got.via).toBe("direct");
   });
 
-  it("fails rather than falling back", async () => {
+  it("can name the tunnel without tunnel: true, and then fails rather than falling back", async () => {
     await expect(
       egress({ TUNNEL: dead }, URL_, { via: "tunnel", fetch: site().get }),
     ).rejects.toThrow("No route could fetch https://example.org/page: tunnel: Network");

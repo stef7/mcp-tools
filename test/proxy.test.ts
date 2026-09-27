@@ -91,7 +91,6 @@ describe("the unblocker route in the cascade", () => {
     });
     expect(got.via).toBe("direct");
     expect(got.skipped).toEqual([
-      "tunnel: not bound",
       "unblocker: refused (407): wrong password, or no paid plan or units left",
     ]);
   });
@@ -102,6 +101,6 @@ describe("the unblocker route in the cascade", () => {
       fetch: site,
     });
     expect(got.via).toBe("direct");
-    expect(got.skipped[1]).toBe("unblocker: 595 Connection Reset");
+    expect(got.skipped[0]).toBe("unblocker: 595 Connection Reset");
   });
 });
