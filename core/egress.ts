@@ -6,6 +6,9 @@
  *              CAPTCHAs itself and picks the country. Billed per successful request.
  *   tunnel     the Mac behind Cloudflare Tunnel, via scripts/tunnel-relay.mjs: a home
  *              connection in Australia. Only as good as the Mac is awake.
+ *   browser    the same Mac, the page loaded in its Chrome: gets past challenges that clear
+ *              themselves, and has the sign-ins made there. The relay refuses it for every domain
+ *              it has not been told to allow.
  *   direct     the worker's own `fetch`, from whichever Cloudflare colo ran it. Always there.
  *
  * `via` is that order: `["tunnel", "unblocker", "direct"]`, or the same as a comma-separated
@@ -22,7 +25,7 @@
 
 import { ProxyError, proxyFetch, type ProxyFetchOptions } from "./proxy";
 
-export const ROUTES = ["unblocker", "tunnel", "direct"] as const;
+export const ROUTES = ["unblocker", "tunnel", "browser", "direct"] as const;
 export type Route = (typeof ROUTES)[number];
 
 export const DEFAULT_VIA: readonly Route[] = ["direct", "unblocker"];
@@ -104,6 +107,8 @@ class Pass extends Error {}
  */
 const DOWN_FOR_MS = 60_000;
 const TUNNEL_TIMEOUT_MS = 8_000;
+/** Chrome loads the page and waits out a challenge; the relay gives up on its own before this. */
+const BROWSER_TIMEOUT_MS = 60_000;
 let tunnelDownUntil = 0;
 
 /** For tests, which would otherwise inherit one another's outage. */
@@ -111,27 +116,36 @@ export const resetTunnel = () => {
   tunnelDownUntil = 0;
 };
 
-const viaTunnel = async (tunnel: Fetcher, url: string, headers: Record<string, string>) => {
-  if (Date.now() < tunnelDownUntil) throw new Pass("tunnel: down in the last minute");
+const viaTunnel = async (
+  tunnel: Fetcher,
+  url: string,
+  headers: Record<string, string>,
+  route: "tunnel" | "browser" = "tunnel",
+) => {
+  if (Date.now() < tunnelDownUntil) throw new Pass(`${route}: down in the last minute`);
+  const browser = route === "browser";
   let res: Response;
   try {
     // The VPC Service fixes host and port (localhost:8811 on the Mac); only the path matters.
-    res = await tunnel.fetch(`http://relay/fetch?url=${encodeURIComponent(url)}`, {
+    const mode = browser ? "&mode=browser" : "";
+    res = await tunnel.fetch(`http://relay/fetch?url=${encodeURIComponent(url)}${mode}`, {
       headers,
-      signal: AbortSignal.timeout(TUNNEL_TIMEOUT_MS),
+      signal: AbortSignal.timeout(browser ? BROWSER_TIMEOUT_MS : TUNNEL_TIMEOUT_MS),
     });
   } catch (e) {
-    tunnelDownUntil = Date.now() + DOWN_FOR_MS;
-    throw new Pass(`tunnel: ${e instanceof Error ? e.message : String(e)}`);
+    // A page slow to load in Chrome says nothing about whether the Mac is there.
+    const slowPage = browser && e instanceof Error && e.name === "TimeoutError";
+    if (!slowPage) tunnelDownUntil = Date.now() + DOWN_FOR_MS;
+    throw new Pass(`${route}: ${e instanceof Error ? e.message : String(e)}`);
   }
   // The relay marks everything it says itself. An unmarked answer is not the relay: a 5xx is
   // cloudflared finding nothing listening on the port, and anything else is some other program
   // on it (`python -m http.server` answers every URL with a 404). The Mac is up, the relay is not.
   const relayError = res.headers.get("x-relay-error");
-  if (relayError) throw new Pass(`tunnel: ${relayError}`);
+  if (relayError) throw new Pass(`${route}: ${relayError}`);
   if (!res.headers.has("x-relay-status")) {
     tunnelDownUntil = Date.now() + DOWN_FOR_MS;
-    throw new Pass(`tunnel: relay not answering (HTTP ${res.status})`);
+    throw new Pass(`${route}: relay not answering (HTTP ${res.status})`);
   }
   return res;
 };
@@ -179,6 +193,9 @@ export const egress = async (
   const get = opts.fetch ?? fetch;
   const routes: Record<Route, (() => Promise<Response>) | string> = {
     tunnel: env.TUNNEL ? () => viaTunnel(env.TUNNEL!, url, headers) : "tunnel: not bound",
+    browser: env.TUNNEL
+      ? () => viaTunnel(env.TUNNEL!, url, headers, "browser")
+      : "browser: not bound",
     unblocker: env.APIFY_PROXY_PASSWORD
       ? () => viaUnblocker(env.APIFY_PROXY_PASSWORD!, url, opts)
       : "unblocker: no APIFY_PROXY_PASSWORD",

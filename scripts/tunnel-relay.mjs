@@ -4,11 +4,15 @@
  * mcp-fetch's requests to it through the VPC Service `wmac` (localhost:8811), and it fetches the
  * URL it is handed from this machine's own connection.
  *
- *   node scripts/tunnel-relay.mjs [port]      default 8811
- *   ALLOW_DOMAINS=example.org,acnc.gov.au     optional: refuse every other domain
+ *   node scripts/tunnel-relay.mjs [port]       default 8811
+ *   node scripts/tunnel-relay.mjs login [url]  Chrome in a window, to sign in or pass a check once
  *
- *   GET /fetch?url=<absolute url>   the site's answer: status, headers and body as received
- *   GET /health                     "ok", for checking by hand
+ *   ALLOW_DOMAINS=example.org,acnc.gov.au      optional: refuse every other domain
+ *   BROWSER_ALLOW_DOMAINS=example.org          browser mode is off for every domain not listed
+ *
+ *   GET /fetch?url=<absolute url>               the site's answer: status, headers and body
+ *   GET /fetch?url=<absolute url>&mode=browser  the same, as Chrome ended up with it
+ *   GET /health                                 "ok", for checking by hand
  *
  * Listens on loopback only, so the one way in is through the tunnel, and from there only a
  * Worker holding the binding. It still refuses private and loopback addresses — including at each
@@ -19,29 +23,53 @@
  * `ALLOW_DOMAINS` narrows it further: a comma-separated list, each entry also covering its
  * subdomains, checked at every hop as well.
  *
+ * BROWSER MODE loads the page in Google Chrome on this Mac, with a profile of its own
+ * (~/.tunnel-relay/profile, or RELAY_PROFILE) that keeps cookies between loads: a challenge passed
+ * or a sign-in made with `login` holds for later ones. The answer is the rendered HTML, or the raw
+ * body of anything that is not HTML. Whoever can call mcp-fetch can read whatever that profile
+ * can, so browser mode is refused for every domain not in `BROWSER_ALLOW_DOMAINS` (and
+ * `ALLOW_DOMAINS`, when set), where the page starts and wherever it is sent; unset, it is off.
+ * What the page loads along the way may come from anywhere public: every connection Chrome makes
+ * goes through a proxy inside the relay with the same connect-time check as plain mode. Needs
+ * `npm i playwright-core` next to this file, and Google Chrome or `CHROME_PATH`. Chrome closes
+ * after 5 idle minutes; `login` cannot open the profile while it is running.
+ *
  * Everything the relay says itself carries `x-relay-error`; a response it passes on carries
  * `x-relay-status`. That is how the Worker tells "the site said 502" from "the relay could not
- * get there". Needs Node 18 or later, and nothing from npm.
+ * get there". Needs Node 18 or later; plain mode needs nothing from npm.
  */
 import http from "node:http";
 import https from "node:https";
-import { lookup } from "node:dns";
-import { isIP } from "node:net";
+import { lookup, promises as dns } from "node:dns";
+import net, { isIP } from "node:net";
+import { homedir } from "node:os";
+import { join } from "node:path";
 import { pipeline } from "node:stream/promises";
 import { createBrotliDecompress, createGunzip, createInflate } from "node:zlib";
 
 const PORT = Number(process.argv[2] ?? 8811);
 const MAX_REDIRECTS = 10;
 const TIMEOUT_MS = 30_000;
-const ALLOW = (process.env.ALLOW_DOMAINS ?? "")
-  .split(",")
-  .map((d) =>
-    d
-      .trim()
-      .toLowerCase()
-      .replace(/^\.+|\.+$/g, ""),
-  )
-  .filter(Boolean);
+const BROWSER_TIMEOUT_MS = 30_000;
+const IDLE_MS = 5 * 60_000;
+const PROFILE = process.env.RELAY_PROFILE || join(homedir(), ".tunnel-relay", "profile");
+/** Titles of the interstitials that clear themselves given a few seconds. */
+const CHALLENGE = /just a moment|attention required|checking your browser/i;
+
+const domains = (list) =>
+  (list ?? "")
+    .split(",")
+    .map((d) =>
+      d
+        .trim()
+        .toLowerCase()
+        .replace(/^\.+|\.+$/g, ""),
+    )
+    .filter(Boolean);
+const ALLOW = domains(process.env.ALLOW_DOMAINS);
+const BROWSER_ALLOW = domains(process.env.BROWSER_ALLOW_DOMAINS);
+const listed = (host, list) => list.some((d) => host === d || host.endsWith(`.${d}`));
+const hostOf = (url) => url.hostname.replace(/^\[|\]$/g, "").toLowerCase();
 
 /** What a caller may pass through to the site. Anything else stays behind. */
 const FORWARD = ["user-agent", "accept", "accept-language", "referer"];
@@ -92,16 +120,37 @@ const publicLookup = (hostname, options, callback) => {
 };
 
 /** Scheme, address literal and allow-list, before anything is sent. */
-const checkUrl = (url) => {
+const checkUrl = (url, { anyDomain = false } = {}) => {
   if (url.protocol !== "http:" && url.protocol !== "https:") {
     throw new Error(`refusing ${url.protocol} URLs`);
   }
-  const host = url.hostname.replace(/^\[|\]$/g, "").toLowerCase();
+  const host = hostOf(url);
   // A literal address never goes through the lookup, so it is checked here instead.
   if (isIP(host) && isPrivate(host)) throw new Error(`refusing ${host}: a private address`);
-  if (ALLOW.length && !ALLOW.some((d) => host === d || host.endsWith(`.${d}`))) {
+  if (!anyDomain && ALLOW.length && !listed(host, ALLOW)) {
     throw new Error(`refusing ${host}: not in ALLOW_DOMAINS`);
   }
+};
+
+/** The same, and browser mode's own list on top. */
+const checkBrowserUrl = (url) => {
+  checkUrl(url);
+  if (!BROWSER_ALLOW.length)
+    throw new Error("browser mode is off: BROWSER_ALLOW_DOMAINS is not set");
+  const host = hostOf(url);
+  if (!listed(host, BROWSER_ALLOW))
+    throw new Error(`refusing ${host}: not in BROWSER_ALLOW_DOMAINS`);
+};
+
+/** Every address the host resolves to must be public, checked before Chrome connects. */
+const checkPublic = async (url) => {
+  if (url.protocol !== "http:" && url.protocol !== "https:") {
+    throw new Error(`refusing ${url.protocol} URLs`);
+  }
+  const host = hostOf(url);
+  const addrs = isIP(host) ? [{ address: host }] : await dns.lookup(host, { all: true });
+  const bad = addrs.find((a) => isPrivate(a.address));
+  if (bad) throw new Error(`refusing ${host}: ${bad.address} is a private address`);
 };
 
 const get = (url, headers) =>
@@ -139,7 +188,13 @@ const relay = async (target, incoming) => {
     checkUrl(url);
     const res = await get(url, headers);
     const next = res.statusCode >= 300 && res.statusCode < 400 && res.headers.location;
-    if (!next) return { res, finalUrl: url.href, ...(await readBody(res)) };
+    if (!next) {
+      const { body, decoded } = await readBody(res);
+      const passed = Object.entries(res.headers).filter(
+        ([name]) => !(decoded && name === "content-encoding"),
+      );
+      return { status: res.statusCode, headers: passed, body, finalUrl: url.href };
+    }
     // Drained, not read; an error on the way out must not take the process down with it.
     res.on("error", () => {}).resume();
     url = new URL(next, url);
@@ -147,6 +202,145 @@ const relay = async (target, incoming) => {
   throw new Error(`more than ${MAX_REDIRECTS} redirects`);
 };
 
+// ─── browser mode ───────────────────────────────────────────────────────────────────────────────
+let chrome;
+let busy = 0;
+let idle;
+
+/**
+ * Chrome's way out: every connection it makes, redirects and websockets included, goes through
+ * this proxy, which resolves the name with the same connect-time check as plain mode. Playwright
+ * does not show redirects to a route handler, so a check there would miss them.
+ */
+let proxyPort;
+const startProxy = () =>
+  (proxyPort ??= new Promise((resolve, reject) => {
+    const proxy = http.createServer((req, res) => {
+      // A plain-http request, by absolute URL.
+      try {
+        const url = new URL(req.url);
+        checkUrl(url, { anyDomain: true });
+        const headers = { ...req.headers };
+        delete headers["proxy-connection"];
+        const up = (url.protocol === "https:" ? https : http).request(
+          url,
+          { method: req.method, headers, lookup: publicLookup },
+          (answer) => {
+            res.writeHead(answer.statusCode, answer.headers);
+            answer.pipe(res);
+          },
+        );
+        up.on("error", () => res.destroy());
+        req.pipe(up);
+      } catch {
+        res.writeHead(403).end();
+      }
+    });
+    proxy.on("connect", (req, socket, head) => {
+      socket.on("error", () => {});
+      const { hostname, port } = new URL(`http://${req.url}`);
+      const host = hostname.replace(/^\[|\]$/g, "");
+      if (isIP(host) && isPrivate(host)) return socket.end("HTTP/1.1 403 Forbidden\r\n\r\n");
+      let open = false;
+      const up = net.connect({ host, port: Number(port) || 443, lookup: publicLookup }, () => {
+        open = true;
+        socket.write("HTTP/1.1 200 Connection Established\r\n\r\n");
+        if (head.length) up.write(head);
+        up.pipe(socket).on("error", () => {});
+        socket.pipe(up);
+      });
+      up.on("error", () =>
+        open ? socket.destroy() : socket.end("HTTP/1.1 502 Bad Gateway\r\n\r\n"),
+      );
+      socket.on("close", () => up.destroy());
+    });
+    proxy.on("error", reject).listen(0, "127.0.0.1", () => resolve(proxy.address().port));
+  }));
+
+/** The one Chrome, opened on first use; `login` opens it in a window. */
+const openChrome = ({ headless }) =>
+  (chrome ??= (async () => {
+    const { chromium } = await import("playwright-core").catch(() => {
+      throw new Error("browser mode needs `npm i playwright-core` next to tunnel-relay.mjs");
+    });
+    const ctx = await chromium.launchPersistentContext(PROFILE, {
+      ...(process.env.CHROME_PATH
+        ? { executablePath: process.env.CHROME_PATH }
+        : { channel: "chrome" }),
+      headless,
+      // `<-loopback>` sends localhost through the proxy too, where it is refused.
+      proxy: { server: `http://127.0.0.1:${await startProxy()}` },
+      args: ["--proxy-bypass-list=<-loopback>"],
+      locale: "en-AU",
+      timezoneId: "Australia/Melbourne",
+      serviceWorkers: "block",
+      acceptDownloads: false,
+      // Playwright's own handlers close Chrome but leave this process running; see the end.
+      handleSIGINT: false,
+      handleSIGTERM: false,
+      handleSIGHUP: false,
+    });
+    ctx.on("close", () => (chrome = undefined));
+    return ctx;
+  })().catch((e) => {
+    chrome = undefined;
+    throw e;
+  }));
+
+const browse = async (target) => {
+  const url = new URL(target);
+  checkBrowserUrl(url);
+  await checkPublic(url);
+  busy++;
+  clearTimeout(idle);
+  try {
+    const page = await (await openChrome({ headless: true })).newPage();
+    let main;
+    let refused;
+    // The page itself and every hop it is sent on are held to the lists; what it loads is not.
+    page.on("request", (r) => {
+      if (!r.isNavigationRequest() || r.frame() !== page.mainFrame()) return;
+      try {
+        checkBrowserUrl(new URL(r.url()));
+      } catch (e) {
+        refused ??= e;
+        page.close().catch(() => {});
+      }
+    });
+    page.on("response", (r) => {
+      if (r.request().isNavigationRequest() && r.frame() === page.mainFrame()) main = r;
+    });
+    try {
+      await page.goto(url.href, { waitUntil: "domcontentloaded", timeout: BROWSER_TIMEOUT_MS });
+      // A challenge that clears itself moves on to the real page; give it the time to.
+      for (let i = 0; i < 20 && CHALLENGE.test(await page.title().catch(() => "")); i++) {
+        await page.waitForTimeout(1000);
+      }
+      await page.waitForLoadState("domcontentloaded", { timeout: 5000 }).catch(() => {});
+      if (!main) throw new Error("Chrome got no answer");
+      const headers = await main.allHeaders();
+      const html = /html/i.test(headers["content-type"] ?? "text/html");
+      const body = html ? Buffer.from(await page.content()) : await main.body();
+      const passed = Object.entries(headers)
+        .filter(([name]) => !name.startsWith(":") && name !== "content-encoding")
+        .filter(([name]) => !(html && name === "content-type"))
+        .map(([name, value]) => [name, value.replace(/\n/g, ", ")]);
+      // page.content() is a string, so whatever charset the site named, this is UTF-8 now.
+      if (html) passed.push(["content-type", "text/html; charset=utf-8"]);
+      if (refused) throw refused;
+      return { status: main.status(), headers: passed, body, finalUrl: page.url() };
+    } catch (e) {
+      throw refused ?? e;
+    } finally {
+      await page.close().catch(() => {});
+    }
+  } finally {
+    busy--;
+    idle = setTimeout(() => busy || chrome?.then((c) => c.close()).catch(() => {}), IDLE_MS);
+  }
+};
+
+// ─── the server ─────────────────────────────────────────────────────────────────────────────────
 const fail = (out, status, message) => {
   out.writeHead(status, { "content-type": "text/plain", "x-relay-error": message });
   out.end(message);
@@ -158,17 +352,22 @@ const server = async (req, out) => {
   if (url.pathname !== "/fetch" || req.method !== "GET") return fail(out, 404, "GET /fetch?url=");
   const target = url.searchParams.get("url");
   if (!target) return fail(out, 400, "missing ?url=");
+  const mode = url.searchParams.get("mode") ?? "plain";
+  if (mode !== "plain" && mode !== "browser") return fail(out, 400, "mode is plain or browser");
   try {
-    const { res, finalUrl, body, decoded } = await relay(target, req.headers);
-    const headers = { "x-relay-status": String(res.statusCode), "x-relay-final-url": finalUrl };
-    for (const [name, value] of Object.entries(res.headers)) {
-      if (DROP.has(name) || name === "set-cookie") continue;
-      if (decoded && name === "content-encoding") continue;
-      headers[name] = value;
+    const got = mode === "browser" ? await browse(target) : await relay(target, req.headers);
+    const headers = {};
+    for (const [name, value] of got.headers) {
+      if (!DROP.has(name) && name !== "set-cookie") headers[name] = value;
     }
-    out.writeHead(res.statusCode, headers);
-    out.end(body);
-    console.log(`${res.statusCode} ${target}`);
+    Object.assign(headers, {
+      "x-relay-status": String(got.status),
+      "x-relay-final-url": got.finalUrl,
+      "x-relay-mode": mode,
+    });
+    out.writeHead(got.status, headers);
+    out.end(got.body);
+    console.log(`${got.status} ${mode} ${target}`);
   } catch (e) {
     const message = String(e?.cause?.message ?? e?.message ?? e).replace(/[\r\n]+/g, " ");
     console.log(`ERR ${target}: ${message}`);
@@ -176,10 +375,36 @@ const server = async (req, out) => {
   }
 };
 
-// The VPC Service points at `localhost`, which cloudflared may resolve to either family.
-for (const host of ["127.0.0.1", "::1"]) {
-  http
-    .createServer(server)
-    .on("error", (e) => console.log(`not listening on ${host}: ${e.message}`))
-    .listen(PORT, host, () => console.log(`tunnel relay on ${host}:${PORT}`));
+// Ctrl+C, and launchd restarting it: close Chrome if it is open, then go.
+for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"]) {
+  process.on(signal, () => {
+    setTimeout(() => process.exit(0), 3000).unref();
+    (chrome ?? Promise.resolve())
+      .then((c) => c?.close())
+      .catch(() => {})
+      .finally(() => process.exit(0));
+  });
+}
+
+if (process.argv[2] === "login") {
+  const ctx = await openChrome({ headless: false }).catch((e) => {
+    console.log(
+      `${e.message}\nIf the relay has Chrome open, try again once it has been idle 5 minutes.`,
+    );
+    process.exit(1);
+  });
+  await (ctx.pages()[0] ?? (await ctx.newPage())).goto(process.argv[3] ?? "about:blank");
+  console.log(
+    "Sign in or pass the check in that window, then close it. The profile keeps the cookies.",
+  );
+  await new Promise((done) => ctx.on("close", done));
+  process.exit(0);
+} else {
+  // The VPC Service points at `localhost`, which cloudflared may resolve to either family.
+  for (const host of ["127.0.0.1", "::1"]) {
+    http
+      .createServer(server)
+      .on("error", (e) => console.log(`not listening on ${host}: ${e.message}`))
+      .listen(PORT, host, () => console.log(`tunnel relay on ${host}:${PORT}`));
+  }
 }

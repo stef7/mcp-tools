@@ -145,6 +145,13 @@ checked; the body is never read to decide. Any other answer, 404 included, is ke
    there; `ALLOW_DOMAINS=a.org,b.gov.au` limits it to those domains and their subdomains. A tunnel
    that does not answer within 8 seconds is left alone for a minute, so a sleeping Mac costs one
    slow request, not every request.
+4. **browser** — the same Mac and relay, with the page loaded in Google Chrome there: it waits out
+   challenge pages that clear themselves and has whatever sign-ins you made with
+   `node tunnel-relay.mjs login <url>`. Chrome keeps its own profile in `~/.tunnel-relay/profile`.
+   Off unless the relay has `BROWSER_ALLOW_DOMAINS=a.org,b.gov.au`, and refused for every other
+   domain, where the page starts and wherever it is redirected. Every connection Chrome makes goes
+   through a proxy inside the relay with the same private-address check as plain mode. Needs
+   `npm i playwright-core` next to the relay. Up to 60 seconds a page.
 
 The order is `via`: a list, `["tunnel", "unblocker", "direct"]`, or the same as a string,
 `"tunnel,unblocker,direct"`. One route means no fallback, so `["tunnel"]` fails when the Mac is
