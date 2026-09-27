@@ -5,8 +5,8 @@
  * you name a URL and a format, you get that URL in that format. Everything fetched is kept, so
  * `search` can look across whatever you have fetched before without going back to the network.
  *
- * Every download goes out through core/egress.ts — by default Apify's Unblocker, then
- * Cloudflare itself; `via` picks the routes and their order — and `egress` offers the same to
+ * Every download goes out through core/egress.ts — by default Cloudflare itself, then Apify's
+ * Unblocker if the site blocks it; `via` picks the routes and their order — and `egress` offers the same to
  * other workers.
  *
  * Storage (unchanged from the previous version, so existing cached documents still work):
@@ -242,10 +242,11 @@ const Tools = mcpWorker({
             type: "array",
             items: { type: "string", enum: [...ROUTES] },
             description:
-              "Routes to try, in order, stopping at the first that gets an answer. `unblocker`: " +
-              "gets past bot checks and CAPTCHAs, paid per page. `tunnel`: an Australian home " +
-              "connection, only while that Mac is on. `direct`: Cloudflare's own fetch. One " +
-              'route means no fallback. Default ["unblocker", "direct"].',
+              "Routes to try, in order. The next is tried when one cannot connect or the site " +
+              "answers 403, 429, 451 or 503 (a bot check or block). `direct`: Cloudflare's own " +
+              "fetch. `unblocker`: gets past bot checks and CAPTCHAs, paid per page. `tunnel`: " +
+              "an Australian home connection, only while that Mac is on. One route means no " +
+              'fallback. Default ["direct", "unblocker"].',
           },
         },
       },

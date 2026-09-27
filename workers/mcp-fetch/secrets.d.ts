@@ -7,7 +7,7 @@
  * paid plan. Unset, that route is skipped.
  *
  * EGRESS_VIA (plain text, optional) is the order routes are tried in when a call does not say,
- * e.g. `tunnel,unblocker,direct`. Unset, it is `unblocker,direct`.
+ * e.g. `tunnel,unblocker,direct`. Unset, it is `direct,unblocker`.
  */
 interface Env {
   APIFY_PROXY_PASSWORD?: string;

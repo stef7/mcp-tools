@@ -10,12 +10,14 @@
  *
  * `via` is that order: `["tunnel", "unblocker", "direct"]`, or the same as a comma-separated
  * string. One name means that route and no fallback. Unset, it is the worker's `EGRESS_VIA`, and
- * failing that `unblocker,direct`.
+ * failing that `direct,unblocker`: free first, paid only when the free one was turned away.
  *
- * Each route either returns the site's answer — a 403 or 404 included, since that is the site
- * speaking, not the route failing — or says why it could not, and the next one is tried. What was
- * passed over comes back in `skipped`, so a caller can see that a page came from Cloudflare only
- * because the unblocker was out of credit.
+ * The next route is tried when one cannot get an answer at all, or when the answer is one of
+ * BLOCKED — the statuses a bot check or geo-block hands out. Any other answer, a 404 included, is
+ * the site speaking and is returned. If every route is blocked, the last blocked answer is
+ * returned rather than an error, since it is still what the site said. What was passed over comes
+ * back in `skipped`, so a caller can see that the unblocker was paid for because Cloudflare got a
+ * 403.
  */
 
 import { ProxyError, proxyFetch, type ProxyFetchOptions } from "./proxy";
@@ -23,7 +25,14 @@ import { ProxyError, proxyFetch, type ProxyFetchOptions } from "./proxy";
 export const ROUTES = ["unblocker", "tunnel", "direct"] as const;
 export type Route = (typeof ROUTES)[number];
 
-export const DEFAULT_VIA: readonly Route[] = ["unblocker", "direct"];
+export const DEFAULT_VIA: readonly Route[] = ["direct", "unblocker"];
+
+/**
+ * Answers that mean "not you", not "not here": 403 and 429 from bot checks and rate limits, 451
+ * from geo-blocks, 503 from challenge pages (Cloudflare's "Just a moment…" among them). A 401 is
+ * left out — a login wall is not something another IP gets past.
+ */
+export const BLOCKED = new Set([403, 429, 451, 503]);
 
 /** Routes in order, as a list or as `"tunnel,unblocker"`. */
 export type Via = string | readonly string[];
@@ -155,21 +164,38 @@ export const egress = async (
     unblocker: env.APIFY_PROXY_PASSWORD
       ? () => viaUnblocker(env.APIFY_PROXY_PASSWORD!, url, opts)
       : "unblocker: no APIFY_PROXY_PASSWORD",
-    direct: () => get(url, { headers }),
+    direct: () =>
+      get(url, { headers }).catch((e: unknown) => {
+        throw new Pass(`direct: ${e instanceof Error ? e.message : String(e)}`);
+      }),
   };
   const skipped: string[] = [];
+  /** The latest blocked answer, and where its note sits in `skipped`. */
+  let blocked: { response: Response; via: Route; at: number } | undefined;
   for (const via of orderFor(env, opts)) {
     const route = routes[via];
     if (typeof route === "string") {
       skipped.push(route);
       continue;
     }
+    let response: Response;
     try {
-      return { response: await route(), via, skipped };
+      response = await route();
     } catch (e) {
       if (!(e instanceof Pass)) throw e;
       skipped.push(e.message);
+      continue;
     }
+    if (!BLOCKED.has(response.status)) return { response, via, skipped };
+    // Kept, not read: the next route may do better, and if none does this is the answer.
+    await blocked?.response.body?.cancel();
+    blocked = { response, via, at: skipped.length };
+    skipped.push(`${via}: blocked (HTTP ${response.status})`);
+  }
+  if (blocked) {
+    // Its note describes the very answer being returned, so it was not skipped.
+    skipped.splice(blocked.at, 1);
+    return { response: blocked.response, via: blocked.via, skipped };
   }
   throw new Error(`No route could fetch ${url}: ${skipped.join("; ")}`);
 };

@@ -5,7 +5,7 @@ Cloudflare Workers that speak MCP, in one TypeScript repo.
 ```
 core/mcp.ts                  shared plumbing: HTTP MCP endpoint + RPC surface + tool typing
 core/web.ts                  what a worker touching the open web needs: stripHtml, a browser UA
-core/egress.ts               unblocker / tunnel / plain fetch, in the order you pick; for mcp-fetch
+core/egress.ts               plain fetch / unblocker / tunnel, in the order you pick; for mcp-fetch
 core/proxy.ts                fetch through an HTTP proxy over a raw socket (CONNECT + startTls)
 test/                        vitest, run against mocks rather than anyone's live service
 workers/mcp-toolkit/         aggregator: its own tools + every worker bound under `services`
@@ -118,9 +118,12 @@ keeps plain variables too, so `WP_SITES` survives a deploy).
 ## Getting past blocks
 
 `mcp-fetch` downloads through `core/egress.ts`, which tries the routes you name, in the order
-you name them, and uses the first that gets an answer:
+you name them. It moves to the next when a route cannot connect, or when the site answers 403,
+429, 451 or 503 — the statuses bot checks, rate limits and geo-blocks hand out. Any other answer,
+404 included, is kept. If every route is blocked, the last blocked answer comes back.
 
-1. **unblocker** — Apify Proxy's `UNBLOCKER` group, through `core/proxy.ts`. It handles bot checks
+1. **direct** — the worker's own `fetch`, from a Cloudflare colo. Free.
+2. **unblocker** — Apify Proxy's `UNBLOCKER` group, through `core/proxy.ts`. It handles bot checks
    and CAPTCHAs and picks the country itself; none is pinned, since Apify says that weakens it. A
    Worker's `fetch` cannot use an HTTP proxy, so this opens a TCP socket to `proxy.apify.com:8000`,
    sends `CONNECT`, and starts TLS to the site inside it with
@@ -128,19 +131,18 @@ you name them, and uses the first that gets an answer:
    password on Apify Console -> Proxy, not an API token — and a paid Apify plan. Billed per
    successful request. Any refusal (407, Apify's 590–599) moves on. Apify does not say whether
    Unblocker re-signs HTTPS; if it does, every https URL fails this route with a TLS error.
-2. **tunnel** — a home connection in Australia, only while the Mac is on. `env.TUNNEL` is a VPC
+3. **tunnel** — a home connection in Australia, only while the Mac is on. `env.TUNNEL` is a VPC
    Service binding (`vpc_services` in `mcp-fetch/wrangler.json`) to the `wmac` service:
    `localhost:8811` on the Mac behind Cloudflare Tunnel `WMac`. Run `node scripts/tunnel-relay.mjs`
    there. A tunnel that does not answer within 8 seconds is left alone for a minute, so a sleeping
    Mac costs one slow request, not every request.
-3. **direct** — the worker's own `fetch`, from a Cloudflare colo.
 
 The order is `via`: a list, `["tunnel", "unblocker", "direct"]`, or the same as a string,
 `"tunnel,unblocker,direct"`. One route means no fallback, so `["tunnel"]` fails when the Mac is
 off. Unset, it is `EGRESS_VIA` on `mcp-fetch` (a plain-text variable, same format), and failing
-that `unblocker,direct`. An unknown name is an error, not skipped.
+that `direct,unblocker`: free first, paid only when turned away. An unknown name is an error, not
+skipped.
 
-The site's own answer, a 403 included, is final: the cascade only moves on when a _route_ fails.
 `fetch_url` records which route served each URL, and why earlier ones were skipped, in
 `docs.meta_json`.
 
