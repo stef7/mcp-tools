@@ -5,7 +5,7 @@ Cloudflare Workers that speak MCP, in one TypeScript repo.
 ```
 core/mcp.ts                  shared plumbing: HTTP MCP endpoint + RPC surface + tool typing
 core/web.ts                  what a worker touching the open web needs: stripHtml, a browser UA
-core/egress.ts               tunnel -> Apify AU residential -> plain fetch, for mcp-fetch and friends
+core/egress.ts               tunnel -> AU residential proxy -> plain fetch, for mcp-fetch and friends
 test/                        vitest, run against mocks rather than anyone's live service
 workers/mcp-toolkit/         aggregator: its own tools + every worker bound under `services`
 workers/mcp-wp/              WordPress REST API -> MCP, read and write
@@ -122,7 +122,7 @@ first that answers:
    to the `wmac` service: `localhost:8811` on the Mac behind Cloudflare Tunnel `WMac`. Run
    `node scripts/tunnel-relay.mjs` there. A tunnel that does not answer within 8 seconds is left
    alone for a minute, so a sleeping Mac costs one slow request, not every request.
-2. **apify** — `apify/rag-web-browser` through Apify's `RESIDENTIAL` proxies with country `AU`.
+2. **proxy** — `apify/rag-web-browser` through Apify's `RESIDENTIAL` proxies with country `AU`.
    Needs `APIFY_TOKEN` on `mcp-fetch` (its own copy, able to run Actors). It returns HTML only, so
    URLs ending `.pdf`, `.docx` and the like skip it. HTTP 402 — out of credit or over the monthly
    cap — moves on to the next route, as does any other Apify failure.

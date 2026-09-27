@@ -64,13 +64,13 @@ describe("the cascade", () => {
     const w = web(() => apifyPage("<p>from apify</p>"));
     const env = { TUNNEL: dead, APIFY_TOKEN: "tok" };
     const first = await egress(env, URL_, { fetch: w.get });
-    expect(first.via).toBe("apify");
+    expect(first.via).toBe("proxy");
     expect(await first.response.text()).toBe("<p>from apify</p>");
     expect(first.skipped).toEqual(["tunnel: Network connection lost."]);
 
     const up = tunnel(() => relayed("from home"));
     const second = await egress({ ...env, TUNNEL: up }, URL_, { fetch: w.get });
-    expect(second.via).toBe("apify");
+    expect(second.via).toBe("proxy");
     expect(second.skipped).toEqual(["tunnel: down in the last minute"]);
     expect(up.seen).toEqual([]);
   });
@@ -97,7 +97,7 @@ describe("the cascade", () => {
     expect(await got.response.text()).toBe("from cloudflare");
     expect(got.skipped).toEqual([
       "tunnel: Network connection lost.",
-      "apify: no quota left (HTTP 402)",
+      "proxy: no quota left (HTTP 402)",
     ]);
   });
 
@@ -119,7 +119,7 @@ describe("the cascade", () => {
     const w = web(() => apifyPage("x"));
     const got = await egress({ APIFY_TOKEN: "tok" }, "https://example.org/a.pdf", { fetch: w.get });
     expect(got.via).toBe("direct");
-    expect(got.skipped).toContain("apify: not an HTML page");
+    expect(got.skipped).toContain("proxy: not an HTML page");
     expect(w.seen.some((u) => u.includes("apify"))).toBe(false);
   });
 
@@ -127,12 +127,12 @@ describe("the cascade", () => {
     const w = web(() => Response.json([], { status: 201 }));
     const got = await egress({ APIFY_TOKEN: "tok" }, URL_, { fetch: w.get });
     expect(got.via).toBe("direct");
-    expect(got.skipped).toContain("apify: the Actor returned no page");
+    expect(got.skipped).toContain("proxy: the Actor returned no page");
   });
 
   it("says which routes were never configured", async () => {
     const got = await egress({}, URL_, { fetch: web(() => apifyPage("x")).get });
-    expect(got.skipped).toEqual(["tunnel: not bound", "apify: no APIFY_TOKEN"]);
+    expect(got.skipped).toEqual(["tunnel: not bound", "proxy: no APIFY_TOKEN"]);
   });
 });
 

@@ -3,17 +3,17 @@
  *
  *   tunnel   the Mac behind Cloudflare Tunnel, via scripts/tunnel-relay.mjs: a home connection,
  *            free, and the best disguise there is. Used whenever it answers.
- *   apify    apify/rag-web-browser on Apify's AU residential proxies. Costs money per page and
+ *   proxy    apify/rag-web-browser on Apify's AU residential proxies. Costs money per page and
  *            only returns HTML, so it is skipped for anything that looks like a document.
  *   direct   the worker's own `fetch`, from whichever Cloudflare colo ran it. Always there.
  *
  * Each route either returns the site's answer — a 403 or 404 included, since that is the site
  * speaking, not the route failing — or says why it could not, and the next one is tried. What was
  * passed over comes back in `skipped`, so a caller can see that a page came from Cloudflare only
- * because Apify was out of credit.
+ * because the proxy was out of credit.
  */
 
-export const ROUTES = ["tunnel", "apify", "direct"] as const;
+export const ROUTES = ["tunnel", "proxy", "direct"] as const;
 export type Route = (typeof ROUTES)[number];
 
 /** Just the part of a VPC Service binding this uses, so a test can pass a plain object. */
@@ -73,7 +73,7 @@ const viaTunnel = async (tunnel: Fetcher, url: string, headers: Record<string, s
   return res;
 };
 
-// ─── apify ────────────────────────────────────────────────────────────────────────────────────
+// ─── proxy ────────────────────────────────────────────────────────────────────────────────────
 const APIFY_RUN =
   "https://api.apify.com/v2/acts/apify~rag-web-browser/run-sync-get-dataset-items" +
   "?timeout=60&memory=1024";
@@ -87,8 +87,8 @@ type ApifyItem = {
   html?: string;
 };
 
-const viaApify = async (token: string, url: string, get: typeof fetch) => {
-  if (DOCUMENT.test(new URL(url).pathname)) throw new Pass("apify: not an HTML page");
+const viaProxy = async (token: string, url: string, get: typeof fetch) => {
+  if (DOCUMENT.test(new URL(url).pathname)) throw new Pass("proxy: not an HTML page");
   const res = await get(APIFY_RUN, {
     method: "POST",
     headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
@@ -107,14 +107,14 @@ const viaApify = async (token: string, url: string, get: typeof fetch) => {
       },
     }),
   }).catch((e: unknown) => {
-    throw new Pass(`apify: ${e instanceof Error ? e.message : String(e)}`);
+    throw new Pass(`proxy: ${e instanceof Error ? e.message : String(e)}`);
   });
   // 402 is Apify's "over your usage limit or out of credit".
-  if (res.status === 402) throw new Pass("apify: no quota left (HTTP 402)");
-  if (!res.ok) throw new Pass(`apify: HTTP ${res.status} ${(await res.text()).slice(0, 200)}`);
+  if (res.status === 402) throw new Pass("proxy: no quota left (HTTP 402)");
+  if (!res.ok) throw new Pass(`proxy: HTTP ${res.status} ${(await res.text()).slice(0, 200)}`);
   const [item] = (await res.json()) as ApifyItem[];
   // A page the Actor could not load is left out of the dataset rather than reported.
-  if (!item?.html) throw new Pass("apify: the Actor returned no page");
+  if (!item?.html) throw new Pass("proxy: the Actor returned no page");
   return new Response(item.html, {
     status: item.crawl?.httpStatusCode ?? 200,
     headers: { "content-type": item.metadata?.headers?.["content-type"] ?? "text/html" },
@@ -131,7 +131,7 @@ export const egress = async (
   const get = opts.fetch ?? fetch;
   const routes: Record<Route, (() => Promise<Response>) | string> = {
     tunnel: env.TUNNEL ? () => viaTunnel(env.TUNNEL!, url, headers) : "tunnel: not bound",
-    apify: env.APIFY_TOKEN ? () => viaApify(env.APIFY_TOKEN!, url, get) : "apify: no APIFY_TOKEN",
+    proxy: env.APIFY_TOKEN ? () => viaProxy(env.APIFY_TOKEN!, url, get) : "proxy: no APIFY_TOKEN",
     direct: () => get(url, { headers }),
   };
   const skipped: string[] = [];
