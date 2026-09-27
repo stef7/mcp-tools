@@ -8,7 +8,6 @@
 import { SELF, createExecutionContext, env } from "cloudflare:test";
 import { describe, expect, inject, it } from "vitest";
 import Worker from "../workers/mcp-wp/src/index";
-import { authFrom } from "../workers/mcp-wp/src/wp";
 
 const base = inject("mockBase");
 const ME = "me@example.com";
@@ -176,46 +175,20 @@ describe("the MCP endpoint", () => {
   });
 });
 
-describe("the X-WP-Auth header", () => {
+describe("the X-Auth-Token header", () => {
   // Spaced the way WordPress prints an application password; the worker strips them,
   // and the mock only accepts the stripped form, so this proves both halves.
-  const HDR = { "x-wp-auth": "hdr-user:abcd EFGH 1234" };
+  const HDR = { "x-auth-token": "hdr-user:abcd EFGH 1234" };
   const blog = site(`${base}/blog`);
-
-  it("takes a bare entry as the login for whatever site the connector covers", () => {
-    expect(authFrom({ "x-wp-auth": "u:p" }, "apil.au")).toEqual({ user: "u", pass: "p" });
-  });
-
-  it("keeps a password containing the separators a single header would have needed", () => {
-    // One entry per header is the point: nothing here has to be escaped or avoided.
-    for (const pass of ["a;b", "a,b", "a=b", "a:b", "abcd efgh ijkl"])
-      expect(authFrom({ "x-wp-auth": `u:${pass}` }, "x")).toEqual({ user: "u", pass });
-  });
-
-  it("gives each site its own header, and matches on the host", () => {
-    const many = { "x-wp-auth-a": "apil.au=a:1", "x-wp-auth-b": "crikey.com.au=b:2" };
-    expect(authFrom(many, "apil.au")).toEqual({ user: "a", pass: "1" });
-    expect(authFrom(many, "crikey.com.au")).toEqual({ user: "b", pass: "2" });
-    expect(authFrom(many, "example.org")).toBeNull();
-  });
-
-  it("lets a header naming the host beat a bare one, so a default plus an exception works", () => {
-    const both = { "x-wp-auth": "default:pw", "x-wp-auth-apil": "apil.au=special:pw2" };
-    expect(authFrom(both, "apil.au")).toEqual({ user: "special", pass: "pw2" });
-    expect(authFrom(both, "elsewhere.org")).toEqual({ user: "default", pass: "pw" });
-  });
-
-  it("ignores headers that are not logins, and entries it cannot read", () => {
-    expect(authFrom({}, "x")).toBeNull();
-    expect(authFrom({ "x-wp-site": "apil.au" }, "x")).toBeNull();
-    expect(authFrom({ "x-wp-auth": "no-colon-here" }, "x")).toBeNull();
-    expect(authFrom({ "x-wp-auth": ":no-user" }, "x")).toBeNull();
-    expect(authFrom({ "x-wp-auth": "no-pass:" }, "x")).toBeNull();
-  });
 
   it("unlocks writes with no Access identity at all", async () => {
     const specs = (await wp().tools({ search: blog, email: undefined, headers: HDR })) as Spec[];
     expect(specs.map((t) => t.name)).toContain("wp_create_posts");
+  });
+
+  it("keeps a password containing colons, equals signs and the like", async () => {
+    const out = await call("wp_login_status", {}, site(), ME, { "x-auth-token": "u:a:b=c;d" });
+    expect(out).toContain("X-Auth-Token: used — user u");
   });
 
   it("wins over WP_SITES, so the header's own login is the one that is sent", async () => {
@@ -242,31 +215,42 @@ describe("the X-WP-Auth header", () => {
     expect(seen).toBe("wp-user:secretpass");
   });
 
+  it("is ignored on a connector for several sites, since one login cannot be everyone's", async () => {
+    const both = `?wp=${encodeURIComponent(`${base},${base}/blog`)}`;
+    const specs = (await wp().tools({ search: both, email: undefined, headers: HDR })) as Spec[];
+    expect(specs.some((t) => t.name.includes("_create_"))).toBe(false);
+  });
+
+  it("is never sent to a URL a generic-mode tool call names", async () => {
+    // Straight to the worker: `call` would swap an undefined email for ME.
+    const r = (await wp().call(
+      "wp_create_content",
+      { url: base, title: "Nope", user_confirmed: true },
+      { search: "", email: undefined, headers: HDR },
+    )) as { content: { text: string }[] };
+    expect(r.content[0]!.text).toContain("read-only");
+  });
+
   it("is reported by login_status without the password appearing", async () => {
     const out = await call("wp_login_status", {}, site(), ME, HDR);
-    expect(out).toContain("1 sent, one used — user hdr-user");
+    expect(out).toContain("X-Auth-Token: used — user hdr-user");
     expect(out).toContain("the header wins");
     expect(out).not.toContain("abcd EFGH 1234");
     expect(out).not.toContain("abcdEFGH1234");
   });
 
-  it("says what is wrong when every header names a different host", async () => {
-    const out = await call("wp_login_status", {}, site(), ME, {
-      "x-wp-auth": "somewhere.else=u:p",
-    });
-    expect(out).toContain("none of them for");
+  it("says so when it cannot be read", async () => {
+    const out = await call("wp_login_status", {}, site(), ME, { "x-auth-token": "no-colon" });
+    expect(out).toContain("unreadable");
     expect(out).toContain("verdict: editable"); // WP_SITES still covers this one
   });
-});
 
-describe("the X-WP-Site header", () => {
-  it("stands in for ?wp=, so a connector needs no query string", async () => {
-    const specs = (await wp().tools({
-      search: "",
-      email: ME,
-      headers: { "x-wp-site": base },
-    })) as Spec[];
-    expect(specs.map((t) => t.name)).toContain("wp_search_posts");
+  it("is the only header read: the old ones are gone", async () => {
+    const old = { "x-wp-auth": "hdr-user:abcdEFGH1234", "x-api-key": "hdr-user:abcdEFGH1234" };
+    const specs = (await wp().tools({ search: blog, email: undefined, headers: old })) as Spec[];
+    expect(specs.some((t) => t.name.includes("_create_"))).toBe(false);
+    const viaSite = (await wp().tools({ search: "", headers: { "x-wp-site": base } })) as Spec[];
+    expect(viaSite.map((t) => t.name)).toContain("wp_discover_site"); // generic mode, not a site
   });
 });
 
@@ -289,5 +273,118 @@ describe("reading a post body", () => {
     const first = (await call("wp_get_posts", { id: 1 }, site())).split("\n")[0]!;
     expect(first.startsWith("# ")).toBe(true);
     expect(first).not.toContain("<");
+  });
+});
+
+describe("WooCommerce", () => {
+  // The mock's root site exposes wc/v3; "/blog" does not, and 127.0.0.1 has no login.
+  const other = () => site(base.replace("localhost", "127.0.0.1"));
+  type Schema = { properties: Record<string, any>; required?: string[] };
+  const schemaOf = async (name: string) =>
+    (await tools(site())).find((t) => t.name === name)!.inputSchema as unknown as Schema;
+
+  it("builds tools from the site's own index, and only for the methods it offers", async () => {
+    const n = await names(site());
+    for (const verb of ["search", "get", "create", "update", "delete"])
+      expect(n).toContain(`wp_${verb}_wc_products`);
+    expect(n).toContain("wp_get_wc_orders");
+    expect(n).not.toContain("wp_update_wc_orders"); // the index offers no write for orders here
+    expect(n).toContain("wp_create_wc_order_notes");
+    expect(n).not.toContain("wp_search_wc_customers"); // no such route on this site
+    expect(n).toContain("wp_get_wc_endpoint");
+  });
+
+  it("takes product writes away from wp/v2, which would drop price and stock", async () => {
+    const n = await names(site());
+    expect(n).toContain("wp_search_products"); // reading through wp/v2 is harmless
+    expect(n).not.toContain("wp_create_product");
+    expect(n).not.toContain("wp_update_product");
+  });
+
+  it("offers nothing without a login, because WooCommerce will not even read without one", async () => {
+    expect((await names(other())).some((x) => x.includes("_wc_"))).toBe(false);
+    expect((await names(site(`${base}/blog`))).some((x) => x.includes("_wc_"))).toBe(false);
+  });
+
+  it("keeps the fields a client can send and drops what would break it", async () => {
+    const s = await schemaOf("wp_create_wc_products");
+    expect(s.properties["status"].enum).toContain("draft");
+    const meta = s.properties["meta_data"].items.properties;
+    expect(meta.id).toBeUndefined(); // readonly
+    expect(meta.value.type).toBeUndefined(); // "mixed" is not a JSON Schema type
+    expect((await schemaOf("wp_search_wc_products")).properties["context"]).toBeUndefined();
+  });
+
+  it("asks for the parent ID of a nested resource, and the route's own required fields", async () => {
+    const s = await schemaOf("wp_create_wc_order_notes");
+    expect(s.required).toEqual(expect.arrayContaining(["order_id", "note", "user_confirmed"]));
+  });
+
+  it("searches with the login and passes the route's filters through", async () => {
+    const out = await call("wp_search_wc_products", { sku: "SKU-201" }, site());
+    expect(out).toContain("Mug");
+    expect(out).not.toContain("Tote bag");
+    expect(out).toContain("sku: SKU-201");
+  });
+
+  it("returns one record whole, without the API's links", async () => {
+    const out = await call("wp_get_wc_products", { id: 202 }, site());
+    expect(out.split("\n")[0]).toBe("# Tote bag");
+    expect(out).not.toContain("_links");
+  });
+
+  it("creates a product as a draft unless told otherwise", async () => {
+    const out = await call("wp_create_wc_products", { name: "Cap", user_confirmed: true }, site());
+    expect(out).toContain("status: draft");
+  });
+
+  it("sends only the fields the route declares", async () => {
+    const out = await call(
+      "wp_update_wc_products",
+      { id: 201, name: "Big mug", bogus: 1, user_confirmed: true },
+      site(),
+    );
+    const sent = JSON.parse(out.slice(out.indexOf("{"))).sent;
+    expect(sent).toEqual({ name: "Big mug" });
+  });
+
+  it("fills a nested path from the parent ID", async () => {
+    const out = await call(
+      "wp_create_wc_order_notes",
+      { order_id: 301, note: "Shipped", user_confirmed: true },
+      site(),
+    );
+    expect(out).toContain("Created order note: Shipped");
+  });
+
+  it("trashes unless force is passed", async () => {
+    const out = await call("wp_delete_wc_products", { id: 202, user_confirmed: true }, site());
+    expect(out).toContain("Moved product 202 to the trash");
+  });
+
+  it("reads any other route, and lists them when asked for none", async () => {
+    expect(await call("wp_get_wc_endpoint", {}, site())).toContain("orders/{order_id}/notes");
+    const sales = await call(
+      "wp_get_wc_endpoint",
+      { path: "reports/sales", query: { period: "month" } },
+      site(),
+    );
+    expect(sales).toContain('"period": "month"');
+  });
+
+  it("will not let a path climb out of wc/v3 with the login attached", async () => {
+    for (const path of ["../wp/v2/users", "%2e%2e/wp/v2/users", "orders?x=1"])
+      expect(await call("wp_get_wc_endpoint", { path }, site())).toContain("Invalid path");
+  });
+
+  it("works from generic mode too, given a url", async () => {
+    const out = await call("wp_search_wc", { url: base, resource: "orders" }, "");
+    expect(out).toContain("301 — Ada L");
+    const none = await call(
+      "wp_search_wc",
+      { url: base.replace("localhost", "127.0.0.1"), resource: "orders" },
+      "",
+    );
+    expect(none).toContain("No login configured");
   });
 });

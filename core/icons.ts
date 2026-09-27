@@ -73,7 +73,4 @@ export const ICONS = {
   dataGovAu: mark("#006544", "AU"),
   ghost: mark("#15171a", "G"),
   apify: mark("#ff9012", "AP"),
-  // Lives in the gifthorse repo, which vendors this file. Kept here so that copy
-  // stays a straight copy rather than a fork with one extra line in it.
-  gifthorse: mark("#92400e", "🐴"),
 };

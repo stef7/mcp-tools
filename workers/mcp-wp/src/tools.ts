@@ -5,11 +5,12 @@
  *                              it, plus writes when WP_SITES holds a login for that host
  *  generic mode (no ?wp=)      a handful of tools that take a `url` and discover at call time
  *
- * Both are generated from what discovery found, so a site with an Events Calendar or a custom
- * "knowledge" type gets tools for it without anything being listed here by hand.
+ * Both are generated from what discovery found, so a site with an Events Calendar, WooCommerce or
+ * a custom "knowledge" type gets tools for it without anything being listed here by hand.
  */
 import { tool, type Ctx, type JSONSchema, type Tools } from "../../../core/mcp";
 import { NAMESPACE, TEC_TYPES, tecTools } from "./tec";
+import { NAMESPACE as WC, WC_TYPES, wcGenericTools, wcTools } from "./woo";
 import {
   available,
   create,
@@ -86,10 +87,11 @@ const taxProps = (type: PostType, s: Schema): Record<string, JSONSchema> =>
   );
 
 // ─── Site mode ─────────────────────────────────────────────────────────────────────────────────
-export const siteTools = (s: Schema, creds: Creds | null): Tools => {
+export const siteTools = async (s: Schema, creds: Creds | null): Promise<Tools> => {
   const tools: Tools = {};
   const host = new URL(s.base).hostname;
   const hasTec = s.namespaces.includes(NAMESPACE);
+  const hasWc = s.namespaces.includes(WC);
 
   for (const type of Object.values(s.postTypes)) {
     const taxonomies = taxProps(type, s);
@@ -112,8 +114,10 @@ export const siteTools = (s: Schema, creds: Creds | null): Tools => {
       run: ({ id }: { id: number }) => get(id, type, s, creds),
     };
 
-    // The Events Calendar owns its own types: writing them through wp/v2 would drop event meta.
+    // The Events Calendar and WooCommerce own their types: writing them through wp/v2 would drop
+    // the event meta, or the price, stock and SKU.
     if (!creds || (hasTec && TEC_TYPES.includes(type.slug))) continue;
+    if (hasWc && WC_TYPES.includes(type.slug)) continue;
 
     tools[`create_${type.rest_base}`] = {
       description: `Create ${type.name} on ${host}. Creates a draft unless status says otherwise.`,
@@ -163,7 +167,8 @@ export const siteTools = (s: Schema, creds: Creds | null): Tools => {
   tools["login_status"] = {
     description:
       `Report whether this connector can edit ${host}, and what is missing if it cannot. ` +
-      "Use it when the create, update and delete tools are absent and you expected them.",
+      "Use it when the create, update and delete tools, or the WooCommerce tools, are absent " +
+      "and you expected them.",
     run: (_args: unknown, c) => loginReport(s.base, c),
   };
 
@@ -187,7 +192,7 @@ export const siteTools = (s: Schema, creds: Creds | null): Tools => {
     },
   };
 
-  return hasTec ? { ...tools, ...tecTools(s, creds) } : tools;
+  return { ...tools, ...(hasTec ? tecTools(s, creds) : {}), ...(await wcTools(s, creds)) };
 };
 
 // ─── Generic mode ──────────────────────────────────────────────────────────────────────────────
@@ -226,9 +231,13 @@ export const genericTools: Tools = {
         ? "\nThis site runs The Events Calendar. Point the connector at it with " +
           `?wp=${new URL(base).hostname} to get event, venue and organiser tools.\n`
         : "";
+      const wc = s.namespaces.includes(WC)
+        ? "\nThis site runs WooCommerce. Use search_wc, get_wc and get_wc_endpoint with a login, " +
+          `or point the connector at it with ?wp=${new URL(base).hostname} for per-resource tools.\n`
+        : "";
       return (
         `# ${base}\n\n## Content Types\n\n${types.join("\n")}\n\n` +
-        `## Taxonomies\n\n${taxes.join("\n")}\n${tec}\n## Usage\n` +
+        `## Taxonomies\n\n${taxes.join("\n")}\n${tec}${wc}\n## Usage\n` +
         `Use search_content with url="${base}" and content_type set to a rest_base above.\n` +
         `Use taxonomy_filters with rest_base slugs as keys, e.g. {"categories": "news"}.\n` +
         `Use list_site_terms to browse available terms in any taxonomy.\n`
@@ -427,4 +436,5 @@ export const genericTools: Tools = {
       return remove(id, force === true, type, s, creds);
     },
   }),
+  ...wcGenericTools,
 };

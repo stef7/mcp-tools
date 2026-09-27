@@ -80,47 +80,45 @@ describe("a bound worker that renames nothing", () => {
   });
 });
 
-/** The production shape: `gifthorse` is bound as one service and serves two prefixes. */
-const Acnc = mcpWorker({ name: "acnc", tools: { search: ping } });
+/** An aggregator from outside this repo: bound as one service, it serves two prefixes. */
+const Inner = mcpWorker({ name: "inner", tools: { search: ping } });
 const Nested = mcpWorker({
-  name: "gifthorse",
-  services: [{ binding: "ACNC", service: "acnc" }],
+  name: "outer",
+  services: [{ binding: "INNER", service: "inner" }],
   tools: { spend: ping },
 });
-const GIFTHORSE: Entry = { binding: "GIFTHORSE", service: "gifthorse" };
-const nested = () => spawn(Nested, { ACNC: spawn(Acnc, env) });
+const OUTER: Entry = { binding: "OUTER", service: "outer" };
+const nested = () => spawn(Nested, { INNER: spawn(Inner, env) });
 
 describe("a bound worker that is itself an aggregator", () => {
-  const up = () => spawn(parent([GIFTHORSE]), { GIFTHORSE: nested() });
+  const up = () => spawn(parent([OUTER]), { OUTER: nested() });
 
   it("lists the tools it re-exports under a prefix of its own", async () => {
     expect(((await up().tools({})) as Spec[]).map((s) => s.name)).toEqual([
-      "gifthorse_spend",
-      "acnc_search",
+      "outer_spend",
+      "inner_search",
     ]);
   });
 
   it("routes a call to its own prefix", async () => {
-    expect(((await up().call("gifthorse_spend", {}, {})) as Result).content[0]!.text).toContain(
-      "pong",
-    );
+    expect(((await up().call("outer_spend", {}, {})) as Result).content[0]!.text).toContain("pong");
   });
 
   it("routes a call to the prefix it re-exports", async () => {
-    const out = (await up().call("acnc_search", {}, {})) as Result;
+    const out = (await up().call("inner_search", {}, {})) as Result;
     expect(out.isError).toBeFalsy();
     expect(out.content[0]!.text).toContain("pong");
   });
 
   it("still narrows to the re-exported prefix with ?tools=", async () => {
-    const specs = (await up().tools({ search: "?tools=acnc" })) as Spec[];
-    expect(specs.map((s) => s.name)).toEqual(["acnc_search"]);
+    const specs = (await up().tools({ search: "?tools=inner" })) as Spec[];
+    expect(specs.map((s) => s.name)).toEqual(["inner_search"]);
   });
 
   it("needs no lookup once both prefixes are declared", async () => {
     const [rpc, seen] = counting(nested());
-    const told = parent([{ ...GIFTHORSE, prefix: ["gifthorse_", "acnc_"] }]);
-    const out = (await spawn(told, { GIFTHORSE: rpc }).call("acnc_search", {}, {})) as Result;
+    const told = parent([{ ...OUTER, prefix: ["outer_", "inner_"] }]);
+    const out = (await spawn(told, { OUTER: rpc }).call("inner_search", {}, {})) as Result;
     expect(out.content[0]!.text).toContain("pong");
     expect(seen.lists).toBe(0);
   });

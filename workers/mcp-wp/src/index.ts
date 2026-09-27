@@ -7,27 +7,19 @@
  *
  * Reads are open. Writes appear only for hosts listed in the WP_SITES secret (see secrets.d.ts)
  * and always require the caller to pass user_confirmed. Sites running The Events Calendar also
- * get event, venue and organiser tools — see tec.ts.
+ * get event, venue and organiser tools — see tec.ts — and sites running WooCommerce get product,
+ * order, customer and coupon tools once there is a login, since WooCommerce reads need one too —
+ * see woo.ts.
  *
  * Optional `?title=&icon=&description=` decorate the connector (single-site mode). `?site=` is
  * accepted as an alias of `?wp=` for old connector URLs.
  */
 import cfg from "../wrangler.json";
 import pkg from "../package.json";
-import { mcpWorker, type Ctx } from "../../../core/mcp";
+import { mcpWorker } from "../../../core/mcp";
 import { ICONS } from "../../../core/icons";
 import { genericTools, siteTools } from "./tools";
-import { credsFor, discoverSite, loginReport, siteUrl, slug, usable } from "./wp";
-
-/**
- * Which sites this connector is for: the `X-WP-Site` header first, then `?wp=` (or `?site=`).
- * The header exists so a connector can be configured entirely in Claude, with no URL to edit.
- */
-const sitesOf = ({ params, headers }: Ctx) =>
-  (headers["x-wp-site"] ?? params.get("wp") ?? params.get("site") ?? "")
-    .split(",")
-    .filter(Boolean)
-    .map(siteUrl);
+import { credsFor, discoverSite, loginReport, sitesOf, slug, usable } from "./wp";
 
 export default mcpWorker({
   ...cfg,
@@ -69,7 +61,8 @@ export default mcpWorker({
           "WordPress Explorer: query any WordPress site. Start with discover_site(url) to probe " +
           "a site, then use search_content, get_content, and list_site_terms. The REST API often " +
           "returns full content even on paywalled sites. Editing needs a login in the WP_SITES " +
-          "secret, and every write asks you to confirm first.",
+          "secret, and every write asks you to confirm first. WooCommerce shops have *_wc tools, " +
+          "which need a login even to read.",
       };
     const hosts = sites.map((u) => new URL(u).hostname).join(", ");
     const first = new URL(sites[0]!);

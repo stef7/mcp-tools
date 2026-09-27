@@ -110,35 +110,37 @@ const pairOf = (text: string): Creds | null => {
   return user && pass ? { user, pass } : null;
 };
 
+/** Which sites this connector is for: `?wp=` (or `?site=`, for old connector URLs). */
+export const sitesOf = ({ params }: Ctx) =>
+  (params.get("wp") ?? params.get("site") ?? "").split(",").filter(Boolean).map(siteUrl);
+
 /**
- * A login carried on the request, so someone can edit a site without anything being stored here.
+ * A login carried on the connector as `X-Auth-Token: user:application password`, so someone can
+ * edit a site without anything being stored here. Claude connectors send only header names
+ * Anthropic has approved, and `X-Auth-Token` is one every connector can use.
  *
- * Every header whose name starts with `X-WP-Auth` holds exactly one entry — one per header
- * rather than several in one, so no separator has to be chosen that a password might contain:
- *
- *   X-WP-Auth:       user:application password           any site on this connector
- *   X-WP-Auth-Apil:  apil.au=user:application password   that host only
- *
- * A header naming this host wins over a bare one, so a default plus an exception both work. The
- * name after `X-WP-Auth` is yours and is never read: connectors key headers by name, so the
- * suffix exists only to let you add more than one.
+ * One header is one login, so it only means something when the connector is for exactly one
+ * site: with several there is no saying whose it is, and in generic mode it would go to
+ * whatever URL a tool call names. Either way it is ignored, and `why` says so.
  */
-export const authFrom = (headers: Record<string, string>, host: string): Creds | null => {
-  let bare: Creds | null = null;
-  for (const [name, value] of Object.entries(headers)) {
-    if (!name.startsWith("x-wp-auth")) continue;
-    // A host never contains a colon, so `u:a=b` is a password with an `=` in it, not a host.
-    const named = value.match(/^([^=:\s]+)=(.*)$/);
-    const creds = pairOf(named ? named[2]!.trim() : value.trim());
-    if (!creds) continue;
-    if (!named) bare ??= creds;
-    else if (named[1] === host) return creds;
-  }
-  return bare;
+export const headerLogin = (base: string, c: Ctx): { creds?: Creds; why: string } => {
+  const value = c.headers["x-auth-token"];
+  if (value === undefined) return { why: "X-Auth-Token: not sent" };
+  const sites = sitesOf(c);
+  const host = new URL(base).hostname;
+  if (sites.length !== 1 || new URL(sites[0]!).hostname !== host)
+    return {
+      why:
+        "X-Auth-Token: sent but ignored — it is used only on a connector for exactly one site " +
+        `(?wp=${host}), so the login never reaches a site it was not meant for.`,
+    };
+  const creds = pairOf(value.trim());
+  if (!creds) return { why: 'X-Auth-Token: sent but unreadable — it should be "user:password".' };
+  return { creds, why: `X-Auth-Token: used — user ${creds.user}` };
 };
 
 export const credsFor = async (base: string, c: Ctx): Promise<Login | null> => {
-  const fromHeader = authFrom(c.headers, new URL(base).hostname);
+  const fromHeader = headerLogin(base, c).creds;
   if (fromHeader) return fromHeader;
   const email = await c.email();
   if (!email || !c.env.WP_SITES) return null;
@@ -212,17 +214,8 @@ export const loginReport = async (base: string, c: Ctx): Promise<string> => {
   ];
 
   // Never the password, and never the raw header: only whether it was usable, and as whom.
-  const sent = Object.keys(c.headers).filter((n) => n.startsWith("x-wp-auth"));
-  const fromHeader = authFrom(c.headers, host);
-  if (!sent.length) lines.push("X-WP-Auth header: not sent");
-  else if (fromHeader)
-    lines.push(`X-WP-Auth header: ${sent.length} sent, one used — user ${fromHeader.user}`);
-  else
-    lines.push(
-      `X-WP-Auth header: ${sent.length} sent, none of them for ${host}. Each should hold one ` +
-        `entry: "user:application password", or "${host}=user:application password" to name ` +
-        "the site. Use a second header rather than putting two in one.",
-    );
+  const { creds: fromHeader, why } = headerLogin(base, c);
+  lines.push(why);
   if (fromHeader) lines.push("(the header wins, so WP_SITES is not consulted)");
 
   if (!c.env.WP_SITES) lines.push("WP_SITES: not set");
@@ -335,7 +328,7 @@ const call = async (
 
 // ─── Cache (6 h, per isolate) ──────────────────────────────────────────────────────────────────
 const cache = new Map<string, { at: number; data: unknown }>();
-const memo = async <T>(key: string, load: () => Promise<T>): Promise<T> => {
+export const memo = async <T>(key: string, load: () => Promise<T>): Promise<T> => {
   const hit = cache.get(key);
   if (hit && Date.now() - hit.at < 6 * 3600_000) return hit.data as T;
   const data = await load();
