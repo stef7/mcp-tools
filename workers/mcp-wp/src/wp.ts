@@ -111,22 +111,29 @@ const pairOf = (text: string): Creds | null => {
 };
 
 /**
+ * The headers a login may arrive in. Claude connectors send only header names Anthropic has
+ * approved, and these two are on the list every connector gets, so neither needs asking for.
+ * `Authorization` is on it too, but the toolkit's OAuth (Cloudflare Access) already uses that.
+ * Checked in this order, so when both hold a bare login, `X-Auth-Token` is the one used.
+ */
+export const AUTH_HEADERS = ["x-auth-token", "x-api-key"];
+
+/**
  * A login carried on the request, so someone can edit a site without anything being stored here.
  *
- * Every header whose name starts with `X-WP-Auth` holds exactly one entry — one per header
- * rather than several in one, so no separator has to be chosen that a password might contain:
+ * Each header holds exactly one entry — one per header rather than several in one, so no
+ * separator has to be chosen that a password might contain:
  *
- *   X-WP-Auth:       user:application password           any site on this connector
- *   X-WP-Auth-Apil:  apil.au=user:application password   that host only
+ *   X-Auth-Token:  user:application password           any site on this connector
+ *   X-API-Key:     apil.au=user:application password   that host only
  *
- * A header naming this host wins over a bare one, so a default plus an exception both work. The
- * name after `X-WP-Auth` is yours and is never read: connectors key headers by name, so the
- * suffix exists only to let you add more than one.
+ * A header naming this host wins over a bare one, so a default plus an exception both work.
  */
 export const authFrom = (headers: Record<string, string>, host: string): Creds | null => {
   let bare: Creds | null = null;
-  for (const [name, value] of Object.entries(headers)) {
-    if (!name.startsWith("x-wp-auth")) continue;
+  for (const name of AUTH_HEADERS) {
+    const value = headers[name];
+    if (value === undefined) continue;
     // A host never contains a colon, so `u:a=b` is a password with an `=` in it, not a host.
     const named = value.match(/^([^=:\s]+)=(.*)$/);
     const creds = pairOf(named ? named[2]!.trim() : value.trim());
@@ -212,14 +219,14 @@ export const loginReport = async (base: string, c: Ctx): Promise<string> => {
   ];
 
   // Never the password, and never the raw header: only whether it was usable, and as whom.
-  const sent = Object.keys(c.headers).filter((n) => n.startsWith("x-wp-auth"));
+  const sent = AUTH_HEADERS.filter((n) => c.headers[n] !== undefined);
   const fromHeader = authFrom(c.headers, host);
-  if (!sent.length) lines.push("X-WP-Auth header: not sent");
+  if (!sent.length) lines.push("login header (X-Auth-Token / X-API-Key): not sent");
   else if (fromHeader)
-    lines.push(`X-WP-Auth header: ${sent.length} sent, one used — user ${fromHeader.user}`);
+    lines.push(`login header: ${sent.join(", ")} sent, one used — user ${fromHeader.user}`);
   else
     lines.push(
-      `X-WP-Auth header: ${sent.length} sent, none of them for ${host}. Each should hold one ` +
+      `login header: ${sent.join(", ")} sent, none of them for ${host}. Each should hold one ` +
         `entry: "user:application password", or "${host}=user:application password" to name ` +
         "the site. Use a second header rather than putting two in one.",
     );

@@ -4,7 +4,7 @@
 // does — so the credential path is exercised too. "/blog" is a second site with neither plugin.
 import { createServer } from "node:http";
 
-// Two valid logins: the one WP_SITES points at, and one only ever supplied by an X-WP-Auth
+// Two valid logins: the one WP_SITES points at, and one only ever supplied by a login
 // header, so a test can tell which of the two paths actually sent the credential.
 const LOGINS = ["wp-user:secretpass", "hdr-user:abcdEFGH1234"];
 const AUTH = LOGINS.map((l) => "Basic " + Buffer.from(l).toString("base64"));

@@ -163,18 +163,24 @@ Reads are open. Writing needs a login, and there are two ways to supply one.
 
 ### Either: a header on the connector
 
-Claude connectors allow a few custom headers, and `mcp-wp` reads two of them. Nothing is stored
-on the worker, and the credential stays with whoever configured that connector — so someone can
-be given write access without a Cloudflare account or an entry in anything you maintain.
+Claude connectors send only header names Anthropic has approved (up to four per connector).
+`X-Auth-Token` and `X-API-Key` are on the list every connector can use, so `mcp-wp` reads a login
+from either. Nothing is stored on the worker, and the credential stays with whoever configured
+that connector — so someone can be given write access without a Cloudflare account or an entry
+in anything you maintain. (`Authorization` is on the list too, but Cloudflare Access's OAuth
+already uses it.)
 
-| Header      | Value                                                                        |
-| ----------- | ---------------------------------------------------------------------------- |
-| `X-WP-Auth` | `user:application password`, or `apil.au=user:pass; crikey.com.au=user:pass` |
-| `X-WP-Site` | `apil.au` — stands in for `?wp=`, so the URL needs no query string           |
+| Header         | Value                                                              |
+| -------------- | ------------------------------------------------------------------ |
+| `X-Auth-Token` | `user:application password`, or `apil.au=user:app password`        |
+| `X-API-Key`    | the same, for a second login — e.g. a different site               |
+| `X-WP-Site`    | `apil.au` — stands in for `?wp=`, so the URL needs no query string |
 
-The bare form of `X-WP-Auth` applies to every site on that connector, which is right when one
-login works everywhere; name the host when it does not. Spaces in the password are fine —
-WordPress prints them in groups of four and they are stripped before the request goes out.
+Each header holds one entry. The bare form applies to every site on that connector, which is
+right when one login works everywhere; name the host when it does not. A header naming the site
+wins over a bare one, and when both headers are bare, `X-Auth-Token` wins. Spaces in the password
+are fine — WordPress prints them in groups of four and they are stripped before the request goes
+out.
 
 A header wins over `WP_SITES`. It also only exists while a person's connector is making the
 request: anything unattended sends no headers, so `WP_SITES` is what a scheduled write would use.
@@ -232,7 +238,7 @@ Two differences from `wp/v2`:
 
 - **WooCommerce will not serve anything without a login, reads included**, so none of these tools
   appear until a login is configured. Use a Shop Manager or Administrator. Either an
-  Application Password or a WooCommerce REST key pair works, in `WP_SITES` or `X-WP-Auth`
+  Application Password or a WooCommerce REST key pair works, in `WP_SITES` or a login header
   (`ck_…:cs_…`); a key pair unlocks only the WooCommerce tools, not the `wp/v2` writes.
 - A new product is a **draft** unless you pass a status, because WooCommerce itself publishes by
   default. Customers, categories, tags, notes and refunds cannot be trashed, so WooCommerce

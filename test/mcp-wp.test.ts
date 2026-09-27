@@ -176,31 +176,31 @@ describe("the MCP endpoint", () => {
   });
 });
 
-describe("the X-WP-Auth header", () => {
+describe("the login headers", () => {
   // Spaced the way WordPress prints an application password; the worker strips them,
   // and the mock only accepts the stripped form, so this proves both halves.
-  const HDR = { "x-wp-auth": "hdr-user:abcd EFGH 1234" };
+  const HDR = { "x-auth-token": "hdr-user:abcd EFGH 1234" };
   const blog = site(`${base}/blog`);
 
   it("takes a bare entry as the login for whatever site the connector covers", () => {
-    expect(authFrom({ "x-wp-auth": "u:p" }, "apil.au")).toEqual({ user: "u", pass: "p" });
+    expect(authFrom({ "x-auth-token": "u:p" }, "apil.au")).toEqual({ user: "u", pass: "p" });
   });
 
   it("keeps a password containing the separators a single header would have needed", () => {
     // One entry per header is the point: nothing here has to be escaped or avoided.
     for (const pass of ["a;b", "a,b", "a=b", "a:b", "abcd efgh ijkl"])
-      expect(authFrom({ "x-wp-auth": `u:${pass}` }, "x")).toEqual({ user: "u", pass });
+      expect(authFrom({ "x-api-key": `u:${pass}` }, "x")).toEqual({ user: "u", pass });
   });
 
   it("gives each site its own header, and matches on the host", () => {
-    const many = { "x-wp-auth-a": "apil.au=a:1", "x-wp-auth-b": "crikey.com.au=b:2" };
+    const many = { "x-auth-token": "apil.au=a:1", "x-api-key": "crikey.com.au=b:2" };
     expect(authFrom(many, "apil.au")).toEqual({ user: "a", pass: "1" });
     expect(authFrom(many, "crikey.com.au")).toEqual({ user: "b", pass: "2" });
     expect(authFrom(many, "example.org")).toBeNull();
   });
 
   it("lets a header naming the host beat a bare one, so a default plus an exception works", () => {
-    const both = { "x-wp-auth": "default:pw", "x-wp-auth-apil": "apil.au=special:pw2" };
+    const both = { "x-auth-token": "default:pw", "x-api-key": "apil.au=special:pw2" };
     expect(authFrom(both, "apil.au")).toEqual({ user: "special", pass: "pw2" });
     expect(authFrom(both, "elsewhere.org")).toEqual({ user: "default", pass: "pw" });
   });
@@ -208,9 +208,16 @@ describe("the X-WP-Auth header", () => {
   it("ignores headers that are not logins, and entries it cannot read", () => {
     expect(authFrom({}, "x")).toBeNull();
     expect(authFrom({ "x-wp-site": "apil.au" }, "x")).toBeNull();
-    expect(authFrom({ "x-wp-auth": "no-colon-here" }, "x")).toBeNull();
-    expect(authFrom({ "x-wp-auth": ":no-user" }, "x")).toBeNull();
-    expect(authFrom({ "x-wp-auth": "no-pass:" }, "x")).toBeNull();
+    expect(authFrom({ "x-auth-token": "no-colon-here" }, "x")).toBeNull();
+    expect(authFrom({ "x-auth-token": ":no-user" }, "x")).toBeNull();
+    expect(authFrom({ "x-api-key": "no-pass:" }, "x")).toBeNull();
+    // The old name is gone: Claude connectors could never send it.
+    expect(authFrom({ "x-wp-auth": "u:p" }, "x")).toBeNull();
+  });
+
+  it("prefers X-Auth-Token when both headers hold a bare login", () => {
+    const two = { "x-api-key": "second:pw", "x-auth-token": "first:pw" };
+    expect(authFrom(two, "x")).toEqual({ user: "first", pass: "pw" });
   });
 
   it("unlocks writes with no Access identity at all", async () => {
@@ -244,7 +251,7 @@ describe("the X-WP-Auth header", () => {
 
   it("is reported by login_status without the password appearing", async () => {
     const out = await call("wp_login_status", {}, site(), ME, HDR);
-    expect(out).toContain("1 sent, one used — user hdr-user");
+    expect(out).toContain("x-auth-token sent, one used — user hdr-user");
     expect(out).toContain("the header wins");
     expect(out).not.toContain("abcd EFGH 1234");
     expect(out).not.toContain("abcdEFGH1234");
@@ -252,7 +259,7 @@ describe("the X-WP-Auth header", () => {
 
   it("says what is wrong when every header names a different host", async () => {
     const out = await call("wp_login_status", {}, site(), ME, {
-      "x-wp-auth": "somewhere.else=u:p",
+      "x-auth-token": "somewhere.else=u:p",
     });
     expect(out).toContain("none of them for");
     expect(out).toContain("verdict: editable"); // WP_SITES still covers this one
