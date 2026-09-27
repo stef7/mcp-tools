@@ -175,10 +175,10 @@ describe("the MCP endpoint", () => {
   });
 });
 
-describe("the X-API-Key header", () => {
+describe("the X-Auth-Token header", () => {
   // Spaced the way WordPress prints an application password; the worker strips them,
   // and the mock only accepts the stripped form, so this proves both halves.
-  const HDR = { "x-api-key": "hdr-user:abcd EFGH 1234" };
+  const HDR = { "x-auth-token": "hdr-user:abcd EFGH 1234" };
   const blog = site(`${base}/blog`);
 
   it("unlocks writes with no Access identity at all", async () => {
@@ -187,8 +187,8 @@ describe("the X-API-Key header", () => {
   });
 
   it("keeps a password containing colons, equals signs and the like", async () => {
-    const out = await call("wp_login_status", {}, site(), ME, { "x-api-key": "u:a:b=c;d" });
-    expect(out).toContain("X-API-Key: used — user u");
+    const out = await call("wp_login_status", {}, site(), ME, { "x-auth-token": "u:a:b=c;d" });
+    expect(out).toContain("X-Auth-Token: used — user u");
   });
 
   it("wins over WP_SITES, so the header's own login is the one that is sent", async () => {
@@ -233,20 +233,20 @@ describe("the X-API-Key header", () => {
 
   it("is reported by login_status without the password appearing", async () => {
     const out = await call("wp_login_status", {}, site(), ME, HDR);
-    expect(out).toContain("X-API-Key: used — user hdr-user");
+    expect(out).toContain("X-Auth-Token: used — user hdr-user");
     expect(out).toContain("the header wins");
     expect(out).not.toContain("abcd EFGH 1234");
     expect(out).not.toContain("abcdEFGH1234");
   });
 
   it("says so when it cannot be read", async () => {
-    const out = await call("wp_login_status", {}, site(), ME, { "x-api-key": "no-colon" });
+    const out = await call("wp_login_status", {}, site(), ME, { "x-auth-token": "no-colon" });
     expect(out).toContain("unreadable");
     expect(out).toContain("verdict: editable"); // WP_SITES still covers this one
   });
 
   it("is the only header read: the old ones are gone", async () => {
-    const old = { "x-wp-auth": "hdr-user:abcdEFGH1234", "x-auth-token": "hdr-user:abcdEFGH1234" };
+    const old = { "x-wp-auth": "hdr-user:abcdEFGH1234", "x-api-key": "hdr-user:abcdEFGH1234" };
     const specs = (await wp().tools({ search: blog, email: undefined, headers: old })) as Spec[];
     expect(specs.some((t) => t.name.includes("_create_"))).toBe(false);
     const viaSite = (await wp().tools({ search: "", headers: { "x-wp-site": base } })) as Spec[];

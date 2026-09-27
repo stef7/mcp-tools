@@ -115,28 +115,28 @@ export const sitesOf = ({ params }: Ctx) =>
   (params.get("wp") ?? params.get("site") ?? "").split(",").filter(Boolean).map(siteUrl);
 
 /**
- * A login carried on the connector as `X-API-Key: user:application password`, so someone can
+ * A login carried on the connector as `X-Auth-Token: user:application password`, so someone can
  * edit a site without anything being stored here. Claude connectors send only header names
- * Anthropic has approved, and `X-API-Key` is one every connector can use.
+ * Anthropic has approved, and `X-Auth-Token` is one every connector can use.
  *
  * One header is one login, so it only means something when the connector is for exactly one
  * site: with several there is no saying whose it is, and in generic mode it would go to
  * whatever URL a tool call names. Either way it is ignored, and `why` says so.
  */
 export const headerLogin = (base: string, c: Ctx): { creds?: Creds; why: string } => {
-  const value = c.headers["x-api-key"];
-  if (value === undefined) return { why: "X-API-Key: not sent" };
+  const value = c.headers["x-auth-token"];
+  if (value === undefined) return { why: "X-Auth-Token: not sent" };
   const sites = sitesOf(c);
   const host = new URL(base).hostname;
   if (sites.length !== 1 || new URL(sites[0]!).hostname !== host)
     return {
       why:
-        "X-API-Key: sent but ignored — it is used only on a connector for exactly one site " +
+        "X-Auth-Token: sent but ignored — it is used only on a connector for exactly one site " +
         `(?wp=${host}), so the login never reaches a site it was not meant for.`,
     };
   const creds = pairOf(value.trim());
-  if (!creds) return { why: 'X-API-Key: sent but unreadable — it should be "user:password".' };
-  return { creds, why: `X-API-Key: used — user ${creds.user}` };
+  if (!creds) return { why: 'X-Auth-Token: sent but unreadable — it should be "user:password".' };
+  return { creds, why: `X-Auth-Token: used — user ${creds.user}` };
 };
 
 export const credsFor = async (base: string, c: Ctx): Promise<Login | null> => {

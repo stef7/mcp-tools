@@ -163,7 +163,7 @@ Reads are open. Writing needs a login, and there are two ways to supply one.
 
 ### Either: a header on the connector
 
-Claude connectors send only header names Anthropic has approved, and `X-API-Key` is one every
+Claude connectors send only header names Anthropic has approved, and `X-Auth-Token` is one every
 connector can use. Put a login in it as `user:application password` and `mcp-wp` uses it.
 Nothing is stored on the worker, and the credential stays with whoever configured that
 connector — so someone can be given write access without a Cloudflare account or an entry in
@@ -231,7 +231,7 @@ Two differences from `wp/v2`:
 
 - **WooCommerce will not serve anything without a login, reads included**, so none of these tools
   appear until a login is configured. Use a Shop Manager or Administrator. Either an
-  Application Password or a WooCommerce REST key pair works, in `WP_SITES` or `X-API-Key`
+  Application Password or a WooCommerce REST key pair works, in `WP_SITES` or `X-Auth-Token`
   (`ck_…:cs_…`); a key pair unlocks only the WooCommerce tools, not the `wp/v2` writes.
 - A new product is a **draft** unless you pass a status, because WooCommerce itself publishes by
   default. Customers, categories, tags, notes and refunds cannot be trashed, so WooCommerce
