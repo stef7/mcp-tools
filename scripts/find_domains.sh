@@ -118,15 +118,27 @@ check_batch() { # args: domain names. Appends to $RESULTS. Exits on any API erro
   requests=$((requests + 1))
   if [ "$code" != "200" ] || [ "$(jq -r '.success' "$resp" 2>/dev/null)" != "true" ]; then
     echo >&2
-    echo "STOPPED at request $requests (HTTP $code). First name in the batch: $1" >&2
+    echo "HTTP $code for request $requests. First name in the batch: $1. Response body:" >&2
+    if [ -s "$resp" ]; then head -c 500 "$resp" >&2; echo >&2; else echo "(empty body)" >&2; fi
+    # A single name that the API rejects as a bad request (seen for co.io) is recorded and
+    # skipped, so that it can't block every re-run. Anything else stops the run.
+    if [ "$code" = "400" ] && [ $# -eq 1 ]; then
+      printf '%s\t\t\t\t\tapi_http_400\n' "$1" >> "$RESULTS"
+      sleep "$REQUEST_GAP"; return 0
+    fi
+    echo "STOPPED." >&2
     [ "$code" = "429" ] && echo "Rate limited. Wait at least 5 minutes before re-running." >&2
-    jq -c '{errors, messages}' "$resp" 2>/dev/null >&2 || head -c 500 "$resp" >&2
     echo "Checked so far: $(($(wc -l < "$RESULTS") - 1)) names in $RESULTS. Re-run to resume." >&2
     exit 1
   fi
   jq -r '.result.domains[] | [.name, (.registrable|tostring), (.tier // ""),
          (.pricing.registration_cost // ""), (.pricing.renewal_cost // ""), (.reason // "")] | @tsv' \
     "$resp" >> "$RESULTS"
+  # A name that the API silently leaves out of a 200 response gets retried once on its own on
+  # the next run (co.io went missing this way, then returned HTTP 400 when sent alone).
+  local missing
+  missing=$(printf '%s\n' "$@" | grep -vxF -f <(jq -r '.result.domains[].name' "$resp") || true)
+  [ -z "$missing" ] || echo "  (not returned by the API, retried next run: $(echo $missing))" >&2
   sleep "$REQUEST_GAP"
 }
 
