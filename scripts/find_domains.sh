@@ -21,14 +21,14 @@
 set -euo pipefail
 
 # ---------------------------------------------------------------- settings ---
-ENDINGS="dev xyz wtf cc io ps me co tv fm us"
+ENDINGS="dev xyz wtf cc io ps co tv fm us"
 NAME_LENGTH=2
 CHARSET="abcdefghijklmnopqrstuvwxyz0123456789" # letters only: drop the digits
 OUT_DIR="${OUT_DIR:-./domain-scan}"            # nx*.txt and results.tsv go here
 DNS_SERVER=1.1.1.1
 DNS_PARALLEL=8
 BATCH_SIZE=20      # API maximum
-REQUEST_GAP=1      # seconds between API requests (keeps us at or under 1 req/s)
+REQUEST_GAP=4      # seconds between API requests (domain-check hit HTTP 429 at ~0.7 req/s)
 TOP_N=30
 # ------------------------------------------------------------------------------
 
