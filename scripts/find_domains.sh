@@ -88,7 +88,7 @@ for tld in $ENDINGS; do
   if [ -f "$f" ]; then continue; fi # cached from an earlier run; delete it to rescan
   echo "DNS scan: .$tld ..." >&2
   gen_names | xargs -P "$DNS_PARALLEL" -I{} sh -c \
-    'dig +noall +comments +time=2 +tries=2 "$1.$2" NS @"$3" | grep -q NXDOMAIN && echo "$1.$2"' \
+    'dig +noall +comments +time=2 +tries=2 "$1.$2" NS @"$3" | grep -q NXDOMAIN && echo "$1.$2"; true' \
     _ {} "$tld" "$DNS_SERVER" | sort -u > "$f.tmp"
   mv "$f.tmp" "$f"
 done
