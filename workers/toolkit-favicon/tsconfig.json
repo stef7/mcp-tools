@@ -1,0 +1,5 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": { "types": ["./worker-configuration.d.ts"] },
+  "include": ["src", "*.d.ts", "../../core", "wrangler.json", "package.json"]
+}

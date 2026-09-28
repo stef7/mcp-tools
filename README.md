@@ -122,6 +122,16 @@ keeps plain variables too, so `WP_SITES` survives a deploy).
 
 5. `npm run check`, commit, push to `main`; the deploy workflow picks the new folder up.
 
+## The connector's icon
+
+Claude.ai ignores the icons an MCP server declares for a custom connector and asks Google's
+favicon service about the connector URL's last two labels instead (anthropics/claude-ai-mcp#152,
+#838), so a connector behind Access gets its icon from the bare domain above it.
+`workers/toolkit-favicon` passes through the image at `ICON_URL`, publicly, at whatever routes it
+is given. Both are set in the dashboard, not here: the routes `<bare domain>/favicon*` and
+`<bare domain>/apple-touch-icon*`, and `ICON_URL` under Variables and Secrets. A redirect rule on
+that domain has to skip those paths.
+
 ## Getting past blocks
 
 `mcp-fetch` downloads through `core/egress.ts`, which tries the routes you name, in the order
