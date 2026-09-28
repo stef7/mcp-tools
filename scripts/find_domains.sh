@@ -46,8 +46,10 @@ report() {
     | awk -F'\t' 'BEGIN{printf "%-16s %10s %10s\n","name","register","renew"}
                   {printf "%-16s %10s %10s\n",$1,$4,$5}'
   echo
-  echo "== b) Distinct tier values seen (with counts) =="
-  awk -F'\t' 'NR>1 && $3!="" {c[$3]++} END{for(t in c) printf "%s\t%d\n",t,c[t]}' "$RESULTS" | sort
+  echo "== b) Distinct tier values seen (count; registrable=true / false) =="
+  echo "   (the API sets tier on unavailable names too, so most 'standard' rows are not for sale)"
+  awk -F'\t' 'NR>1 && $3!="" {c[$3]++; if($2=="true") y[$3]++; else n[$3]++}
+              END{for(t in c) printf "%s\t%d\t(%d / %d)\n",t,c[t],y[t],n[t]}' "$RESULTS" | sort
   echo
   echo "== c) Endings that returned extension_not_supported_via_api =="
   awk -F'\t' 'NR>1 && $6=="extension_not_supported_via_api" {n=$1; sub(/^[^.]*\./,"",n); print "."n}' "$RESULTS" | sort -u
@@ -154,7 +156,7 @@ for tld in $ENDINGS; do
     check_batch "${todo[@]:i:BATCH_SIZE}"
     printf '\r  %d/%d' "$((i + BATCH_SIZE < ${#todo[@]} ? i + BATCH_SIZE : ${#todo[@]}))" "${#todo[@]}" >&2
     # If the first batch shows the ending isn't supported, don't spend more requests on it.
-    if [ "$i" -eq 0 ] && jq -e '[.result.domains[].reason] | all(. != null and startswith("extension_not_supported"))' "$resp" >/dev/null; then
+    if [ "$i" -eq 0 ] && jq -e '[.result.domains[].reason] | all(. != null and startswith("extension_not_supported"))' "$resp" >/dev/null 2>&1; then
       echo "  -> extension not supported via API; skipping the rest of .$tld" >&2; break
     fi
   done
