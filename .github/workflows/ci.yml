@@ -1,0 +1,134 @@
+name: ci
+# From pull request to production. `plan` builds every worker once and fingerprints each bundle
+# (core/ship.mjs); only the workers whose build differs from what Cloudflare is serving go on,
+# each in its own job, all in parallel.
+#
+#   pull request   check; and each changed worker uploaded as a version that is not deployed:
+#                  Cloudflare accepts it or refuses it, and no traffic reaches it.
+#   push to main   check; then each changed worker deployed.
+#   run by hand    check; then every worker deployed.
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  # A newer push to a PR makes the older run moot. A deploy is never cut off halfway.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+  CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+
+jobs:
+  # The one job that installs the whole workspace: tests and type checks need it, nothing else does.
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22, cache: npm }
+      - run: npm ci
+      - run: npm run format:check
+      - run: npm run check
+      - run: npm test
+
+  # Builds with wrangler alone (no worker has npm dependencies of its own), so it runs alongside
+  # `check` without waiting for its install. Its cache of wrangler is what the jobs below restore.
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      workers: ${{ steps.plan.outputs.workers }}
+      wrangler: ${{ steps.wrangler.outputs.spec }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22 }
+      - id: wrangler
+        run: echo "spec=$(node core/ship.mjs wrangler)" >> "$GITHUB_OUTPUT"
+      - uses: actions/cache@v4
+        with:
+          path: ~/.npm
+          key: npm-${{ runner.os }}-${{ steps.wrangler.outputs.spec }}
+      - id: plan
+        run: echo "workers=$(node core/ship.mjs plan ${{ github.event_name == 'workflow_dispatch' && '--all' || '' }})" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@v4
+        with: { name: bundles, path: bundles/, retention-days: 7 }
+
+  # Cloudflare refuses some things only on upload (a setting the plan does not allow, a binding
+  # that does not resolve, a missing required secret), and no local test can see those.
+  upload:
+    if: github.event_name == 'pull_request' && needs.plan.outputs.workers != '[]'
+    needs: plan
+    name: upload ${{ matrix.worker.name }}
+    strategy:
+      fail-fast: false
+      matrix:
+        worker: ${{ fromJSON(needs.plan.outputs.workers) }}
+    runs-on: ubuntu-latest
+    env:
+      WRANGLER: ${{ needs.plan.outputs.wrangler }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22 }
+      - uses: actions/cache/restore@v4
+        with:
+          path: ~/.npm
+          key: npm-${{ runner.os }}-${{ needs.plan.outputs.wrangler }}
+      - uses: actions/download-artifact@v4
+        with: { name: bundles, path: bundles }
+      - name: Upload the bundle `plan` built, as a version that is not deployed
+        working-directory: ${{ matrix.worker.dir }}
+        run: |
+          if [ -z "$CLOUDFLARE_API_TOKEN" ]; then
+            echo "::warning::No CLOUDFLARE_API_TOKEN for this run (a fork or a bot's PR), so nothing was uploaded."
+            exit 0
+          fi
+          if [ "${{ matrix.worker.exists }}" != true ]; then
+            echo "::notice::${{ matrix.worker.name }} is not on Cloudflare yet. A worker's first upload has to be a deploy, so it was only compiled (in plan)."
+            exit 0
+          fi
+          npx --yes "$WRANGLER" versions upload --config wrangler.json \
+            --no-bundle "$GITHUB_WORKSPACE/bundles/${{ matrix.worker.name }}/${{ matrix.worker.entry }}" \
+            --tag "${{ matrix.worker.fingerprint }}" \
+            --message "PR #${{ github.event.number }} at ${{ github.event.pull_request.head.sha }}"
+
+  # The bundle deployed is the one `plan` fingerprinted, byte for byte, and the fingerprint rides
+  # on the new version as its tag: that is what the next plan compares against.
+  deploy:
+    if: github.event_name != 'pull_request' && needs.plan.outputs.workers != '[]'
+    needs: [check, plan]
+    name: deploy ${{ matrix.worker.name }}
+    strategy:
+      fail-fast: false
+      matrix:
+        worker: ${{ fromJSON(needs.plan.outputs.workers) }}
+    runs-on: ubuntu-latest
+    # Shows each deploy under Deployments on the repo's front page.
+    environment: production
+    concurrency: { group: "deploy-${{ matrix.worker.name }}", cancel-in-progress: false }
+    env:
+      WRANGLER: ${{ needs.plan.outputs.wrangler }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22 }
+      - uses: actions/cache/restore@v4
+        with:
+          path: ~/.npm
+          key: npm-${{ runner.os }}-${{ needs.plan.outputs.wrangler }}
+      - uses: actions/download-artifact@v4
+        with: { name: bundles, path: bundles }
+      - name: Deploy the bundle `plan` built
+        working-directory: ${{ matrix.worker.dir }}
+        run: |
+          npx --yes "$WRANGLER" deploy --config wrangler.json \
+            --no-bundle "$GITHUB_WORKSPACE/bundles/${{ matrix.worker.name }}/${{ matrix.worker.entry }}" \
+            --tag "${{ matrix.worker.fingerprint }}" \
+            --message "${{ github.event_name }} at ${{ github.sha }}"

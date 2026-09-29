@@ -94,12 +94,35 @@ type-checks a fresh clone. Re-run `npm run check` after touching a `wrangler.jso
 
 ## Deploying (GitHub Actions)
 
-Push to `main`. `.github/workflows/deploy.yml` deploys only the workers whose folder changed —
-or all of them when `core/` changed, since every worker imports it. The Actions tab has a
-**Run workflow** button to force a full deploy.
+`.github/workflows/ci.yml` runs everything, from pull request to production:
 
-It needs two repository secrets: `CLOUDFLARE_API_TOKEN` (Edit Cloudflare Workers) and
-`CLOUDFLARE_ACCOUNT_ID`. The Worker name in the dashboard must equal `name` in that folder's
+- **Pull request:** the checks, and each changed worker is uploaded to Cloudflare as a version
+  that is not deployed. That catches what only Cloudflare can refuse (a setting the plan does
+  not allow, a binding that does not resolve, a missing required secret) before anything
+  merges, and no traffic reaches the upload. A worker that is not on Cloudflare yet is only
+  compiled, because a worker's first upload has to be a deploy.
+- **Push to `main`:** the checks, then a deploy of each changed worker. The deploys wait for the
+  checks, so a red `main` never ships.
+- **Run workflow** (Actions tab): the checks, then a deploy of every worker.
+
+**"Changed" means the deployed code changed**, not the files. The `plan` job
+(`core/ship.mjs`) builds every worker exactly as `wrangler deploy` would, and fingerprints each
+bundle together with its `wrangler.json`. Every deploy stores that fingerprint on the new version
+as its tag, so the next plan compares against what Cloudflare is actually serving. A `core/`
+change reaches only the workers whose bundle it alters (a change to `core/egress.ts` ships
+`mcp-fetch` alone), and a README, a test or a comment ships nothing. Each worker's summary is in
+the run's summary page.
+
+Each changed worker then gets **its own job, in parallel**. Only `check` installs the whole
+workspace: no worker has npm dependencies of its own, so `plan` builds with wrangler alone, and
+each worker's job restores wrangler from the cache `plan` filled and ships the bundle `plan`
+built, byte for byte.
+
+`mcp-toolkit` and `mcp-wp` set `"preview_urls": false`. Without it, every upload from a pull
+request would get a live URL running unmerged code against production resources.
+
+It needs two repository secrets: `CLOUDFLARE_API_TOKEN` (Workers Editor on these workers, plus
+Connectivity Directory Bind for `mcp-fetch`'s tunnel) and `CLOUDFLARE_ACCOUNT_ID`. The Worker name in the dashboard must equal `name` in that folder's
 `wrangler.json`. Bindings live in `wrangler.json`; secrets stay in the dashboard (`keep_vars`
 keeps plain variables too, so `WP_SITES` survives a deploy).
 
