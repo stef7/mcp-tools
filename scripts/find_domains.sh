@@ -127,7 +127,8 @@ grep -E '^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$' "$labels" > "$labels.v" || true; 
 
 { for tld in $ENDINGS; do sed "s/\$/.$tld/" "$labels"; done; cat "$fulls"; } | awk 'NF' | sort -u > "$SCOPE"
 # Endings in scan order: -e order first, then any that only the exact domains use.
-SCAN_ENDINGS=$({ printf '%s\n' $ENDINGS; ending_of < "$fulls"; } | awk 'NF && !seen[$0]++' | tr '\n' ' ')
+# With only exact domains (no plain names), -e endings have nothing to scan, so leave them out.
+SCAN_ENDINGS=$({ [ -s "$labels" ] && printf '%s\n' $ENDINGS; ending_of < "$fulls"; } | awk 'NF && !seen[$0]++' | tr '\n' ' ')
 [ -s "$SCOPE" ] || { echo "Nothing to check: the options leave no names." >&2; exit 1; }
 
 report() {
