@@ -105,7 +105,8 @@ type-checks a fresh clone. Re-run `npm run check` after touching a `wrangler.jso
 - **Run workflow** (Actions tab): the checks, then a deploy of every worker.
 
 "Changed" is `scripts/changed-workers.sh`: the workers whose folder the change touches, or all
-of them when it touches `core/`, the root `package.json` or lockfile, or a `tsconfig`.
+of them when it touches `core/`, the root `package.json` or lockfile, a `tsconfig`, or how workers
+ship (`ci.yml` or that script), so a change to the pipeline is tested on every worker.
 
 It needs two repository secrets: `CLOUDFLARE_API_TOKEN` (Edit Cloudflare Workers) and
 `CLOUDFLARE_ACCOUNT_ID`. The Worker name in the dashboard must equal `name` in that folder's
