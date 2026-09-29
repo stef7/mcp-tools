@@ -3,7 +3,8 @@
  * Which workers need shipping, decided by what would actually ship rather than by which files
  * changed. Run from the repo root by the ci workflow:
  *
- *   node core/ship.mjs plan [--all]   build and fingerprint every worker; print the ones that differ
+ *   node core/ship.mjs plan [--all | --pr=<base sha>]
+ *                                     build and fingerprint every worker; print the ones to ship
  *   node core/ship.mjs wrangler       the wrangler package to run, e.g. wrangler@4.143.0
  *   node core/ship.mjs previews       the folders of workers that get a Preview on a pull request
  *
@@ -14,6 +15,12 @@
  * stores the fingerprint as the new version's tag (`wrangler deploy --tag`), which is what the next
  * plan reads back. So a core/ change that a worker does not import leaves that worker's bundle,
  * its fingerprint and the worker alone, and a README edit ships nothing.
+ *
+ * On a pull request (--pr), a changed worker goes on only when Cloudflare has something to check:
+ * its wrangler.json changed since the PR's base (a setting the plan refuses, a binding that does not
+ * resolve, a missing secret all live there), or it gets a Preview. A code-only change is compiled
+ * here and uploads nothing, so a PR does not push unmerged versions to the top of the worker's
+ * version list.
  *
  * Building needs only wrangler: no worker has npm dependencies of its own.
  *
@@ -105,7 +112,18 @@ const build = async (w, dir, out) => {
   }
 };
 
-const plan = async (all) => {
+/** Whether a worker's wrangler.json differs from the PR's base. Needs the base in the clone. */
+const configChanged = async (dir, base) => {
+  try {
+    await run("git", ["diff", "--quiet", `${base}...HEAD`, "--", join(dir, "wrangler.json")]);
+    return false;
+  } catch (e) {
+    if (e.code === 1) return true;
+    throw new Error(`git could not compare ${dir}/wrangler.json with ${base}:\n${e.stderr}`);
+  }
+};
+
+const plan = async ({ all, pr }) => {
   const w = wrangler();
   // Installed once up front, so the parallel builds below do not race to install it.
   await run("npx", ["--yes", w, "--version"]);
@@ -128,21 +146,31 @@ const plan = async (all) => {
         exists,
         live: tag,
         preview: previews(cfg),
+        config: pr ? await configChanged(dir, pr) : true,
       };
     }),
   );
-  const ship = rows.filter((r) => all || r.fingerprint !== r.live);
+  const changed = (r) => all || r.fingerprint !== r.live;
+  const ship = rows.filter((r) => changed(r) && (r.config || r.preview));
+  const why = (r) =>
+    all
+      ? "all"
+      : !r.exists
+        ? "new"
+        : r.live === null
+          ? "live has no fingerprint"
+          : pr && r.config
+            ? "config changed"
+            : "changed";
   const verdict = (r) =>
-    !ship.includes(r)
+    !changed(r)
       ? "unchanged"
-      : all
-        ? "ship (all)"
-        : !r.exists
-          ? "ship (new)"
-          : r.live === null
-            ? "ship (live has no fingerprint)"
-            : "ship (changed)";
-  const heading = `${ship.length} of ${rows.length} workers to ship${all ? " (all, by hand)" : ""}`;
+      : ship.includes(r)
+        ? `${pr ? (r.preview ? "preview" : "upload") : "ship"} (${why(r)})`
+        : "code only: compiled, not uploaded";
+  const heading = pr
+    ? `${ship.length} of ${rows.length} workers to check on Cloudflare`
+    : `${ship.length} of ${rows.length} workers to ship${all ? " (all, by hand)" : ""}`;
   // The log gets a table of its own, on stderr: stdout carries the JSON the workflow reads.
   const log = new console.Console(process.stderr);
   log.log(heading);
@@ -162,15 +190,17 @@ const plan = async (all) => {
       [`### ${heading}`, "", ...table, ""].join("\n"),
     );
   }
-  console.log(JSON.stringify(ship.map(({ live: _, ...r }) => r)));
+  console.log(JSON.stringify(ship.map(({ live: _, config: __, ...r }) => r)));
 };
 
 const [cmd, ...args] = process.argv.slice(2);
-if (cmd === "plan") await plan(args.includes("--all"));
-else if (cmd === "wrangler") console.log(wrangler());
+if (cmd === "plan") {
+  const pr = args.find((a) => a.startsWith("--pr="))?.slice("--pr=".length);
+  await plan({ all: args.includes("--all"), pr });
+} else if (cmd === "wrangler") console.log(wrangler());
 else if (cmd === "previews") {
   for (const { dir, cfg } of workers()) if (previews(cfg)) console.log(dir);
 } else {
-  console.error("usage: node core/ship.mjs plan [--all] | wrangler | previews");
+  console.error("usage: node core/ship.mjs plan [--all | --pr=<base sha>] | wrangler | previews");
   process.exit(2);
 }
