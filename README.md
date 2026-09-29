@@ -121,8 +121,8 @@ built, byte for byte.
 `mcp-toolkit` and `mcp-wp` set `"preview_urls": false`. Without it, every upload from a pull
 request would get a live URL running unmerged code against production resources.
 
-It needs two repository secrets: `CLOUDFLARE_API_TOKEN` (Edit Cloudflare Workers) and
-`CLOUDFLARE_ACCOUNT_ID`. The Worker name in the dashboard must equal `name` in that folder's
+It needs two repository secrets: `CLOUDFLARE_API_TOKEN` (Workers Editor on these workers, plus
+Connectivity Directory Bind for `mcp-fetch`'s tunnel) and `CLOUDFLARE_ACCOUNT_ID`. The Worker name in the dashboard must equal `name` in that folder's
 `wrangler.json`. Bindings live in `wrangler.json`; secrets stay in the dashboard (`keep_vars`
 keeps plain variables too, so `WP_SITES` survives a deploy).
 
