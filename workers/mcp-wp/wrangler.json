@@ -1,6 +1,7 @@
 {
   "$schema": "node_modules/wrangler/config-schema.json",
   "name": "mcp-wp",
+  "preview_urls": false,
   "main": "src/index.ts",
   "compatibility_date": "2026-09-01",
   "keep_vars": true,
