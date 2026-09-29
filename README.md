@@ -106,8 +106,7 @@ keeps plain variables too, so `WP_SITES` survives a deploy).
 
 1. Copy `workers/mcp-wp` to `workers/mcp-<name>`; set `name` in `wrangler.json` and `package.json`.
 2. Replace `tools` in `src/index.ts`.
-3. Add a mark to `core/icons.ts` and point `icon:` at it.
-4. Add `{ "binding": "<NAME>", "service": "mcp-<name>" }` to `workers/mcp-toolkit/wrangler.json`.
+3. Add `{ "binding": "<NAME>", "service": "mcp-<name>" }` to `workers/mcp-toolkit/wrangler.json`.
    The binding name is yours; the prefix comes from `service`, so `mcp-un-docs` gives `un_docs_`
    and a worker from another repo keeps its own name — `shop` gives `shop_`.
 
@@ -120,17 +119,7 @@ keeps plain variables too, so `WP_SITES` survives a deploy).
    a worker really answers to, e.g. `"prefix": ["shop_", "stock_"]`. Declare it wrong and the
    fallback cannot save you: the call goes to the worker you named and stops there.
 
-5. `npm run check`, commit, push to `main`; the deploy workflow picks the new folder up.
-
-## The connector's icon
-
-Claude.ai ignores the icons an MCP server declares for a custom connector and asks Google's
-favicon service about the connector URL's last two labels instead (anthropics/claude-ai-mcp#152,
-#838), so a connector behind Access gets its icon from the bare domain above it.
-`workers/toolkit-favicon` passes through the image at `ICON_URL`, publicly, at whatever routes it
-is given. Both are set in the dashboard, not here: the routes `<bare domain>/favicon*` and
-`<bare domain>/apple-touch-icon*`, and `ICON_URL` under Variables and Secrets. A redirect rule on
-that domain has to skip those paths.
+4. `npm run check`, commit, push to `main`; the deploy workflow picks the new folder up.
 
 ## Getting past blocks
 
@@ -179,26 +168,6 @@ Any other worker can use the same routes without holding the tunnel or the passw
 
 Binding a VPC Service needs the **Connectivity Directory Bind** role on whoever deploys, so the
 `CLOUDFLARE_API_TOKEN` in Actions needs it too, or the `mcp-fetch` deploy fails.
-
-## Icons
-
-`core/icons.ts` holds one mark per worker: a coloured rounded square with a white glyph, built by
-`mark("#colour", "AB")`. A worker names one as `icon:`, and core puts it on the server _and_ on
-each of that worker's tools — so a tool arrives at the toolkit already carrying the icon of the
-worker it came from, and a forty-tool list says at a glance what belongs to what.
-
-They are inline `data:` URIs rather than links. The protocol would rather an icon URL sat on the
-server's own domain, but these servers are behind Access, which would answer a client's request
-for an icon URL with a login page. That also rules out a site's own `favicon.ico`: clients are
-only asked to render png, jpeg, svg and webp.
-
-Keep them small — forty tools pay for forty copies. `mcp-wp` is the exception: its _server_ icon
-is the real WordPress mark, three times the size, because that is the one a person sees when
-picking a connector. Its tools still carry the drawn one.
-
-Icons only reach a client that speaks **2025-11-25** or later; so do `websiteUrl` and the server
-`description`. Core answers `initialize` with the revision the client asked for, and otherwise
-with the newest it speaks.
 
 ## One public door
 

@@ -12,7 +12,6 @@
 import cfg from "../wrangler.json";
 import pkg from "../package.json";
 import { mcpWorker, tool } from "../../../core/mcp";
-import { ICONS } from "../../../core/icons";
 import {
   asFinding,
   asSubCollection,
@@ -44,7 +43,6 @@ const listed = ({ category, title, description, url, date }: Finding) => ({
 export default mcpWorker({
   ...cfg,
   version: pkg.version,
-  icon: ICONS.abcOmbudsman,
   info: () => ({
     title: "ABC Ombudsman",
     description: "Complaint findings published by the ABC Ombudsman.",
