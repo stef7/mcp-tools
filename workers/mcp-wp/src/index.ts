@@ -2,6 +2,7 @@
  * mcp-wp — WordPress REST API -> MCP.
  *
  *  POST /?wp=apil.au                   tools generated from that site's post types + taxonomies
+ *  POST /https://apil.au               the same, with the site in the path (see sitesInPath)
  *  POST /?wp=apil.au,crikey.com.au     same, one set per site, names prefixed with the site slug
  *  POST /                              generic explorer: tools take a `url` and discover at runtime
  *
@@ -20,7 +21,7 @@ import { mcpWorker } from "../../../core/mcp";
 import { genericTools, siteTools } from "./tools";
 import { credsFor, discoverSite, loginReport, sitesOf, slug, usable } from "./wp";
 
-export default mcpWorker({
+const Worker = mcpWorker({
   ...cfg,
   version: pkg.version,
   confirmNote: "Changes the site.",
@@ -41,7 +42,8 @@ export default mcpWorker({
   /** Opening the URL in a browser says, per site, whether it is editable and what is missing. */
   async status(c) {
     const sites = sitesOf(c);
-    if (!sites.length) return "Generic mode. Add ?wp=<hostname> to target a site.";
+    if (!sites.length)
+      return "Generic mode. Add ?wp=<hostname>, or /https://<hostname>, to target a site.";
     const reports = await Promise.all(sites.map((base) => loginReport(base, c)));
     return reports.map((r) => r.split("\n"));
   },
@@ -76,3 +78,42 @@ export default mcpWorker({
     };
   },
 });
+
+/**
+ * The site named in the path — `/https://happilymade.com.au` — as a `?wp=` value, or null when
+ * the path names none. Only a path that starts with a scheme counts, so `/` and stray requests
+ * such as `/favicon.ico` stay in generic mode. Some clients and proxies merge `//` into `/`, and
+ * some percent-encode the colon, so `/https:/host` and `/https%3A%2F%2Fhost` count too. Commas
+ * separate several sites, as they do in `?wp=`.
+ */
+export const sitesInPath = (url: URL): string | null => {
+  let path: string;
+  try {
+    path = decodeURIComponent(url.pathname);
+  } catch {
+    return null; // a malformed escape is not a site
+  }
+  if (!/^\/https?:/i.test(path)) return null;
+  return path
+    .slice(1)
+    .split(",")
+    .map((s) => s.replace(/^(https?):\/*/i, (_, scheme: string) => `${scheme.toLowerCase()}://`))
+    .join(",");
+};
+
+/**
+ * Moves a site named in the path into `?wp=` before anything else reads the request, so the
+ * tools, the GET page and the X-Auth-Token rules behave exactly as they do for `?wp=`. The path
+ * wins over any `?wp=` or `?site=` alongside it: one connector URL, one answer to which site.
+ */
+export default class extends Worker {
+  override fetch(request: Request): Promise<Response> {
+    const url = new URL(request.url);
+    const sites = sitesInPath(url);
+    if (!sites) return super.fetch(request);
+    url.pathname = "/";
+    url.searchParams.delete("site");
+    url.searchParams.set("wp", sites);
+    return super.fetch(new Request(url, request));
+  }
+}
