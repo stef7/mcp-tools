@@ -5,7 +5,7 @@
 import { createExecutionContext, env } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
 import Worker from "../workers/mcp-un-docs/src/index";
-import { symbolFromFile, symbolIn, toMarkdown } from "../workers/mcp-un-docs/src/backends";
+import { symbolFromFile, symbolIn, toMarkdown, wpDate } from "../workers/mcp-un-docs/src/backends";
 
 type Spec = { name: string; description: string; inputSchema: { properties?: object } };
 
@@ -51,6 +51,19 @@ describe("document symbols", () => {
   it("reads one back out of a Digital Library filename", () => {
     expect(symbolFromFile("A_HRC_55_73-EN.pdf")).toBe("A/HRC/55/73");
     expect(symbolFromFile("A_80_492-EN")).toBe("A/80/492");
+  });
+});
+
+describe("UNISPAL date filters", () => {
+  it("turns a plain date into the datetime WordPress insists on", () => {
+    expect(wpDate("2026-09-01")).toBe("2026-09-01T00:00:00");
+    expect(wpDate(" 2026-09-01 ")).toBe("2026-09-01T00:00:00");
+  });
+
+  it("leaves a full datetime, or anything it does not recognise, alone", () => {
+    expect(wpDate("2026-09-15T00:00:00")).toBe("2026-09-15T00:00:00");
+    expect(wpDate("2026-09-15T09:30:00+10:00")).toBe("2026-09-15T09:30:00+10:00");
+    expect(wpDate("September 2026")).toBe("September 2026");
   });
 });
 

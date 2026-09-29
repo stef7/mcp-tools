@@ -24,6 +24,7 @@ import {
   UNDL,
   UNDL_LANG,
   UNISPAL,
+  wpDate,
   wpFail,
 } from "./backends";
 
@@ -102,8 +103,14 @@ export default mcpWorker({
           category: { type: "integer", description: "document-category term ID, e.g. 1323." },
           country: { type: "integer", description: "country term ID." },
           entity: { type: "integer", description: "entity term ID." },
-          after: { type: "string", description: "ISO 8601 date; published after this." },
-          before: { type: "string", description: "ISO 8601 date; published before this." },
+          after: {
+            type: "string",
+            description: "Published after this: YYYY-MM-DD (midnight) or YYYY-MM-DDTHH:MM:SS.",
+          },
+          before: {
+            type: "string",
+            description: "Published before this: YYYY-MM-DD (midnight) or YYYY-MM-DDTHH:MM:SS.",
+          },
           per_page: { type: "integer", description: "Results per page, max 100. Default 10." },
           page: { type: "integer", description: "Page number. Default 1." },
           orderby: {
@@ -114,6 +121,8 @@ export default mcpWorker({
         },
       },
       async run({ per_page = 10, page = 1, orderby = "date", ...filters }) {
+        for (const k of ["after", "before"] as const)
+          if (typeof filters[k] === "string") filters[k] = wpDate(filters[k]);
         const url = new URL(`${UNISPAL}/document`);
         for (const [k, v] of Object.entries(filters))
           if (v !== undefined) url.searchParams.set(UNISPAL_FILTER[k] ?? k, String(v));

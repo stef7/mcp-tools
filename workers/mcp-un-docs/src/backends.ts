@@ -39,6 +39,14 @@ export const wpFail = async (res: Response) => ({
   error: `UNISPAL ${res.status}: ${await res.text().catch(() => res.statusText)}`,
 });
 
+/**
+ * WordPress's `after` and `before` want a full RFC 3339 datetime and answer "Invalid date" to a
+ * bare 2026-09-01, so a plain date becomes midnight. Anything else goes through untouched and
+ * WordPress's own error says what is wrong with it.
+ */
+export const wpDate = (s: string) =>
+  /^\d{4}-\d{2}-\d{2}$/.test(s.trim()) ? `${s.trim()}T00:00:00` : s;
+
 /** UN Digital Library file descriptions are in the language they name. */
 export const UNDL_LANG: Record<string, string> = {
   العربية: "ar",
