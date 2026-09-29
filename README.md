@@ -93,9 +93,19 @@ type-checks a fresh clone. Re-run `npm run check` after touching a `wrangler.jso
 
 ## Deploying (GitHub Actions)
 
-Push to `main`. `.github/workflows/deploy.yml` deploys only the workers whose folder changed —
-or all of them when `core/` changed, since every worker imports it. The Actions tab has a
-**Run workflow** button to force a full deploy.
+`.github/workflows/ci.yml` runs everything, from pull request to production:
+
+- **Pull request:** the checks, and each changed worker is uploaded to Cloudflare as a version
+  that is not deployed. That catches what only Cloudflare can refuse (a setting the plan does
+  not allow, a binding that does not resolve, a missing required secret) before anything
+  merges, and no traffic reaches the upload. A worker that is not on Cloudflare yet is only
+  compiled, because a worker's first upload has to be a deploy.
+- **Push to `main`:** the checks, then a deploy of each changed worker. The deploy waits for the
+  checks, so a red `main` never ships.
+- **Run workflow** (Actions tab): the checks, then a deploy of every worker.
+
+"Changed" is `scripts/changed-workers.sh`: the workers whose folder the change touches, or all
+of them when it touches `core/`, the root `package.json` or lockfile, or a `tsconfig`.
 
 It needs two repository secrets: `CLOUDFLARE_API_TOKEN` (Edit Cloudflare Workers) and
 `CLOUDFLARE_ACCOUNT_ID`. The Worker name in the dashboard must equal `name` in that folder's
