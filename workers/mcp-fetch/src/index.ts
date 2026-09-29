@@ -17,7 +17,7 @@
 import cfg from "../wrangler.json";
 import pkg from "../package.json";
 import { mcpWorker, tool, type Ctx } from "../../../core/mcp";
-import { BROWSER_UA as UA, stripHtml } from "../../../core/web";
+import { BROWSER_UA as UA, stripHtml, withBase } from "../../../core/web";
 import { egress, ROUTES, type Via } from "../../../core/egress";
 
 const FORMATS = ["auto", "markdown", "text", "raw"] as const;
@@ -109,10 +109,33 @@ const bytesFor = async (env: Env, url: string, force: boolean, via?: Via) => {
 };
 
 // ─── Formatting ───────────────────────────────────────────────────────────────────────────────
-const toMarkdown = async (env: Env, bytes: Uint8Array, name: string) => {
-  const out = await env.AI.toMarkdown([
-    { name, blob: new Blob([bytes as BufferSource], { type: "application/octet-stream" }) },
-  ]);
+/**
+ * The converter decides what a file is from its name alone, and hands an HTML page named
+ * `publications` or `index.php` back unconverted. So an HTML page is always named .html, and a
+ * PDF or Word file with no extension at all gets the one its content type says.
+ */
+const nameFor = (url: string, kind: string) => {
+  const base = basename(url) || "document";
+  if (kind === "html") return /\.html$/i.test(base) ? base : base + ".html";
+  if (isBinary(kind) && !/\.\w{2,5}$/.test(base)) return `${base}.${kind}`;
+  return base;
+};
+
+const toMarkdown = async (env: Env, bytes: Uint8Array, url: string, kind: string) => {
+  const name = nameFor(url, kind);
+  const html = kind === "html";
+  const body = html ? withBase(new TextDecoder().decode(bytes), url) : bytes;
+  const out = await env.AI.toMarkdown(
+    [
+      {
+        name,
+        blob: new Blob([body as string | BufferSource], { type: "application/octet-stream" }),
+      },
+    ],
+    // Left to itself the converter drops every <header> and <footer>, including an article's
+    // own, which is where its headline and date usually are. Selecting the body keeps them.
+    html ? { conversionOptions: { html: { cssSelector: "body" } } } : undefined,
+  );
   const first = Array.isArray(out) ? out[0] : out;
   if (!first || first.format === "error") throw new Error(first?.error ?? "conversion failed");
   return first.data;
@@ -126,7 +149,7 @@ const render = async (env: Env, bytes: Uint8Array, url: string, kind: string, fo
     return { text: decoded(), via: "raw" };
   }
   if (format === "markdown") {
-    return { text: await toMarkdown(env, bytes, basename(url)), via: "toMarkdown" };
+    return { text: await toMarkdown(env, bytes, url, kind), via: "toMarkdown" };
   }
   if (format === "text") {
     if (isBinary(kind)) throw new Error(`${kind} is binary; ask for markdown or auto instead.`);
@@ -134,12 +157,17 @@ const render = async (env: Env, bytes: Uint8Array, url: string, kind: string, fo
       ? { text: stripHtml(decoded()), via: "html-strip" }
       : { text: decoded(), via: "plain" };
   }
-  // auto: whatever reads best for this content type
-  if (isBinary(kind))
-    return { text: await toMarkdown(env, bytes, basename(url)), via: "toMarkdown" };
-  return kind === "html"
-    ? { text: stripHtml(decoded()), via: "html-strip" }
-    : { text: decoded(), via: "plain" };
+  // auto: whatever reads best for this content type. HTML goes to markdown so its links
+  // survive, falling back to stripped text rather than failing if the converter does.
+  if (isBinary(kind)) return { text: await toMarkdown(env, bytes, url, kind), via: "toMarkdown" };
+  if (kind === "html") {
+    try {
+      return { text: await toMarkdown(env, bytes, url, kind), via: "toMarkdown" };
+    } catch (e) {
+      return { text: stripHtml(decoded()), via: `html-strip (toMarkdown failed: ${String(e)})` };
+    }
+  }
+  return { text: decoded(), via: "plain" };
 };
 
 // ─── Storage ───────────────────────────────────────────────────────────────────────────────────
@@ -228,9 +256,9 @@ const Tools = mcpWorker({
             type: "string",
             enum: [...FORMATS],
             description:
-              "auto (default): markdown for PDF and Word, tag-stripped text for HTML, as-is for " +
-              "anything else. markdown: always convert with Workers AI. text: plain text, no " +
-              "conversion. raw: exactly what the server sent, tags and all.",
+              "auto (default): markdown for HTML, PDF and Word, so links are kept; as-is for " +
+              "anything else. markdown: always convert with Workers AI. text: plain text with " +
+              "tags and links stripped, no conversion. raw: exactly what the server sent.",
           },
           force: {
             type: "boolean",
