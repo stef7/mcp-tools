@@ -12,7 +12,6 @@
  * workers, so each can read its own params (mcp-wp reads `?wp=site1,site2`).
  */
 import { WorkerEntrypoint } from "cloudflare:workers";
-import type { Icon } from "./icons";
 
 // ─── JSON Schema -> TypeScript, just the subset MCP tools use ──────────────────────────────────
 export type JSONSchema = {
@@ -101,19 +100,11 @@ export type Spec = {
   description: string;
   inputSchema: JSONSchema;
   annotations: Annotations;
-  icons?: Icon[];
 };
 export type Result = { content: { type: "text"; text: string }[]; isError?: boolean };
 
 /** `initialize` extras: everything but `instructions` goes into `serverInfo`. */
-type Info = {
-  title?: string;
-  description?: string;
-  /** Clients need only render png, jpeg, svg and webp, and prefer same-domain or data: URIs. */
-  icons?: Icon[];
-  websiteUrl?: string;
-  instructions?: string;
-};
+type Info = { title?: string; description?: string; websiteUrl?: string; instructions?: string };
 
 type Config = {
   name: string;
@@ -125,12 +116,6 @@ type Config = {
    */
   prefix?: string;
   version?: string;
-  /**
-   * This worker's mark, from core/icons.ts. It goes on the server *and* on every one of its
-   * tools, which is what makes a toolkit legible: tools arrive over RPC already carrying the
-   * icon of the worker they came from, so nothing here has to map a tool back to its owner.
-   */
-  icon?: Icon;
   /**
    * Workers to merge tools from, normally spread straight out of wrangler.json — which means
    * the same list also declares the runtime bindings. Pass it explicitly to break that tie: a
@@ -201,10 +186,10 @@ type Msg = {
 
 /**
  * Newest first. Answer with the revision the client asked for when we know it, as the protocol
- * requires, and otherwise with the newest we speak. This is what icons hang on: `icons`,
- * `websiteUrl` and a server `description` only exist from 2025-11-25, so a server that always
- * said "2025-06-18" — as this one used to — was sending them under a revision that has no such
- * fields, and a client had every reason to drop them.
+ * requires, and otherwise with the newest we speak. `websiteUrl` and a server `description` only
+ * exist from 2025-11-25, so a server that always said "2025-06-18" — as this one used to — was
+ * sending them under a revision that has no such fields, and a client had every reason to drop
+ * them.
  */
 const VERSIONS = ["2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05"];
 const speak = (asked?: string) => (asked && VERSIONS.includes(asked) ? asked : VERSIONS[0]!);
@@ -315,7 +300,6 @@ export const mcpWorker = (cfg: Config) => {
         inputSchema: t.confirm
           ? withConfirm(t.input)
           : (t.input ?? { type: "object", properties: {} }),
-        ...(cfg.icon && { icons: [cfg.icon] }),
       }));
       // Narrowing is an optimisation, so it gives way where it cannot be sure: a selector entry
       // no prefix here claims may still name tools a bound worker re-exports under a prefix of
@@ -411,12 +395,7 @@ export const mcpWorker = (cfg: Config) => {
             return ok({
               protocolVersion: speak(params?.protocolVersion),
               capabilities: { tools: {} },
-              serverInfo: {
-                name: cfg.name,
-                version: cfg.version ?? "0.0.0",
-                ...(cfg.icon && { icons: [cfg.icon] }),
-                ...info,
-              },
+              serverInfo: { name: cfg.name, version: cfg.version ?? "0.0.0", ...info },
               ...(instructions && { instructions }),
             });
           }

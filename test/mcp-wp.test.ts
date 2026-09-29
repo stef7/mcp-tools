@@ -156,11 +156,8 @@ describe("the MCP endpoint", () => {
 
   it("names the server and its instructions on initialize", async () => {
     const res = await post({ jsonrpc: "2.0", id: 1, method: "initialize" }, site());
-    const body = (await res.json()) as {
-      result: { serverInfo: { name: string; icons: unknown[] } };
-    };
+    const body = (await res.json()) as { result: { serverInfo: { name: string } } };
     expect(body.result.serverInfo.name).toBe("mcp-wp");
-    expect(body.result.serverInfo.icons).toHaveLength(1);
   });
 
   it("rejects malformed JSON with a parse error", async () => {

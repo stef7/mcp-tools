@@ -19,7 +19,6 @@
 import cfg from "../wrangler.json";
 import pkg from "../package.json";
 import { mcpWorker, tool, type Ctx, type JSONSchema, type Tools } from "../../../core/mcp";
-import { ICONS } from "../../../core/icons";
 import {
   buildFilter,
   contentApi,
@@ -108,7 +107,6 @@ const sitesOf = (c: Ctx) => c.params.get("site") ?? c.params.get("ghost");
 export default mcpWorker({
   ...cfg,
   version: pkg.version,
-  icon: ICONS.ghost,
   info: () => ({
     title: "Ghost",
     description: "Read Ghost publications, including the paid posts you subscribe to.",

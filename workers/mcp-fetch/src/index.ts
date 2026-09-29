@@ -17,7 +17,6 @@
 import cfg from "../wrangler.json";
 import pkg from "../package.json";
 import { mcpWorker, tool, type Ctx } from "../../../core/mcp";
-import { ICONS } from "../../../core/icons";
 import { BROWSER_UA as UA, stripHtml } from "../../../core/web";
 import { egress, ROUTES, type Via } from "../../../core/egress";
 
@@ -214,7 +213,6 @@ const schema = async (c: Ctx) => {
 const Tools = mcpWorker({
   ...cfg,
   version: pkg.version,
-  icon: ICONS.fetch,
   tools: {
     url: tool({
       description:

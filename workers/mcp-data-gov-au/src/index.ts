@@ -12,7 +12,6 @@
 import cfg from "../wrangler.json";
 import pkg from "../package.json";
 import { mcpWorker, tool } from "../../../core/mcp";
-import { ICONS } from "../../../core/icons";
 import { ACNC, ckan, describeDatasets, echoRecords, fieldLine } from "./ckan";
 
 const RESOURCE_ID = {
@@ -28,7 +27,6 @@ const MAX_ROWS = {
 export default mcpWorker({
   ...cfg,
   version: pkg.version,
-  icon: ICONS.dataGovAu,
   info: () => ({
     title: "data.gov.au",
     description: "Query Australian government open data through CKAN.",
