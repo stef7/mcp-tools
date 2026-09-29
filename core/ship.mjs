@@ -132,20 +132,36 @@ const plan = async (all) => {
     }),
   );
   const ship = rows.filter((r) => all || r.fingerprint !== r.live);
-  const summary = [
-    `### ${ship.length} of ${rows.length} workers to ship${all ? " (all, by hand)" : ""}`,
-    "",
-    "| Worker | Built | Live | |",
-    "| --- | --- | --- | --- |",
-    ...rows.map((r) => {
-      const why = !r.exists ? "new" : r.live === null ? "live has no fingerprint" : "changed";
-      const verdict = ship.includes(r) ? `**ship** (${all ? "all" : why})` : "unchanged";
-      return `| \`${r.name}\` | \`${r.fingerprint}\` | \`${r.live ?? "—"}\` | ${verdict} |`;
-    }),
-  ].join("\n");
-  if (process.env.GITHUB_STEP_SUMMARY)
-    appendFileSync(process.env.GITHUB_STEP_SUMMARY, summary + "\n");
-  console.error(summary);
+  const verdict = (r) =>
+    !ship.includes(r)
+      ? "unchanged"
+      : all
+        ? "ship (all)"
+        : !r.exists
+          ? "ship (new)"
+          : r.live === null
+            ? "ship (live has no fingerprint)"
+            : "ship (changed)";
+  const heading = `${ship.length} of ${rows.length} workers to ship${all ? " (all, by hand)" : ""}`;
+  // The log gets a table of its own, on stderr: stdout carries the JSON the workflow reads.
+  const log = new console.Console(process.stderr);
+  log.log(heading);
+  log.table(
+    Object.fromEntries(
+      rows.map((r) => [r.name, { Built: r.fingerprint, Live: r.live ?? "—", Ship: verdict(r) }]),
+    ),
+  );
+  // The run's summary page renders markdown, so it keeps a markdown table.
+  if (process.env.GITHUB_STEP_SUMMARY) {
+    const md = rows.map(
+      (r) => `| \`${r.name}\` | \`${r.fingerprint}\` | \`${r.live ?? "—"}\` | ${verdict(r)} |`,
+    );
+    const table = ["| Worker | Built | Live | |", "| --- | --- | --- | --- |", ...md];
+    appendFileSync(
+      process.env.GITHUB_STEP_SUMMARY,
+      [`### ${heading}`, "", ...table, ""].join("\n"),
+    );
+  }
   console.log(JSON.stringify(ship.map(({ live: _, ...r }) => r)));
 };
 
