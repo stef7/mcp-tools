@@ -96,11 +96,13 @@ type-checks a fresh clone. Re-run `npm run check` after touching a `wrangler.jso
 
 `.github/workflows/ci.yml` runs everything, from pull request to production:
 
-- **Pull request:** the checks, and each changed worker is uploaded to Cloudflare as a version
-  that is not deployed. That catches what only Cloudflare can refuse (a setting the plan does
-  not allow, a binding that does not resolve, a missing required secret) before anything
-  merges, and no traffic reaches the upload. A worker that is not on Cloudflare yet is only
-  compiled, because a worker's first upload has to be a deploy.
+- **Pull request:** the checks, and each changed worker is compiled. A worker whose
+  `wrangler.json` changed is also uploaded to Cloudflare as a version that is not deployed, which
+  catches what only Cloudflare can refuse (a setting the plan does not allow, a binding that does
+  not resolve, a missing required secret) before anything merges. A code-only change uploads
+  nothing, so a PR does not push unmerged versions to the top of a worker's version list. A
+  worker that is not on Cloudflare yet is only compiled, because a worker's first upload has to
+  be a deploy.
 - **Push to `main`:** the checks, then a deploy of each changed worker. The deploys wait for the
   checks, so a red `main` never ships.
 - **Run workflow** (Actions tab): the checks, then a deploy of every worker.
@@ -110,7 +112,9 @@ type-checks a fresh clone. Re-run `npm run check` after touching a `wrangler.jso
 bundle together with its `wrangler.json`. Every deploy stores that fingerprint on the new version
 as its tag, so the next plan compares against what Cloudflare is actually serving. A `core/`
 change reaches only the workers whose bundle it alters (a change to `core/egress.ts` ships
-`mcp-fetch` alone), and a README, a test or a comment ships nothing. Each worker's summary is in
+`mcp-fetch` alone), and a README, a test or a comment ships nothing. Workers import only `version` from their
+`package.json` (`import { version } from "../package.json"`), never the whole file: a whole-file
+import inlines `devDependencies` into the bundle, so bumping a dev tool would redeploy every worker. Each worker's summary is in
 the run's summary page.
 
 Each changed worker then gets **its own job, in parallel**. Only `check` installs the whole

@@ -11,7 +11,7 @@
  * All six read public APIs; none needs a key.
  */
 import cfg from "../wrangler.json";
-import pkg from "../package.json";
+import { version } from "../package.json";
 import { mcpWorker, tool } from "../../../core/mcp";
 import {
   get,
@@ -68,7 +68,7 @@ const ids = (d: WpDoc, taxonomy: string) => (d[taxonomy] as number[] | undefined
 
 export default mcpWorker({
   ...cfg,
-  version: pkg.version,
+  version,
   info: () => ({
     title: "UN Docs",
     description: "UNISPAL, the UN Digital Library, ODS symbol resolution and RightDocs.",

@@ -9,7 +9,7 @@
  * No credentials: the search key is the public one abc.net.au ships to browsers.
  */
 import cfg from "../wrangler.json";
-import pkg from "../package.json";
+import { version } from "../package.json";
 import { mcpWorker, tool } from "../../../core/mcp";
 import { filtersFor, formatFacets, formatResults, formatSchema, search } from "./abc";
 
@@ -45,7 +45,7 @@ const INCLUDE_TRANSCRIPT = {
 
 export default mcpWorker({
   ...cfg,
-  version: pkg.version,
+  version,
   info: () => ({
     title: "ABC Search",
     description: "Search ABC programs and articles, transcripts included.",

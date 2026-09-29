@@ -15,7 +15,7 @@
  *   D1  docs_fts    FTS5 index over docs.text, for ranked search
  */
 import cfg from "../wrangler.json";
-import pkg from "../package.json";
+import { version } from "../package.json";
 import { mcpWorker, tool, type Ctx } from "../../../core/mcp";
 import { BROWSER_UA as UA, stripHtml, withBase } from "../../../core/web";
 import { egress, ROUTES, type Via } from "../../../core/egress";
@@ -240,7 +240,7 @@ const schema = async (c: Ctx) => {
 
 const Tools = mcpWorker({
   ...cfg,
-  version: pkg.version,
+  version,
   tools: {
     url: tool({
       description:

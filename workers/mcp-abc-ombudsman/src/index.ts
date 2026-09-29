@@ -10,7 +10,7 @@
  * Reads abc.net.au's public CoreMedia API; no credentials.
  */
 import cfg from "../wrangler.json";
-import pkg from "../package.json";
+import { version } from "../package.json";
 import { mcpWorker, tool } from "../../../core/mcp";
 import {
   asFinding,
@@ -42,7 +42,7 @@ const listed = ({ category, title, description, url, date }: Finding) => ({
 
 export default mcpWorker({
   ...cfg,
-  version: pkg.version,
+  version,
   info: () => ({
     title: "ABC Ombudsman",
     description: "Complaint findings published by the ABC Ombudsman.",
