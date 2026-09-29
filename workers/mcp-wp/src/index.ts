@@ -16,14 +16,14 @@
  * accepted as an alias of `?wp=` for old connector URLs.
  */
 import cfg from "../wrangler.json";
-import pkg from "../package.json";
+import { version } from "../package.json";
 import { mcpWorker } from "../../../core/mcp";
 import { genericTools, siteTools } from "./tools";
 import { credsFor, discoverSite, loginReport, sitesOf, slug, usable } from "./wp";
 
 const Worker = mcpWorker({
   ...cfg,
-  version: pkg.version,
+  version,
   confirmNote: "Changes the site.",
   async tools(c) {
     const sites = sitesOf(c);

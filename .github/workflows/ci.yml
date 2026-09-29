@@ -30,8 +30,8 @@ jobs:
   check:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
         with: { node-version: 22, cache: npm }
       - run: npm ci
       - run: npm run format:check
@@ -46,18 +46,18 @@ jobs:
       workers: ${{ steps.plan.outputs.workers }}
       wrangler: ${{ steps.wrangler.outputs.spec }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
         with: { node-version: 22 }
       - id: wrangler
         run: echo "spec=$(node core/ship.mjs wrangler)" >> "$GITHUB_OUTPUT"
-      - uses: actions/cache@v4
+      - uses: actions/cache@v5
         with:
           path: ~/.npm
           key: npm-${{ runner.os }}-${{ steps.wrangler.outputs.spec }}
       - id: plan
         run: echo "workers=$(node core/ship.mjs plan ${{ github.event_name == 'workflow_dispatch' && '--all' || '' }})" >> "$GITHUB_OUTPUT"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         with: { name: bundles, path: bundles/, retention-days: 7 }
 
   # Cloudflare refuses some things only on upload (a setting the plan does not allow, a binding
@@ -74,14 +74,14 @@ jobs:
     env:
       WRANGLER: ${{ needs.plan.outputs.wrangler }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
         with: { node-version: 22 }
-      - uses: actions/cache/restore@v4
+      - uses: actions/cache/restore@v5
         with:
           path: ~/.npm
           key: npm-${{ runner.os }}-${{ needs.plan.outputs.wrangler }}
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v7
         with: { name: bundles, path: bundles }
       - name: Upload the bundle `plan` built, as a version that is not deployed
         working-directory: ${{ matrix.worker.dir }}
@@ -116,14 +116,14 @@ jobs:
     env:
       WRANGLER: ${{ needs.plan.outputs.wrangler }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
         with: { node-version: 22 }
-      - uses: actions/cache/restore@v4
+      - uses: actions/cache/restore@v5
         with:
           path: ~/.npm
           key: npm-${{ runner.os }}-${{ needs.plan.outputs.wrangler }}
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v7
         with: { name: bundles, path: bundles }
       - name: Deploy the bundle `plan` built
         working-directory: ${{ matrix.worker.dir }}

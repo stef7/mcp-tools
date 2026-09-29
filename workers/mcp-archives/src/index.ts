@@ -11,7 +11,7 @@
  * MemGator (public instances have been down for years) and archive.today (blocks automation).
  */
 import cfg from "../wrangler.json";
-import pkg from "../package.json";
+import { version } from "../package.json";
 import { mcpWorker, tool } from "../../../core/mcp";
 import { cdx, cdxOne, rowsOf, wbDate, TIMEMAP, UA, type Row } from "./cdx";
 
@@ -59,7 +59,7 @@ const snapshot = (row: Row) => ({
 
 export default mcpWorker({
   ...cfg,
-  version: pkg.version,
+  version,
   info: () => ({
     title: "Wayback Machine",
     description: "Find, read and create Internet Archive snapshots.",

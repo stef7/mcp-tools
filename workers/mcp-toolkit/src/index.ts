@@ -11,7 +11,7 @@
  * A bound worker that is down loses its own tools and nothing else; the GET page names it.
  */
 import cfg from "../wrangler.json";
-import pkg from "../package.json";
+import { version } from "../package.json";
 import { mcpWorker, tool } from "../../../core/mcp";
 import { BROWSER_UA as UA } from "../../../core/web";
 const SUBSTACK = {
@@ -27,7 +27,7 @@ export default mcpWorker({
   // Its own three tools are not a "toolkit" of anything, so they carry no prefix. Everything
   // bound under `services` still arrives with its own.
   prefix: "",
-  version: pkg.version,
+  version,
   tools: {
     acast_episodes: tool({
       description:

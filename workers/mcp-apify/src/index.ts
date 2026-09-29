@@ -10,7 +10,7 @@
  * Needs APIFY_TOKEN; see secrets.d.ts.
  */
 import cfg from "../wrangler.json";
-import pkg from "../package.json";
+import { version } from "../package.json";
 import { mcpWorker, tool } from "../../../core/mcp";
 
 const API = "https://api.apify.com/v2";
@@ -222,7 +222,7 @@ export const formatByActor = (rows: ActorSpend[], names: Record<string, string>,
 
 export default mcpWorker({
   ...cfg,
-  version: pkg.version,
+  version,
   info: () => ({
     title: "Apify account",
     description: "What Apify is costing you this cycle, and how close you are to your limits.",

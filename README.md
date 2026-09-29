@@ -110,7 +110,9 @@ type-checks a fresh clone. Re-run `npm run check` after touching a `wrangler.jso
 bundle together with its `wrangler.json`. Every deploy stores that fingerprint on the new version
 as its tag, so the next plan compares against what Cloudflare is actually serving. A `core/`
 change reaches only the workers whose bundle it alters (a change to `core/egress.ts` ships
-`mcp-fetch` alone), and a README, a test or a comment ships nothing. Each worker's summary is in
+`mcp-fetch` alone), and a README, a test or a comment ships nothing. Workers import only `version` from their
+`package.json` (`import { version } from "../package.json"`), never the whole file: a whole-file
+import inlines `devDependencies` into the bundle, so bumping a dev tool would redeploy every worker. Each worker's summary is in
 the run's summary page.
 
 Each changed worker then gets **its own job, in parallel**. Only `check` installs the whole

@@ -10,7 +10,7 @@
  * secrets.d.ts.
  */
 import cfg from "../wrangler.json";
-import pkg from "../package.json";
+import { version } from "../package.json";
 import { mcpWorker, tool } from "../../../core/mcp";
 import { ACNC, ckan, describeDatasets, echoRecords, fieldLine } from "./ckan";
 
@@ -26,7 +26,7 @@ const MAX_ROWS = {
 
 export default mcpWorker({
   ...cfg,
-  version: pkg.version,
+  version,
   info: () => ({
     title: "data.gov.au",
     description: "Query Australian government open data through CKAN.",
