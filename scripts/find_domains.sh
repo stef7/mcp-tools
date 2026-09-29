@@ -245,13 +245,16 @@ check_batch() { # args: domain names. Appends to $RESULTS. Exits on any API erro
   sleep "$REQUEST_GAP"
 }
 
+pooled=() # names from endings too small to fill a batch; checked together at the end
 for tld in $SCAN_ENDINGS; do
+  mapfile -t todo < <(printf '%s\n' "$todo_all" | only_ending "$tld")
   if unsupported "$tld"; then
-    echo ".$tld: not checked (extension not supported via API, per results.tsv); check the NXDOMAIN list by hand" >&2
+    [ -z "$(only_ending "$tld" < "$NX")" ] ||
+      echo ".$tld: not checked (extension not supported via API, per results.tsv); check the NXDOMAIN list by hand" >&2
     continue
   fi
-  mapfile -t todo < <(printf '%s\n' "$todo_all" | only_ending "$tld")
   [ ${#todo[@]} -gt 0 ] || continue
+  if [ ${#todo[@]} -lt "$BATCH_SIZE" ]; then pooled+=("${todo[@]}"); continue; fi
   echo ".$tld: ${#todo[@]} names to check" >&2
   for ((i = 0; i < ${#todo[@]}; i += BATCH_SIZE)); do
     if [ "$requests" -ge "$MAX_REQUESTS" ]; then
@@ -267,6 +270,20 @@ for tld in $SCAN_ENDINGS; do
   done
   echo >&2
 done
+# Small endings share batches, so checking one name on each of 300 endings costs 15 requests,
+# not 300. (Per-ending "unsupported" detection doesn't apply here; results.tsv records it.)
+if [ ${#pooled[@]} -gt 0 ] && [ "$requests" -lt "$MAX_REQUESTS" ]; then
+  echo "Mixed endings: ${#pooled[@]} names to check" >&2
+  for ((i = 0; i < ${#pooled[@]}; i += BATCH_SIZE)); do
+    if [ "$requests" -ge "$MAX_REQUESTS" ]; then
+      echo >&2; echo "Reached $MAX_REQUESTS requests for this run. Re-run to continue." >&2
+      break
+    fi
+    check_batch "${pooled[@]:i:BATCH_SIZE}"
+    printf '\r  %d/%d' "$((i + BATCH_SIZE < ${#pooled[@]} ? i + BATCH_SIZE : ${#pooled[@]}))" "${#pooled[@]}" >&2
+  done
+  echo >&2
+fi
 echo "API requests this run: $requests" >&2
 
 # ----------------------------------------------------------- step 3: report ---
