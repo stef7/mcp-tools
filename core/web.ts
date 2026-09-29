@@ -40,6 +40,17 @@ export const stripHtml = (html = "") =>
     .replace(/\n{3,}/g, "\n\n")
     .trim();
 
+/**
+ * Give a page a `<base>` of its own URL, so a converter resolves `report.pdf` on /a/b/page to
+ * /a/b/report.pdf the way a browser would. A page that already names its own base keeps it.
+ */
+export const withBase = (html: string, url: string) => {
+  if (/<base\s[^>]*href\s*=/i.test(html)) return html;
+  const tag = `<base href="${url.replace(/&/g, "&amp;").replace(/"/g, "&quot;")}">`;
+  const head = /<head(\s[^>]*)?>/i;
+  return head.test(html) ? html.replace(head, (m) => m + tag) : tag + html;
+};
+
 /** Cut to `max` characters on a word boundary, marking that something was left out. */
 export const truncate = (s = "", max = 800) =>
   s.length <= max ? s : s.slice(0, max).replace(/\s+\S*$/, "") + "…";
