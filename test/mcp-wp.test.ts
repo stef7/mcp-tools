@@ -7,7 +7,7 @@
  */
 import { SELF, createExecutionContext, env } from "cloudflare:test";
 import { describe, expect, inject, it } from "vitest";
-import Worker from "../workers/mcp-wp/src/index";
+import Worker, { sitesInPath } from "../workers/mcp-wp/src/index";
 
 const base = inject("mockBase");
 const ME = "me@example.com";
@@ -169,6 +169,57 @@ describe("the MCP endpoint", () => {
     const res = await post({ jsonrpc: "2.0", id: 1, method: "tools/list" }, site(base + "/nope"));
     const body = (await res.json()) as { error?: { message: string } };
     expect(body.error?.message).toContain("Failed to fetch types");
+  });
+});
+
+describe("a site named in the path", () => {
+  const list = async (path: string) => {
+    const res = await SELF.fetch(`https://worker/${path}`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list" }),
+    });
+    const body = (await res.json()) as { result?: { tools: { name: string }[] } };
+    return body.result?.tools.map((t) => t.name) ?? [];
+  };
+
+  it("targets that site, as ?wp= would", async () => {
+    const n = await list(base);
+    expect(n).toContain("wp_search_posts");
+    expect(n).not.toContain("wp_discover_site");
+  });
+
+  it("survives a client or proxy merging the double slash", async () => {
+    expect(await list(base.replace("://", ":/"))).toContain("wp_search_posts");
+  });
+
+  it("survives the scheme being percent-encoded", async () => {
+    expect(await list(encodeURIComponent(base))).toContain("wp_search_posts");
+  });
+
+  it("keeps the rest of the query string, such as the title", async () => {
+    const res = await SELF.fetch(`https://worker/${base}?title=Happily`, {
+      method: "POST",
+      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "initialize" }),
+    });
+    const body = (await res.json()) as { result: { serverInfo: { title?: string } } };
+    expect(body.result.serverInfo.title).toBe("Happily");
+  });
+
+  it("wins over a ?wp= alongside it", async () => {
+    const n = await list(`${base}${site(base + "/nope")}`);
+    expect(n).toContain("wp_search_posts");
+  });
+
+  it("leaves a path without a scheme in generic mode", async () => {
+    expect(await list("favicon.ico")).toContain("wp_discover_site");
+    expect(sitesInPath(new URL("https://worker/"))).toBeNull();
+    expect(sitesInPath(new URL("https://worker/%E0%A4%A"))).toBeNull();
+  });
+
+  it("reads several sites separated by commas, like ?wp=", () => {
+    const url = new URL("https://worker/https://a.org,https:/b.org/news");
+    expect(sitesInPath(url)).toBe("https://a.org,https://b.org/news");
   });
 });
 

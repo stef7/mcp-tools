@@ -66,6 +66,7 @@ Rules the core enforces so nothing needs a mapping table:
 | `mcp-toolkit…/?wp=apil.au`                          | tools generated from that site (posts, events, …)   |
 | `mcp-toolkit…/?wp=apil.au,crikey.com.au`            | one set per site, named `wp_<site slug>_<tool>`     |
 | `mcp-wp…/?wp=apil.au&title=APIL`                    | the wp worker alone (`?site=` still works as alias) |
+| `mcp-wp…/https://apil.au?title=APIL`                | the same, with the site in the path                 |
 
 Tools named `create_*`, `update_*` and `delete_*` change the live site. See **Editing a site**.
 
