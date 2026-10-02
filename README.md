@@ -200,8 +200,10 @@ two programs back: the connector, and the relay it hands requests to.
 4. For browser mode, `npm i --no-save playwright-core` at the root of the clone (a plain
    `npm i` would add it to `package.json`), then `node scripts/cf-tunnel-relay.mjs login <url>` for
    any sign-ins.
-5. Keep the Mac awake: System Settings -> Battery -> Options, prevent automatic sleeping on power
-   adapter when the display is off. A closed lid still sleeps a laptop.
+
+Nothing here keeps the Mac awake. The tunnel goes down when the Mac sleeps and comes back when it
+wakes: both programs carry on where they were, and `cloudflared` reconnects. While it is down,
+`mcp-fetch` gives up on it after 8 seconds and skips it for a minute.
 
 The order is `via`: a list, `["tunnel", "unblocker", "direct"]`, or the same as a string,
 `"tunnel,unblocker,direct"`. One route means no fallback, so `["tunnel"]` fails when the Mac is
