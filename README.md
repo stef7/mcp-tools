@@ -170,7 +170,10 @@ checked; the body is never read to decide. Any other answer, 404 included, is ke
    Worker's `fetch` cannot use an HTTP proxy, so this opens a TCP socket to `proxy.apify.com:8000`
    and sends `CONNECT`. Needs `APIFY_PROXY_PASSWORD` on `mcp-fetch` — the password on Apify
    Console -> Proxy, not an API token — and a paid Apify plan. Billed per successful request. Any
-   refusal (407, Apify's 590–599) moves on.
+   refusal (407, Apify's 590–599) moves on. Any error status (400 and up, 404 and 502 included) or
+   failure code from Apify is tried once more, and the second answer stands; `skipped` says so. A
+   407 is not retried, nor is a failure with no status (TLS, a timeout). A retry may be billed as a
+   second request.
 
    Unblocker re-signs HTTPS with its own key ("Apify Proxy CA"), which the runtime's TLS will not
    accept and cannot be told to. So TLS inside the tunnel is done in JavaScript, by a vendored
@@ -186,7 +189,7 @@ checked; the body is never read to decide. Any other answer, 404 included, is ke
    ```sh
    read -rs APIFY_PROXY_PASSWORD; export APIFY_PROXY_PASSWORD
    node scripts/apify-tls-probe.mjs example.com      # last line: subtls OK or FAILED
-   node scripts/apify-tls-probe.mjs www.austlii.edu.au
+   node scripts/apify-tls-probe.mjs www.wikipedia.org
    # save each certificate it prints to a .pem file, then:
    python3 scripts/apify-trust-anchor.py a.pem b.pem  # prints the new certificate
    ```

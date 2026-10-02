@@ -9,6 +9,8 @@
  *   /chunked    200, gzip, chunked
  *   /redirect   302 -> /plain
  *   /upstream   595, the way Apify reports a site it could not reach
+ *   /flaky?id=  502 the first time for each id, then 200 "hello after <n>"
+ *   /missing?id= 404 "missing <n>" every time, n counting the requests for that id
  *
  * CONNECT to tls.test or other.test does what Unblocker does: TLS ends here, with a certificate for
  * tls.test signed by a test CA (test/fixtures/mock-*.pem), and the same canned paths are served
@@ -34,6 +36,12 @@ const SITE = createSecureContext({
   minVersion: "TLSv1.3",
 });
 const TLS_HOSTS = new Set(["tls.test:443", "other.test:443"]);
+const hits = new Map();
+const hit = (url) => {
+  const key = url.pathname + url.searchParams.get("id");
+  hits.set(key, (hits.get(key) ?? 0) + 1);
+  return hits.get(key);
+};
 
 const server = createServer((req, res) => {
   // Requests inside a tunnel are the site's, and carry no proxy credentials.
@@ -51,6 +59,19 @@ const server = createServer((req, res) => {
     const body = gzipSync("<p>" + "chunk ".repeat(2000) + "</p>");
     res.write(body.subarray(0, 100));
     return res.end(body.subarray(100)); // Node sends these as two chunks
+  }
+  if (url.pathname === "/flaky") {
+    const n = hit(url);
+    if (n === 1) {
+      res.writeHead(502, { "content-length": "0" });
+      return res.end();
+    }
+    res.writeHead(200, { "content-type": "text/plain" });
+    return res.end(`hello after ${n}`);
+  }
+  if (url.pathname === "/missing") {
+    res.writeHead(404, { "content-type": "text/plain" });
+    return res.end(`missing ${hit(url)}`);
   }
   if (url.pathname === "/redirect") {
     res.writeHead(302, { location: "/plain" });

@@ -20,7 +20,8 @@
  * the site speaking and is returned. If every route is blocked, the last blocked answer is
  * returned rather than an error, since it is still what the site said. What was passed over comes
  * back in `skipped`, so a caller can see that the unblocker was paid for because Cloudflare got a
- * 403.
+ * 403. The unblocker alone also tries once more on any error status before its answer stands;
+ * that goes in `skipped` too.
  */
 
 import { APIFY_PROXY_CA } from "./apify-ca";
@@ -230,26 +231,62 @@ const viaTunnel = async (
  */
 const APIFY_PROXY = { hostname: "proxy.apify.com", port: 8000, username: "groups-UNBLOCKER" };
 
-const viaUnblocker = async (password: string, url: string, opts: EgressOptions) => {
-  try {
-    return await proxyFetch({ ...APIFY_PROXY, password }, url, {
+/** What a failed attempt through Unblocker goes into `skipped` as. */
+const unblockerPass = (e: unknown) => {
+  // Apify does not document what it answers once Unblocker units run out, so every refusal
+  // moves on; the status says which it was.
+  if (e instanceof ProxyError && e.status === 407)
+    return new Pass("unblocker: refused (407): wrong password, or no paid plan or units left");
+  const message = e instanceof Error ? e.message : String(e);
+  // subtls's words for a certificate that does not lead to the one trusted.
+  const cert = /trusted root|certificate|subjectAltName/i.test(message)
+    ? " (if every https URL fails like this, Apify may have changed its signing key: see core/apify-ca.ts)"
+    : "";
+  return new Pass(`unblocker: ${message}${cert}`);
+};
+
+/**
+ * Unblocker's answers are uneven: the same URL can be a 502 once and the page a moment later. So
+ * any error status (400 and up, a 404 included) and any failure code from Apify itself (its 59x,
+ * a refused CONNECT) gets one more try, and the second answer stands. A 407 is not retried, since
+ * the password or the units will not change in a second, nor is a failure with no code (TLS, a
+ * timeout, a dropped connection). A retry is noted in `notes`, which is `skipped`.
+ */
+const viaUnblocker = async (
+  password: string,
+  url: string,
+  opts: EgressOptions,
+  notes: string[],
+) => {
+  const attempt = () =>
+    proxyFetch({ ...APIFY_PROXY, password }, url, {
       ...(opts.headers && { headers: opts.headers }),
       ...(opts.connect && { connect: opts.connect }),
       trust: opts.trust ?? APIFY_PROXY_CA,
       // Bot challenges take a while to get through.
       timeoutMs: 60_000,
     });
+  let first: Response;
+  try {
+    first = await attempt();
+    if (first.status < 400) return first;
   } catch (e) {
-    // Apify does not document what it answers once Unblocker units run out, so every refusal
-    // moves on; the status says which it was.
-    if (e instanceof ProxyError && e.status === 407)
-      throw new Pass("unblocker: refused (407): wrong password, or no paid plan or units left");
-    const message = e instanceof Error ? e.message : String(e);
-    // subtls's words for a certificate that does not lead to the one trusted.
-    const cert = /trusted root|certificate|subjectAltName/i.test(message)
-      ? " (if every https URL fails like this, Apify may have changed its signing key: see core/apify-ca.ts)"
-      : "";
-    throw new Pass(`unblocker: ${message}${cert}`);
+    if (!(e instanceof ProxyError) || e.status === 407) throw unblockerPass(e);
+    notes.push(`${unblockerPass(e).message}; tried again`);
+    try {
+      return await attempt();
+    } catch (again) {
+      throw unblockerPass(again);
+    }
+  }
+  notes.push(`unblocker: HTTP ${first.status}; tried again`);
+  try {
+    const second = await attempt();
+    await first.body?.cancel();
+    return second;
+  } catch {
+    // The retry could not get an answer at all, so the first one is still the best there is.
+    return first;
   }
 };
 
@@ -261,20 +298,20 @@ export const egress = async (
 ): Promise<Egress> => {
   const headers = opts.headers ?? {};
   const get = opts.fetch ?? fetch;
+  const skipped: string[] = [];
   const routes: Record<Route, (() => Promise<Response>) | string> = {
     tunnel: env.TUNNEL ? () => viaTunnel(env.TUNNEL!, url, headers) : "tunnel: not bound",
     browser: env.TUNNEL
       ? () => viaTunnel(env.TUNNEL!, url, headers, "browser")
       : "browser: not bound",
     unblocker: env.APIFY_PROXY_PASSWORD
-      ? () => viaUnblocker(env.APIFY_PROXY_PASSWORD!, url, opts)
+      ? () => viaUnblocker(env.APIFY_PROXY_PASSWORD!, url, opts, skipped)
       : "unblocker: no APIFY_PROXY_PASSWORD",
     direct: () =>
       get(url, { headers }).catch((e: unknown) => {
         throw new Pass(`direct: ${e instanceof Error ? e.message : String(e)}`);
       }),
   };
-  const skipped: string[] = [];
   /** The latest blocked answer, and where its note sits in `skipped`. */
   let blocked: { response: Response; via: Route; at: number } | undefined;
   for (const via of orderFor(env, opts)) {

@@ -169,6 +169,60 @@ describe("the unblocker route in the cascade", () => {
       fetch: site,
     });
     expect(got.via).toBe("direct");
-    expect(got.skipped[0]).toBe("unblocker: 595 Connection Reset");
+    expect(got.skipped).toEqual([
+      "unblocker: 595 Connection Reset; tried again",
+      "unblocker: 595 Connection Reset",
+    ]);
+  });
+
+  // Each test's own id, since the mock counts requests per id for the whole run.
+  const unblocker = (url: string) =>
+    egress({ APIFY_PROXY_PASSWORD: "secret" }, url, {
+      via: ["unblocker"],
+      connect: toMock,
+      trust: inject("mockCa"),
+    });
+
+  it("tries once more after an error status, and takes the second answer", async () => {
+    const got = await unblocker("http://site.test/flaky?id=http");
+    expect(got.response.status).toBe(200);
+    expect(await got.response.text()).toBe("hello after 2");
+    expect(got.skipped).toEqual(["unblocker: HTTP 502; tried again"]);
+  });
+
+  it("tries once more over https too, on a new connection", async () => {
+    const got = await unblocker("https://tls.test/flaky?id=https");
+    expect(await got.response.text()).toBe("hello after 2");
+    expect(got.skipped).toEqual(["unblocker: HTTP 502; tried again"]);
+  });
+
+  it("tries a 404 once more, and no more than once", async () => {
+    const got = await unblocker("https://tls.test/missing?id=once");
+    expect(got.response.status).toBe(404);
+    expect(await got.response.text()).toBe("missing 2");
+    expect(got.skipped).toEqual(["unblocker: HTTP 404; tried again"]);
+  });
+
+  it("does not try again after a 407", async () => {
+    const got = await egress({ APIFY_PROXY_PASSWORD: "wrong" }, "https://tls.test/flaky?id=407", {
+      via: ["unblocker", "direct"],
+      connect: toMock,
+      fetch: site,
+      trust: inject("mockCa"),
+    });
+    expect(got.skipped).toEqual([
+      "unblocker: refused (407): wrong password, or no paid plan or units left",
+    ]);
+  });
+
+  it("does not try again after a failure with no status", async () => {
+    const got = await egress({ APIFY_PROXY_PASSWORD: "secret" }, "https://other.test/plain", {
+      via: ["unblocker", "direct"],
+      connect: toMock,
+      fetch: site,
+      trust: inject("mockCa"),
+    });
+    expect(got.skipped).toHaveLength(1);
+    expect(got.skipped[0]).toMatch(/^unblocker: No matching subjectAltName/);
   });
 });
