@@ -172,8 +172,10 @@ checked; the body is never read to decide. Any other answer, 404 included, is ke
    Service binding (`vpc_services` in `mcp-fetch/wrangler.json`) to the `wmac` service:
    `localhost:8811` on the Mac behind Cloudflare Tunnel `WMac`. Run
    `node scripts/cf-tunnel-relay.mjs` there; `ALLOW_DOMAINS=a.org,b.gov.au` limits it to those
-   domains and their subdomains. A tunnel that does not answer within 8 seconds is left alone for a
-   minute, so a sleeping Mac costs one slow request, not every request.
+   domains and their subdomains. Before each page the Worker asks the relay's `/health`, which
+   answers at once: no answer within 2 seconds means the Mac is not there, and the tunnel is skipped
+   for a minute without asking for the page. A good answer is remembered for 30 seconds. A page that
+   is merely slow then costs only that request (the relay gives up on a site after 30 seconds).
 4. **browser** — the same Mac and relay, with the page loaded in Google Chrome there: it waits out
    challenge pages that clear themselves and has whatever sign-ins you made with
    `node cf-tunnel-relay.mjs login <url>`. Chrome keeps its own profile in
@@ -203,7 +205,7 @@ two programs back: the connector, and the relay it hands requests to.
 
 Nothing here keeps the Mac awake. The tunnel goes down when the Mac sleeps and comes back when it
 wakes: both programs carry on where they were, and `cloudflared` reconnects. While it is down,
-`mcp-fetch` gives up on it after 8 seconds and skips it for a minute.
+`mcp-fetch` finds out from `/health` within 2 seconds and skips it for a minute.
 
 The order is `via`: a list, `["tunnel", "unblocker", "direct"]`, or the same as a string,
 `"tunnel,unblocker,direct"`. One route means no fallback, so `["tunnel"]` fails when the Mac is
