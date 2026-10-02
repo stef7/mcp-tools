@@ -9,7 +9,7 @@
  *
  *   key SHA-256 (SPKI): 29bb5cee8f8509437f16dd113b2712ee7731bc32d33c862fbc36e8d4861291a8
  *
- * If Apify changes its key, every https URL fails the unblocker route on the certificate. Run
+ * If Apify changes its key, every https URL fails the smart route on the certificate. Run
  * scripts/apify-tls-probe.mjs for two sites and that script on the two certificates, then
  * replace this one.
  */

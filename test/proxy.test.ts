@@ -111,7 +111,7 @@ describe("proxyFetch over https, trusting the proxy's CA", () => {
   });
 });
 
-describe("the unblocker route in the cascade", () => {
+describe("the smart route in the cascade", () => {
   beforeEach(resetTunnel);
   // Points the fixed Apify address at the mock; everything else is what production sends.
   const toMock: typeof connect = (_, opts) =>
@@ -120,55 +120,111 @@ describe("the unblocker route in the cascade", () => {
 
   it("gets the page through the proxy, as the Unblocker username", async () => {
     const got = await egress({ APIFY_PROXY_PASSWORD: "secret" }, "http://site.test/plain", {
-      via: ["unblocker", "direct"],
+      via: ["smart"],
       connect: toMock,
       fetch: site,
     });
-    expect(got.via).toBe("unblocker");
+    expect(got.via).toBe("smart");
     expect(await got.response.text()).toBe("hello");
   });
 
   it("gets an https page through the proxy, trusting the CA it is given", async () => {
     const got = await egress({ APIFY_PROXY_PASSWORD: "secret" }, "https://tls.test/plain", {
-      via: ["unblocker"],
+      via: ["smart"],
       connect: toMock,
+      fetch: site,
       trust: inject("mockCa"),
     });
-    expect(got.via).toBe("unblocker");
+    expect(got.via).toBe("smart");
     expect(await got.response.text()).toBe("hello");
   });
 
   it("trusts Apify's CA by default, and says what a refused certificate may mean", async () => {
     const got = await egress({ APIFY_PROXY_PASSWORD: "secret" }, "https://tls.test/plain", {
-      via: ["unblocker", "direct"],
+      via: ["smart"],
       connect: toMock,
       fetch: site,
     });
-    expect(got.via).toBe("direct");
+    expect(got.via).toBe("fallback");
     expect(got.skipped[0]).toMatch(
-      /^unblocker: .*trusted root.*Apify may have changed its signing key/,
+      /^smart: .*trusted root.*Apify may have changed its signing key/,
     );
   });
 
-  it("falls back to Cloudflare when the proxy refuses", async () => {
+  it("falls back to Cloudflare's own fetch when the proxy refuses", async () => {
     const got = await egress({ APIFY_PROXY_PASSWORD: "wrong" }, "http://site.test/plain", {
-      via: ["unblocker", "direct"],
+      via: ["smart"],
       connect: toMock,
       fetch: site,
     });
-    expect(got.via).toBe("direct");
+    expect(got.via).toBe("fallback");
     expect(got.skipped).toEqual([
-      "unblocker: refused (407): wrong password, or no paid plan or units left",
+      "smart: refused (407): wrong password, or no paid plan or units left",
     ]);
   });
 
   it("falls back when the proxy cannot reach the site", async () => {
     const got = await egress({ APIFY_PROXY_PASSWORD: "secret" }, "http://site.test/upstream", {
-      via: ["unblocker", "direct"],
+      via: ["smart"],
       connect: toMock,
       fetch: site,
     });
-    expect(got.via).toBe("direct");
-    expect(got.skipped[0]).toBe("unblocker: 595 Connection Reset");
+    expect(got.via).toBe("fallback");
+    expect(got.skipped).toEqual([
+      "smart: 595 Connection Reset; tried again",
+      "smart: 595 Connection Reset",
+    ]);
+  });
+
+  // Each test's own id, since the mock counts requests per id for the whole run.
+  const smart = (url: string) =>
+    egress({ APIFY_PROXY_PASSWORD: "secret" }, url, {
+      via: ["smart"],
+      connect: toMock,
+      fetch: site,
+      trust: inject("mockCa"),
+    });
+
+  it("tries once more after an error status, and takes the second answer", async () => {
+    const got = await smart("http://site.test/flaky?id=http");
+    expect(got.response.status).toBe(200);
+    expect(await got.response.text()).toBe("hello after 2");
+    expect(got.skipped).toEqual(["smart: HTTP 502; tried again"]);
+  });
+
+  it("tries once more over https too, on a new connection", async () => {
+    const got = await smart("https://tls.test/flaky?id=https");
+    expect(await got.response.text()).toBe("hello after 2");
+    expect(got.skipped).toEqual(["smart: HTTP 502; tried again"]);
+  });
+
+  it("tries a 404 once more, and no more than once", async () => {
+    const got = await smart("https://tls.test/missing?id=once");
+    expect(got.response.status).toBe(404);
+    expect(await got.response.text()).toBe("missing 2");
+    expect(got.skipped).toEqual(["smart: HTTP 404; tried again"]);
+  });
+
+  it("does not try again after a 407", async () => {
+    const got = await egress({ APIFY_PROXY_PASSWORD: "wrong" }, "https://tls.test/flaky?id=407", {
+      via: ["smart"],
+      connect: toMock,
+      fetch: site,
+      trust: inject("mockCa"),
+    });
+    expect(got.skipped).toEqual([
+      "smart: refused (407): wrong password, or no paid plan or units left",
+    ]);
+  });
+
+  it("does not try again after a failure with no status", async () => {
+    const got = await egress({ APIFY_PROXY_PASSWORD: "secret" }, "https://other.test/plain", {
+      via: ["smart"],
+      connect: toMock,
+      fetch: site,
+      trust: inject("mockCa"),
+    });
+    expect(got.skipped).toHaveLength(1);
+    expect(got.skipped[0]).toMatch(/^smart: No matching subjectAltName/);
   });
 });
