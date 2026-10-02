@@ -23,6 +23,7 @@
  * 403.
  */
 
+import { APIFY_PROXY_CA } from "./apify-ca";
 import { ProxyError, proxyFetch, type ProxyFetchOptions } from "./proxy";
 
 export const ROUTES = ["unblocker", "tunnel", "browser", "direct"] as const;
@@ -92,6 +93,8 @@ export type EgressOptions = {
   fetch?: typeof fetch;
   /** The proxy route's TCP connect; tests replace it. */
   connect?: ProxyFetchOptions["connect"];
+  /** The certificate the unblocker route trusts; tests replace it. */
+  trust?: string;
 };
 
 export type Egress = { response: Response; via: Route; skipped: string[] };
@@ -221,6 +224,9 @@ const viaTunnel = async (
  *
  * No country: Apify says pinning one "can reduce how effectively Unblocker bypasses anti-bot
  * protection", and getting past the block is the point. The tunnel is the Australian route.
+ *
+ * Unblocker re-signs HTTPS with its own key, so https goes through subtls trusting that key
+ * (core/apify-ca.ts) rather than through the runtime's TLS, which cannot accept it.
  */
 const APIFY_PROXY = { hostname: "proxy.apify.com", port: 8000, username: "groups-UNBLOCKER" };
 
@@ -229,6 +235,7 @@ const viaUnblocker = async (password: string, url: string, opts: EgressOptions) 
     return await proxyFetch({ ...APIFY_PROXY, password }, url, {
       ...(opts.headers && { headers: opts.headers }),
       ...(opts.connect && { connect: opts.connect }),
+      trust: opts.trust ?? APIFY_PROXY_CA,
       // Bot challenges take a while to get through.
       timeoutMs: 60_000,
     });
@@ -238,12 +245,11 @@ const viaUnblocker = async (password: string, url: string, opts: EgressOptions) 
     if (e instanceof ProxyError && e.status === 407)
       throw new Pass("unblocker: refused (407): wrong password, or no paid plan or units left");
     const message = e instanceof Error ? e.message : String(e);
-    // Nor does it say whether Unblocker re-signs HTTPS to do its work. If it does, every https
-    // URL fails here, and a Worker has no way to accept a certificate it cannot verify.
-    const tls = /tls|ssl|certificate/i.test(message)
-      ? " (every https URL failing like this means Unblocker re-signs HTTPS, which a Worker cannot accept)"
+    // subtls's words for a certificate that does not lead to the one trusted.
+    const cert = /trusted root|certificate|subjectAltName/i.test(message)
+      ? " (if every https URL fails like this, Apify may have changed its signing key: see core/apify-ca.ts)"
       : "";
-    throw new Pass(`unblocker: ${message}${tls}`);
+    throw new Pass(`unblocker: ${message}${cert}`);
   }
 };
 

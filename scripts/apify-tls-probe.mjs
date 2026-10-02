@@ -9,9 +9,14 @@
  *
  * Prints what the proxy negotiates under those limits (and without them, if they fail), then the
  * certificates it sent, as PEM. Certificates are public; the password is never printed.
+ *
+ * Last, it fetches the page the way the Worker does: core/vendor/subtls.mjs doing TLS, trusting
+ * only core/apify-ca.ts (or the PEM file in PROBE_TRUST), and prints the status line it got.
  */
+import { readFileSync } from "node:fs";
 import http from "node:http";
 import tls from "node:tls";
+import { TrustedCert, startTls } from "../core/vendor/subtls.mjs";
 
 const host = process.argv[2] ?? "example.com";
 const proxyHost = process.env.PROBE_PROXY_HOST ?? "proxy.apify.com";
@@ -88,3 +93,51 @@ for (
   console.log(pem(c.raw));
 }
 s.destroy();
+
+// ─── as the Worker does it ────────────────────────────────────────────────────────────────────
+const trustName = process.env.PROBE_TRUST ?? "core/apify-ca.ts";
+const trust = process.env.PROBE_TRUST
+  ? readFileSync(process.env.PROBE_TRUST, "utf8")
+  : /`(-----BEGIN CERTIFICATE-----[\s\S]+?-----END CERTIFICATE-----)`/.exec(
+      readFileSync(new URL("../core/apify-ca.ts", import.meta.url), "utf8"),
+    )[1];
+
+/** The same reader as core/proxy.ts's `exactly`, over a Node socket. */
+const exactly = (chunks) => {
+  let queue = [];
+  let ended = false;
+  return async (n, mode) => {
+    while (Buffer.concat(queue).length < n && !ended) {
+      const { value, done } = await chunks.next();
+      if (done) ended = true;
+      else queue.push(value);
+    }
+    const all = Buffer.concat(queue);
+    if (!all.length) return undefined;
+    const out = new Uint8Array(all.subarray(0, Math.min(n, all.length)));
+    queue = mode === 1 ? [all] : [all.subarray(out.length)];
+    return out;
+  };
+};
+
+try {
+  const socket = await tunnel();
+  const conn = await startTls(
+    host,
+    await TrustedCert.databaseFromPEM(trust),
+    exactly(socket[Symbol.asyncIterator]()),
+    (data) => socket.write(data),
+  );
+  await conn.write(
+    new TextEncoder().encode(`GET / HTTP/1.1\r\nHost: ${host}\r\nConnection: close\r\n\r\n`),
+  );
+  let text = "";
+  for (let r = await conn.read(); r; r = await conn.read()) text += new TextDecoder().decode(r);
+  socket.destroy();
+  console.log(
+    `\nsubtls, trusting ${trustName}: OK, ${text.split("\r\n")[0]} (${text.length} bytes)`,
+  );
+} catch (e) {
+  console.log(`\nsubtls, trusting ${trustName}: FAILED (${e.message})`);
+  process.exitCode = 1;
+}

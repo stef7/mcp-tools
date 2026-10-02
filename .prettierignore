@@ -2,3 +2,4 @@ node_modules
 worker-configuration.d.ts
 .wrangler
 bundles
+core/vendor

@@ -1,11 +1,13 @@
 /**
- * core/proxy.ts against scripts/mock-proxy.mjs: the HTTP parsing, and what the proxy's own
- * refusals turn into. The TLS-inside-CONNECT path needs a real site with a real certificate, so it
- * is not covered here; see the README for trying it by hand.
+ * core/proxy.ts against scripts/mock-proxy.mjs: the HTTP parsing, what the proxy's own refusals
+ * turn into, and TLS inside the tunnel the way Unblocker does it, with a certificate signed by a
+ * CA no runtime trusts. The runtime's own TLS (no `trust`) needs a real site with a real
+ * certificate, so it is not covered here; see the README for trying it by hand.
  */
 import { connect } from "cloudflare:sockets";
 import { inject } from "vitest";
 import { beforeEach, describe, expect, it } from "vitest";
+import { APIFY_PROXY_CA } from "../core/apify-ca";
 import { ProxyError, proxyFetch } from "../core/proxy";
 import { egress, resetTunnel } from "../core/egress";
 
@@ -68,6 +70,47 @@ describe("proxyFetch over https", () => {
   });
 });
 
+describe("proxyFetch over https, trusting the proxy's CA", () => {
+  const trust = () => ({ trust: inject("mockCa") });
+
+  it("returns the body and status", async () => {
+    const res = await proxyFetch(proxy(), "https://tls.test/plain", trust());
+    expect(res.status).toBe(200);
+    expect(await res.text()).toBe("hello");
+    expect(res.headers.get("x-proxy-final-url")).toBe("https://tls.test/plain");
+  });
+
+  it("undoes chunking and gzip", async () => {
+    const res = await proxyFetch(proxy(), "https://tls.test/chunked", trust());
+    const text = await res.text();
+    expect(text.length).toBe("<p>".length + "chunk ".length * 2000 + "</p>".length);
+  });
+
+  it("follows redirects, staying on https", async () => {
+    const res = await proxyFetch(proxy(), "https://tls.test/redirect", trust());
+    expect(await res.text()).toBe("hello");
+    expect(res.headers.get("x-proxy-final-url")).toBe("https://tls.test/plain");
+  });
+
+  it("gives up on a response past maxBytes", async () => {
+    await expect(
+      proxyFetch(proxy(), "https://tls.test/chunked", { ...trust(), maxBytes: 50 }),
+    ).rejects.toThrow("larger than 50 bytes");
+  });
+
+  it("refuses a certificate from any other CA", async () => {
+    await expect(
+      proxyFetch(proxy(), "https://tls.test/plain", { trust: APIFY_PROXY_CA }),
+    ).rejects.toThrow("trusted root");
+  });
+
+  it("refuses a certificate for another host", async () => {
+    await expect(proxyFetch(proxy(), "https://other.test/plain", trust())).rejects.toThrow(
+      "No matching subjectAltName for other.test",
+    );
+  });
+});
+
 describe("the unblocker route in the cascade", () => {
   beforeEach(resetTunnel);
   // Points the fixed Apify address at the mock; everything else is what production sends.
@@ -83,6 +126,28 @@ describe("the unblocker route in the cascade", () => {
     });
     expect(got.via).toBe("unblocker");
     expect(await got.response.text()).toBe("hello");
+  });
+
+  it("gets an https page through the proxy, trusting the CA it is given", async () => {
+    const got = await egress({ APIFY_PROXY_PASSWORD: "secret" }, "https://tls.test/plain", {
+      via: ["unblocker"],
+      connect: toMock,
+      trust: inject("mockCa"),
+    });
+    expect(got.via).toBe("unblocker");
+    expect(await got.response.text()).toBe("hello");
+  });
+
+  it("trusts Apify's CA by default, and says what a refused certificate may mean", async () => {
+    const got = await egress({ APIFY_PROXY_PASSWORD: "secret" }, "https://tls.test/plain", {
+      via: ["unblocker", "direct"],
+      connect: toMock,
+      fetch: site,
+    });
+    expect(got.via).toBe("direct");
+    expect(got.skipped[0]).toMatch(
+      /^unblocker: .*trusted root.*Apify may have changed its signing key/,
+    );
   });
 
   it("falls back to Cloudflare when the proxy refuses", async () => {
