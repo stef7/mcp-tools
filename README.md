@@ -199,9 +199,10 @@ LaunchAgent back: the relay, which also runs `cloudflared` for `WMac`.
    command, and paste only its long `eyJ…` part. It goes into the login Keychain as the item
    `cf-tunnel-relay`, and never into a file, a plist or a command line.
 3. It writes `~/Library/LaunchAgents/local.cf-tunnel-relay.plist`, which starts the relay at login
-   and restarts it if it dies, loads it, and checks that `/health` answers. The relay reads the
-   token from the Keychain and starts `cloudflared`, restarting that too if it dies; the dashboard
-   shows `WMac` as Healthy once it has connected.
+   and restarts it if it dies, and loads it. The relay reads the token from the Keychain and starts
+   `cloudflared`, restarting that too if it dies. The installer waits until `/health` answers and
+   `cloudflared` reports a live connection to Cloudflare (its metrics, on `127.0.0.1:8812`), and
+   shows the end of `/tmp/cf-tunnel-relay.err` if either does not happen.
 4. `sh scripts/install-cf-tunnel-relay-agent.sh off` stops both until `on` or the next login;
    `--token` asks for a new token. After a `git pull`, restart with
    `launchctl kickstart -k gui/$(id -u)/local.cf-tunnel-relay`.

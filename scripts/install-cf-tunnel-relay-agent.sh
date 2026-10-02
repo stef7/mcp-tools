@@ -117,12 +117,29 @@ plutil -lint "$PLIST" >/dev/null
 launchctl bootout "$DOMAIN/$LABEL" 2>/dev/null && sleep 1 || true
 launchctl bootstrap "$DOMAIN" "$PLIST"
 
-sleep 1
-if curl -fsS http://127.0.0.1:8811/health; then
-  echo " - $LABEL is running $CF_TUNNEL_RELAY, and cloudflared for WMac;" \
-    "the dashboard shows WMac as Healthy once it has connected"
-else
-  echo "cf-tunnel-relay is not answering on 8811: see /tmp/cf-tunnel-relay.err, and lsof -i :8811 for" \
-    "anything else holding the port" >&2
-  exit 1
-fi
+# The relay first, then cloudflared's own count of its connections to Cloudflare.
+waited=0
+until curl -fsS http://127.0.0.1:8811/health >/dev/null 2>&1; do
+  if [ "$waited" -ge 10 ]; then
+    echo "cf-tunnel-relay is not answering on 8811: lsof -i :8811 shows anything else holding" \
+      "the port. The end of /tmp/cf-tunnel-relay.err:" >&2
+    tail -n 20 /tmp/cf-tunnel-relay.err >&2 2>/dev/null
+    exit 1
+  fi
+  sleep 1
+  waited=$((waited + 1))
+done
+echo "cf-tunnel-relay is answering on 8811; waiting for cloudflared to connect to WMac..."
+waited=0
+until curl -fsS http://127.0.0.1:8812/metrics 2>/dev/null |
+  awk '/^cloudflared_tunnel_ha_connections / && $2 > 0 { found = 1 } END { exit !found }'; do
+  if [ "$waited" -ge 20 ]; then
+    echo "cloudflared has not connected to WMac after 20 seconds. The end of" \
+      "/tmp/cf-tunnel-relay.err:" >&2
+    tail -n 20 /tmp/cf-tunnel-relay.err >&2 2>/dev/null
+    exit 1
+  fi
+  sleep 1
+  waited=$((waited + 1))
+done
+echo "ok - $LABEL is running $CF_TUNNEL_RELAY, and cloudflared is connected to WMac"

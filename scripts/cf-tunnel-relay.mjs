@@ -41,7 +41,9 @@
  * both up and `cloudflared` needs no service of its own. The tunnel token comes from the login
  * Keychain (item `cf-tunnel-relay`) and reaches cloudflared in TUNNEL_TOKEN: never on a command
  * line, where `ps` would show it, nor in a file. cloudflared is started again whenever it stops,
- * after 5 seconds, doubling up to a minute while it keeps failing, and stopped with the relay.
+ * after 5 seconds, doubling up to a minute while it keeps failing, and stopped with the relay. Its
+ * metrics are on 127.0.0.1:8812, where `cloudflared_tunnel_ha_connections` counts its live
+ * connections to Cloudflare.
  *
  * Everything the relay says itself carries `x-cf-tunnel-relay-error`; a response it passes on
  * carries `x-cf-tunnel-relay-status`. That is how the Worker tells "the site said 502" from "the
@@ -420,7 +422,18 @@ const runConnector = async (wait = 5_000) => {
   }
   const child = spawn(
     CLOUDFLARED,
-    ["tunnel", "--no-autoupdate", "--loglevel", "warn", "--grace-period", "2s", "run"],
+    [
+      "tunnel",
+      "--no-autoupdate",
+      "--loglevel",
+      "warn",
+      "--grace-period",
+      "2s",
+      // Fixed, so install-cf-tunnel-relay-agent.sh knows where to ask whether it has connected.
+      "--metrics",
+      "127.0.0.1:8812",
+      "run",
+    ],
     { env: { ...process.env, TUNNEL_TOKEN: token }, stdio: ["ignore", "ignore", "inherit"] },
   );
   connector = child;
