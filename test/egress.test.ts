@@ -22,7 +22,7 @@ const tunnel = (answer: () => Response) => {
   };
 };
 const relayed = (body: string, status = 200) =>
-  page(body, status, { "x-relay-status": String(status) });
+  page(body, status, { "x-cf-tunnel-relay-status": String(status) });
 const dead = tunnel(() => {
   throw new Error("Network connection lost.");
 });
@@ -181,7 +181,7 @@ describe("the tunnel", () => {
     expect(got.via).toBe("tunnel");
     expect(await got.response.text()).toBe("from home");
     expect(got.skipped).toEqual([]);
-    expect(t.seen).toEqual([`http://relay/fetch?url=${encodeURIComponent(URL_)}`]);
+    expect(t.seen).toEqual([`http://cf-tunnel-relay/fetch?url=${encodeURIComponent(URL_)}`]);
     expect(s.seen).toEqual([]);
   });
 
@@ -223,13 +223,15 @@ describe("the tunnel", () => {
     async (status) => {
       const t = tunnel(() => page("not the relay", status));
       await expect(egress({ TUNNEL: t }, URL_, { ...alone, fetch: site().get })).rejects.toThrow(
-        `tunnel: relay not answering (HTTP ${status})`,
+        `tunnel: cf-tunnel-relay not answering (HTTP ${status})`,
       );
     },
   );
 
   it("is not written off when only the site was unreachable", async () => {
-    const t = tunnel(() => page("ENOTFOUND", 502, { "x-relay-error": "getaddrinfo ENOTFOUND" }));
+    const t = tunnel(() =>
+      page("ENOTFOUND", 502, { "x-cf-tunnel-relay-error": "getaddrinfo ENOTFOUND" }),
+    );
     const get = site().get;
     await expect(egress({ TUNNEL: t }, URL_, { ...alone, fetch: get })).rejects.toThrow(
       "tunnel: getaddrinfo ENOTFOUND",
@@ -251,12 +253,14 @@ describe("the browser", () => {
     const got = await egress({ TUNNEL: t }, URL_, { via: ["browser"], fetch: site().get });
     expect(got.via).toBe("browser");
     expect(await got.response.text()).toBe("rendered");
-    expect(t.seen).toEqual([`http://relay/fetch?url=${encodeURIComponent(URL_)}&mode=browser`]);
+    expect(t.seen).toEqual([
+      `http://cf-tunnel-relay/fetch?url=${encodeURIComponent(URL_)}&mode=browser`,
+    ]);
   });
 
   it("moves on when the relay will not open that domain", async () => {
     const no = "refusing example.org: not in BROWSER_ALLOW_DOMAINS";
-    const t = tunnel(() => page(no, 502, { "x-relay-error": no }));
+    const t = tunnel(() => page(no, 502, { "x-cf-tunnel-relay-error": no }));
     const got = await egress({ TUNNEL: t }, URL_, { via: "browser,direct", fetch: site().get });
     expect(got.via).toBe("direct");
     expect(got.skipped).toEqual([`browser: ${no}`]);

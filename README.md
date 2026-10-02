@@ -20,8 +20,9 @@ workers/mcp-ghost/           Ghost publications, with member sign-in for paid po
 workers/mcp-apify/           what Apify is costing you, by service and by Actor
 scripts/mock-wp.mjs          fake WordPress for local testing
 scripts/mock-ghost.mjs       fake Ghost, including the magic-link sign-in
-scripts/tunnel-relay.mjs     runs on the Mac at the far end of the tunnel
-scripts/install-relay-agent.sh  makes the Mac start the relay at login and keep it running
+scripts/cf-tunnel-relay.mjs  runs on the Mac at the far end of the tunnel
+scripts/install-cf-tunnel-relay-agent.sh
+                             makes the Mac start cf-tunnel-relay at login and keep it running
 scripts/mock-proxy.mjs       fake Apify Proxy, for the proxy tests
 ```
 
@@ -169,16 +170,17 @@ checked; the body is never read to decide. Any other answer, 404 included, is ke
    Unblocker re-signs HTTPS; if it does, every https URL fails this route with a TLS error.
 3. **tunnel** — a home connection in Australia, only while the Mac is on. `env.TUNNEL` is a VPC
    Service binding (`vpc_services` in `mcp-fetch/wrangler.json`) to the `wmac` service:
-   `localhost:8811` on the Mac behind Cloudflare Tunnel `WMac`. Run `node scripts/tunnel-relay.mjs`
-   there; `ALLOW_DOMAINS=a.org,b.gov.au` limits it to those domains and their subdomains. A tunnel
-   that does not answer within 8 seconds is left alone for a minute, so a sleeping Mac costs one
-   slow request, not every request.
+   `localhost:8811` on the Mac behind Cloudflare Tunnel `WMac`. Run
+   `node scripts/cf-tunnel-relay.mjs` there; `ALLOW_DOMAINS=a.org,b.gov.au` limits it to those
+   domains and their subdomains. A tunnel that does not answer within 8 seconds is left alone for a
+   minute, so a sleeping Mac costs one slow request, not every request.
 4. **browser** — the same Mac and relay, with the page loaded in Google Chrome there: it waits out
    challenge pages that clear themselves and has whatever sign-ins you made with
-   `node tunnel-relay.mjs login <url>`. Chrome keeps its own profile in `~/.tunnel-relay/profile`.
-   Off unless the relay has `BROWSER_ALLOW_DOMAINS=a.org,b.gov.au`, and refused for every other
-   domain, where the page starts and wherever it is redirected. Every connection Chrome makes goes
-   through a proxy inside the relay with the same private-address check as plain mode. Needs
+   `node cf-tunnel-relay.mjs login <url>`. Chrome keeps its own profile in
+   `~/.cf-tunnel-relay/profile`. Off unless the relay has `BROWSER_ALLOW_DOMAINS=a.org,b.gov.au`,
+   and refused for every other domain, where the page starts and wherever it is redirected. Every
+   connection Chrome makes goes through a proxy inside the relay with the same private-address
+   check as plain mode. Needs
    `npm i playwright-core` next to the relay. Up to 60 seconds a page.
 
 ### Setting up the Mac
@@ -190,13 +192,13 @@ two programs back: the connector, and the relay it hands requests to.
 2. Connect the Mac to `WMac`: in the dashboard, Networking -> Tunnels -> `WMac` -> Add a replica,
    copy the install command, and run it — `sudo cloudflared service install <token>`, which starts
    it at every boot. The token is a credential: it stays out of this repo.
-3. From the clone, `sh scripts/install-relay-agent.sh` — with `ALLOW_DOMAINS=…` and
+3. From the clone, `sh scripts/install-cf-tunnel-relay-agent.sh` — with `ALLOW_DOMAINS=…` and
    `BROWSER_ALLOW_DOMAINS=…` in front if you want them. It writes
-   `~/Library/LaunchAgents/local.tunnel-relay.plist`, which starts the relay at login and restarts
-   it if it dies, loads it, and checks that `/health` answers. After a `git pull`, restart it with
-   `launchctl kickstart -k gui/$(id -u)/local.tunnel-relay`.
+   `~/Library/LaunchAgents/local.cf-tunnel-relay.plist`, which starts the relay at login and
+   restarts it if it dies, loads it, and checks that `/health` answers. After a `git pull`, restart
+   it with `launchctl kickstart -k gui/$(id -u)/local.cf-tunnel-relay`.
 4. For browser mode, `npm i --no-save playwright-core` at the root of the clone (a plain
-   `npm i` would add it to `package.json`), then `node scripts/tunnel-relay.mjs login <url>` for
+   `npm i` would add it to `package.json`), then `node scripts/cf-tunnel-relay.mjs login <url>` for
    any sign-ins.
 5. Keep the Mac awake: System Settings -> Battery -> Options, prevent automatic sleeping on power
    adapter when the display is off. A closed lid still sleeps a laptop.

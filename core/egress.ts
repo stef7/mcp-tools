@@ -4,7 +4,7 @@
  *
  *   unblocker  Apify Proxy's Unblocker, through core/proxy.ts: it deals with bot checks and
  *              CAPTCHAs itself and picks the country. Billed per successful request.
- *   tunnel     the Mac behind Cloudflare Tunnel, via scripts/tunnel-relay.mjs: a home
+ *   tunnel     the Mac behind Cloudflare Tunnel, via scripts/cf-tunnel-relay.mjs: a home
  *              connection in Australia. Only as good as the Mac is awake.
  *   browser    the same Mac, the page loaded in its Chrome: gets past challenges that clear
  *              themselves, and has the sign-ins made there. The relay refuses it for every domain
@@ -128,7 +128,7 @@ const viaTunnel = async (
   try {
     // The VPC Service fixes host and port (localhost:8811 on the Mac); only the path matters.
     const mode = browser ? "&mode=browser" : "";
-    res = await tunnel.fetch(`http://relay/fetch?url=${encodeURIComponent(url)}${mode}`, {
+    res = await tunnel.fetch(`http://cf-tunnel-relay/fetch?url=${encodeURIComponent(url)}${mode}`, {
       headers,
       signal: AbortSignal.timeout(browser ? BROWSER_TIMEOUT_MS : TUNNEL_TIMEOUT_MS),
     });
@@ -141,11 +141,11 @@ const viaTunnel = async (
   // The relay marks everything it says itself. An unmarked answer is not the relay: a 5xx is
   // cloudflared finding nothing listening on the port, and anything else is some other program
   // on it (`python -m http.server` answers every URL with a 404). The Mac is up, the relay is not.
-  const relayError = res.headers.get("x-relay-error");
+  const relayError = res.headers.get("x-cf-tunnel-relay-error");
   if (relayError) throw new Pass(`${route}: ${relayError}`);
-  if (!res.headers.has("x-relay-status")) {
+  if (!res.headers.has("x-cf-tunnel-relay-status")) {
     tunnelDownUntil = Date.now() + DOWN_FOR_MS;
-    throw new Pass(`${route}: relay not answering (HTTP ${res.status})`);
+    throw new Pass(`${route}: cf-tunnel-relay not answering (HTTP ${res.status})`);
   }
   return res;
 };
