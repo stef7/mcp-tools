@@ -3,29 +3,49 @@
  * tunnel and the site are stand-ins; the unblocker's own behaviour is in proxy.test.ts, so here
  * it is either unconfigured or a proxy that cannot be reached.
  */
-import { beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { egress, resetTunnel } from "../core/egress";
 
 const URL_ = "https://example.org/page";
 const page = (body: string, status = 200, headers: Record<string, string> = {}) =>
   new Response(body, { status, headers });
 
-/** A tunnel that answers the way the relay does, or throws the way a dead tunnel does. */
-const tunnel = (answer: () => Response) => {
+/**
+ * A tunnel that answers the way the relay does, or throws the way a dead tunnel does. `/health`
+ * answers "ok" unless told otherwise; `seen` holds the pages asked for, `checks` the health checks.
+ */
+type Answer = (signal?: AbortSignal) => Response | Promise<Response>;
+const tunnel = (answer: Answer, health: Answer = () => page("ok")) => {
   const seen: string[] = [];
+  let checks = 0;
   return {
     seen,
-    async fetch(input: string) {
+    get checks() {
+      return checks;
+    },
+    async fetch(input: string, init?: RequestInit) {
+      const signal = init?.signal ?? undefined;
+      if (input.endsWith("/health")) {
+        checks++;
+        return health(signal);
+      }
       seen.push(input);
-      return answer();
+      return answer(signal);
     },
   };
 };
 const relayed = (body: string, status = 200) =>
-  page(body, status, { "x-relay-status": String(status) });
-const dead = tunnel(() => {
+  page(body, status, { "x-cf-tunnel-relay-status": String(status) });
+const lost = () => {
   throw new Error("Network connection lost.");
-});
+};
+const dead = tunnel(lost, lost);
+const timedOut = () => {
+  throw new DOMException("The operation was aborted due to timeout", "TimeoutError");
+};
+/** A page still loading: it answers only by failing, once it is dropped. */
+const loading: Answer = (signal) =>
+  new Promise((_, reject) => signal?.addEventListener("abort", () => reject(signal.reason)));
 
 /** The worker's own fetch, answering as the site. */
 const site = () => {
@@ -181,7 +201,7 @@ describe("the tunnel", () => {
     expect(got.via).toBe("tunnel");
     expect(await got.response.text()).toBe("from home");
     expect(got.skipped).toEqual([]);
-    expect(t.seen).toEqual([`http://relay/fetch?url=${encodeURIComponent(URL_)}`]);
+    expect(t.seen).toEqual([`http://cf-tunnel-relay/fetch?url=${encodeURIComponent(URL_)}`]);
     expect(s.seen).toEqual([]);
   });
 
@@ -223,19 +243,99 @@ describe("the tunnel", () => {
     async (status) => {
       const t = tunnel(() => page("not the relay", status));
       await expect(egress({ TUNNEL: t }, URL_, { ...alone, fetch: site().get })).rejects.toThrow(
-        `tunnel: relay not answering (HTTP ${status})`,
+        `tunnel: cf-tunnel-relay not answering (HTTP ${status})`,
       );
     },
   );
 
   it("is not written off when only the site was unreachable", async () => {
-    const t = tunnel(() => page("ENOTFOUND", 502, { "x-relay-error": "getaddrinfo ENOTFOUND" }));
+    const t = tunnel(() =>
+      page("ENOTFOUND", 502, { "x-cf-tunnel-relay-error": "getaddrinfo ENOTFOUND" }),
+    );
     const get = site().get;
     await expect(egress({ TUNNEL: t }, URL_, { ...alone, fetch: get })).rejects.toThrow(
       "tunnel: getaddrinfo ENOTFOUND",
     );
     await expect(egress({ TUNNEL: t }, URL_, { ...alone, fetch: get })).rejects.toThrow();
     expect(t.seen).toHaveLength(2);
+  });
+
+  it("checks /health with the page, and only once in 30 seconds", async () => {
+    const t = tunnel(() => relayed("from home"));
+    await egress({ TUNNEL: t }, URL_, { ...alone, fetch: site().get });
+    await egress({ TUNNEL: t }, URL_, { ...alone, fetch: site().get });
+    expect(t.checks).toBe(1);
+    expect(t.seen).toHaveLength(2);
+    const later = Date.now() + 31_000;
+    const clock = vi.spyOn(Date, "now").mockReturnValue(later);
+    try {
+      await egress({ TUNNEL: t }, URL_, { ...alone, fetch: site().get });
+      expect(t.checks).toBe(2);
+    } finally {
+      clock.mockRestore();
+    }
+  });
+
+  it("asks for /health alongside the page, and drops the page when /health does not answer", async () => {
+    let dropped = false;
+    const t = tunnel((signal) => {
+      signal?.addEventListener("abort", () => (dropped = true));
+      return loading(signal);
+    }, timedOut);
+    const got = await egress({ TUNNEL: t }, URL_, { via: ["tunnel", "direct"], fetch: site().get });
+    expect(got.via).toBe("direct");
+    expect(got.skipped).toEqual(["tunnel: cf-tunnel-relay did not answer /health within 2s"]);
+    expect(t.seen).toHaveLength(1);
+    expect(t.checks).toBe(1);
+    expect(dropped).toBe(true);
+  });
+
+  it("drops /health when the page answers first, and counts the Mac as there", async () => {
+    let dropped = false;
+    const t = tunnel(
+      () => relayed("from home"),
+      (signal) => {
+        signal?.addEventListener("abort", () => (dropped = true));
+        return loading(signal);
+      },
+    );
+    const got = await egress({ TUNNEL: t }, URL_, { ...alone, fetch: site().get });
+    expect(got.via).toBe("tunnel");
+    expect(dropped).toBe(true);
+    await egress({ TUNNEL: t }, URL_, { ...alone, fetch: site().get });
+    expect(t.checks).toBe(1);
+  });
+
+  it("passes on Cloudflare's own word when it knows the tunnel is down", async () => {
+    const t = tunnel(loading, () => {
+      throw new Error("destination_unavailable");
+    });
+    await expect(egress({ TUNNEL: t }, URL_, { ...alone, fetch: site().get })).rejects.toThrow(
+      "tunnel: destination_unavailable",
+    );
+    await expect(egress({ TUNNEL: t }, URL_, { ...alone, fetch: site().get })).rejects.toThrow(
+      "tunnel: down in the last minute",
+    );
+    expect(t.checks).toBe(1);
+  });
+
+  it("counts a /health that is not the relay's as the relay not answering", async () => {
+    const t = tunnel(loading, () => page("File not found", 404));
+    await expect(egress({ TUNNEL: t }, URL_, { ...alone, fetch: site().get })).rejects.toThrow(
+      "tunnel: cf-tunnel-relay not answering (HTTP 404)",
+    );
+  });
+
+  it("is not written off when only the page was slow, but checks /health again", async () => {
+    let slow = true;
+    const t = tunnel(() => (slow ? timedOut() : relayed("from home")));
+    const got = await egress({ TUNNEL: t }, URL_, { via: ["tunnel", "direct"], fetch: site().get });
+    expect(got.via).toBe("direct");
+    expect(got.skipped).toEqual(["tunnel: no answer within 35s"]);
+    slow = false;
+    const next = await egress({ TUNNEL: t }, URL_, { ...alone, fetch: site().get });
+    expect(next.via).toBe("tunnel");
+    expect(t.checks).toBe(2);
   });
 
   it("says so when it is not bound", async () => {
@@ -251,12 +351,14 @@ describe("the browser", () => {
     const got = await egress({ TUNNEL: t }, URL_, { via: ["browser"], fetch: site().get });
     expect(got.via).toBe("browser");
     expect(await got.response.text()).toBe("rendered");
-    expect(t.seen).toEqual([`http://relay/fetch?url=${encodeURIComponent(URL_)}&mode=browser`]);
+    expect(t.seen).toEqual([
+      `http://cf-tunnel-relay/fetch?url=${encodeURIComponent(URL_)}&mode=browser`,
+    ]);
   });
 
   it("moves on when the relay will not open that domain", async () => {
     const no = "refusing example.org: not in BROWSER_ALLOW_DOMAINS";
-    const t = tunnel(() => page(no, 502, { "x-relay-error": no }));
+    const t = tunnel(() => page(no, 502, { "x-cf-tunnel-relay-error": no }));
     const got = await egress({ TUNNEL: t }, URL_, { via: "browser,direct", fetch: site().get });
     expect(got.via).toBe("direct");
     expect(got.skipped).toEqual([`browser: ${no}`]);

@@ -4,11 +4,13 @@
  * mcp-fetch's requests to it through the VPC Service `wmac` (localhost:8811), and it fetches the
  * URL it is handed from this machine's own connection.
  *
- *   node scripts/tunnel-relay.mjs [port]       default 8811
- *   node scripts/tunnel-relay.mjs login [url]  Chrome in a window, to sign in or pass a check once
+ *   node scripts/cf-tunnel-relay.mjs [port]       default 8811
+ *   node scripts/cf-tunnel-relay.mjs login [url]  Chrome in a window, to sign in or pass a check
  *
  *   ALLOW_DOMAINS=example.org,acnc.gov.au      optional: refuse every other domain
  *   BROWSER_ALLOW_DOMAINS=example.org          browser mode is off for every domain not listed
+ *   CF_TUNNEL_RELAY_CLOUDFLARED=/path/to/cloudflared   also run the tunnel's connector (see THE
+ *                                                      CONNECTOR below)
  *
  *   GET /fetch?url=<absolute url>               the site's answer: status, headers and body
  *   GET /fetch?url=<absolute url>&mode=browser  the same, as Chrome ended up with it
@@ -24,20 +26,28 @@
  * subdomains, checked at every hop as well.
  *
  * BROWSER MODE loads the page in Google Chrome on this Mac, with a profile of its own
- * (~/.tunnel-relay/profile, or RELAY_PROFILE) that keeps cookies between loads: a challenge passed
- * or a sign-in made with `login` holds for later ones. The answer is the rendered HTML, or the raw
- * body of anything that is not HTML. Whoever can call mcp-fetch can read whatever that profile
- * can, so browser mode is refused for every domain not in `BROWSER_ALLOW_DOMAINS` (and
- * `ALLOW_DOMAINS`, when set), where the page starts and wherever it is sent; unset, it is off.
- * What the page loads along the way may come from anywhere public: every connection Chrome makes
- * goes through a proxy inside the relay with the same connect-time check as plain mode. Needs
+ * (~/.cf-tunnel-relay/profile, or CF_TUNNEL_RELAY_PROFILE) that keeps cookies between loads: a
+ * challenge passed or a sign-in made with `login` holds for later ones. The answer is the rendered
+ * HTML, or the raw body of anything that is not HTML. Whoever can call mcp-fetch can read whatever
+ * that profile can, so browser mode is refused for every domain not in `BROWSER_ALLOW_DOMAINS` (and
+ * `ALLOW_DOMAINS`, when set), where the page starts and wherever it is sent; unset, it is off. What
+ * the page loads along the way may come from anywhere public: every connection Chrome makes goes
+ * through a proxy inside the relay with the same connect-time check as plain mode. Needs
  * `npm i playwright-core` next to this file, and Google Chrome or `CHROME_PATH`. Chrome closes
  * after 5 idle minutes; `login` cannot open the profile while it is running.
  *
- * Everything the relay says itself carries `x-relay-error`; a response it passes on carries
- * `x-relay-status`. That is how the Worker tells "the site said 502" from "the relay could not
- * get there". Needs Node 18 or later; plain mode needs nothing from npm.
+ * THE CONNECTOR: with CF_TUNNEL_RELAY_CLOUDFLARED set, which install-cf-tunnel-relay-agent.sh
+ * does, the relay also runs `cloudflared tunnel run` for tunnel `WMac`, so one LaunchAgent keeps
+ * both up and `cloudflared` needs no service of its own. The tunnel token comes from the login
+ * Keychain (item `cf-tunnel-relay`) and reaches cloudflared in TUNNEL_TOKEN: never on a command
+ * line, where `ps` would show it, nor in a file. cloudflared is started again whenever it stops,
+ * after 5 seconds, doubling up to a minute while it keeps failing, and stopped with the relay.
+ *
+ * Everything the relay says itself carries `x-cf-tunnel-relay-error`; a response it passes on
+ * carries `x-cf-tunnel-relay-status`. That is how the Worker tells "the site said 502" from "the
+ * relay could not get there". Needs Node 18 or later; plain mode needs nothing from npm.
  */
+import { execFile, spawn } from "node:child_process";
 import http from "node:http";
 import https from "node:https";
 import { lookup, promises as dns } from "node:dns";
@@ -52,7 +62,8 @@ const MAX_REDIRECTS = 10;
 const TIMEOUT_MS = 30_000;
 const BROWSER_TIMEOUT_MS = 30_000;
 const IDLE_MS = 5 * 60_000;
-const PROFILE = process.env.RELAY_PROFILE || join(homedir(), ".tunnel-relay", "profile");
+const PROFILE =
+  process.env.CF_TUNNEL_RELAY_PROFILE || join(homedir(), ".cf-tunnel-relay", "profile");
 /** Titles of the interstitials that clear themselves given a few seconds. */
 const CHALLENGE = /just a moment|attention required|checking your browser/i;
 
@@ -261,7 +272,7 @@ const startProxy = () =>
 const openChrome = ({ headless }) =>
   (chrome ??= (async () => {
     const { chromium } = await import("playwright-core").catch(() => {
-      throw new Error("browser mode needs `npm i playwright-core` next to tunnel-relay.mjs");
+      throw new Error("browser mode needs `npm i playwright-core` next to cf-tunnel-relay.mjs");
     });
     const ctx = await chromium.launchPersistentContext(PROFILE, {
       ...(process.env.CHROME_PATH
@@ -342,12 +353,12 @@ const browse = async (target) => {
 
 // ─── the server ─────────────────────────────────────────────────────────────────────────────────
 const fail = (out, status, message) => {
-  out.writeHead(status, { "content-type": "text/plain", "x-relay-error": message });
+  out.writeHead(status, { "content-type": "text/plain", "x-cf-tunnel-relay-error": message });
   out.end(message);
 };
 
 const server = async (req, out) => {
-  const url = new URL(req.url ?? "/", "http://relay");
+  const url = new URL(req.url ?? "/", "http://cf-tunnel-relay");
   if (url.pathname === "/health") return out.end("ok");
   if (url.pathname !== "/fetch" || req.method !== "GET") return fail(out, 404, "GET /fetch?url=");
   const target = url.searchParams.get("url");
@@ -361,9 +372,9 @@ const server = async (req, out) => {
       if (!DROP.has(name) && name !== "set-cookie") headers[name] = value;
     }
     Object.assign(headers, {
-      "x-relay-status": String(got.status),
-      "x-relay-final-url": got.finalUrl,
-      "x-relay-mode": mode,
+      "x-cf-tunnel-relay-status": String(got.status),
+      "x-cf-tunnel-relay-final-url": got.finalUrl,
+      "x-cf-tunnel-relay-mode": mode,
     });
     out.writeHead(got.status, headers);
     out.end(got.body);
@@ -375,12 +386,70 @@ const server = async (req, out) => {
   }
 };
 
-// Ctrl+C, and launchd restarting it: close Chrome if it is open, then go.
+// ─── the connector ──────────────────────────────────────────────────────────────────────────────
+const CLOUDFLARED = process.env.CF_TUNNEL_RELAY_CLOUDFLARED;
+const KEYCHAIN_ITEM = "cf-tunnel-relay";
+let connector;
+let stopping = false;
+
+/** The tunnel token, read fresh each start so a replaced one is picked up. */
+const tunnelToken = () =>
+  new Promise((resolve, reject) =>
+    execFile("security", ["find-generic-password", "-s", KEYCHAIN_ITEM, "-w"], (err, out) =>
+      err || !out.trim()
+        ? reject(new Error(`no tunnel token in the Keychain item ${KEYCHAIN_ITEM}`))
+        : resolve(out.trim()),
+    ),
+  );
+
+const runConnector = async (wait = 5_000) => {
+  if (stopping) return;
+  const started = Date.now();
+  // Once it has stayed up a minute, a later stop starts the backoff over.
+  const again = () => {
+    if (stopping) return;
+    const next = Date.now() - started > 60_000 ? 5_000 : Math.min(wait * 2, 60_000);
+    setTimeout(() => runConnector(next), wait);
+  };
+  let token;
+  try {
+    token = await tunnelToken();
+  } catch (e) {
+    console.error(`cloudflared not started: ${e.message}; trying again in ${wait / 1000}s`);
+    return again();
+  }
+  const child = spawn(
+    CLOUDFLARED,
+    ["tunnel", "--no-autoupdate", "--loglevel", "warn", "--grace-period", "2s", "run"],
+    { env: { ...process.env, TUNNEL_TOKEN: token }, stdio: ["ignore", "ignore", "inherit"] },
+  );
+  connector = child;
+  let ended = false;
+  const end = (why) => {
+    if (ended) return;
+    ended = true;
+    connector = undefined;
+    if (!stopping) console.error(`cloudflared ${why}; starting it again in ${wait / 1000}s`);
+    again();
+  };
+  child.on("error", (e) => end(`could not run: ${e.message}`));
+  child.on("exit", (code, signal) => end(`stopped (${signal ?? `exit ${code}`})`));
+};
+
+/** Resolves once cloudflared has gone, after asking it to; at once if it is not running. */
+const stopConnector = () =>
+  new Promise((done) => {
+    stopping = true;
+    if (!connector) return done();
+    connector.once("exit", done);
+    connector.kill("SIGTERM");
+  });
+
+// Ctrl+C, and launchd restarting it: stop cloudflared, close Chrome if it is open, then go.
 for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"]) {
   process.on(signal, () => {
     setTimeout(() => process.exit(0), 3000).unref();
-    (chrome ?? Promise.resolve())
-      .then((c) => c?.close())
+    Promise.all([stopConnector(), (chrome ?? Promise.resolve()).then((c) => c?.close())])
       .catch(() => {})
       .finally(() => process.exit(0));
   });
@@ -405,6 +474,7 @@ if (process.argv[2] === "login") {
     http
       .createServer(server)
       .on("error", (e) => console.log(`not listening on ${host}: ${e.message}`))
-      .listen(PORT, host, () => console.log(`tunnel relay on ${host}:${PORT}`));
+      .listen(PORT, host, () => console.log(`cf-tunnel-relay on ${host}:${PORT}`));
   }
+  if (CLOUDFLARED) runConnector();
 }

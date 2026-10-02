@@ -20,7 +20,9 @@ workers/mcp-ghost/           Ghost publications, with member sign-in for paid po
 workers/mcp-apify/           what Apify is costing you, by service and by Actor
 scripts/mock-wp.mjs          fake WordPress for local testing
 scripts/mock-ghost.mjs       fake Ghost, including the magic-link sign-in
-scripts/tunnel-relay.mjs     runs on the Mac at the far end of the tunnel
+scripts/cf-tunnel-relay.mjs  runs on the Mac at the far end of the tunnel
+scripts/install-cf-tunnel-relay-agent.sh
+                             makes the Mac start cf-tunnel-relay at login and keep it running
 scripts/mock-proxy.mjs       fake Apify Proxy, for the proxy tests
 ```
 
@@ -168,17 +170,52 @@ checked; the body is never read to decide. Any other answer, 404 included, is ke
    Unblocker re-signs HTTPS; if it does, every https URL fails this route with a TLS error.
 3. **tunnel** — a home connection in Australia, only while the Mac is on. `env.TUNNEL` is a VPC
    Service binding (`vpc_services` in `mcp-fetch/wrangler.json`) to the `wmac` service:
-   `localhost:8811` on the Mac behind Cloudflare Tunnel `WMac`. Run `node scripts/tunnel-relay.mjs`
-   there; `ALLOW_DOMAINS=a.org,b.gov.au` limits it to those domains and their subdomains. A tunnel
-   that does not answer within 8 seconds is left alone for a minute, so a sleeping Mac costs one
-   slow request, not every request.
+   `localhost:8811` on the Mac behind Cloudflare Tunnel `WMac`. Run
+   `node scripts/cf-tunnel-relay.mjs` there; `ALLOW_DOMAINS=a.org,b.gov.au` limits it to those
+   domains and their subdomains. Alongside each page the Worker asks the relay's `/health`, which
+   answers at once. If it fails first (no answer within 2 seconds, or Cloudflare saying the tunnel
+   is down), the page is dropped and the tunnel skipped for a minute; if the page answers first,
+   the check is dropped. Either sign of a live Mac is remembered for 30 seconds, and a page that is
+   merely slow costs only that request (the relay gives up on a site after 30 seconds).
 4. **browser** — the same Mac and relay, with the page loaded in Google Chrome there: it waits out
    challenge pages that clear themselves and has whatever sign-ins you made with
-   `node tunnel-relay.mjs login <url>`. Chrome keeps its own profile in `~/.tunnel-relay/profile`.
-   Off unless the relay has `BROWSER_ALLOW_DOMAINS=a.org,b.gov.au`, and refused for every other
-   domain, where the page starts and wherever it is redirected. Every connection Chrome makes goes
-   through a proxy inside the relay with the same private-address check as plain mode. Needs
+   `node cf-tunnel-relay.mjs login <url>`. Chrome keeps its own profile in
+   `~/.cf-tunnel-relay/profile`. Off unless the relay has `BROWSER_ALLOW_DOMAINS=a.org,b.gov.au`,
+   and refused for every other domain, where the page starts and wherever it is redirected. Every
+   connection Chrome makes goes through a proxy inside the relay with the same private-address
+   check as plain mode. Needs
    `npm i playwright-core` next to the relay. Up to 60 seconds a page.
+
+### Setting up the Mac
+
+The tunnel `WMac` and the VPC Service `wmac` live in Cloudflare, so a wiped Mac only needs one
+LaunchAgent back: the relay, which also runs `cloudflared` for `WMac`.
+
+1. Install Node 18 or later and `brew install cloudflared` — the program only, with no
+   `cloudflared service install`; the relay runs it. Clone this repo.
+2. From the clone, `sh scripts/install-cf-tunnel-relay-agent.sh`, with `ALLOW_DOMAINS=…` and
+   `BROWSER_ALLOW_DOMAINS=…` in front if you want them. The first time, it asks for the tunnel
+   token: in the dashboard, Networking -> Tunnels -> `WMac` -> Add a replica, copy the install
+   command, and paste only its long `eyJ…` part. It goes into the login Keychain as the item
+   `cf-tunnel-relay`, and never into a file, a plist or a command line.
+3. It writes `~/Library/LaunchAgents/local.cf-tunnel-relay.plist`, which starts the relay at login
+   and restarts it if it dies, loads it, and checks that `/health` answers. The relay reads the
+   token from the Keychain and starts `cloudflared`, restarting that too if it dies; the dashboard
+   shows `WMac` as Healthy once it has connected.
+4. `sh scripts/install-cf-tunnel-relay-agent.sh off` stops both until `on` or the next login;
+   `--token` asks for a new token. After a `git pull`, restart with
+   `launchctl kickstart -k gui/$(id -u)/local.cf-tunnel-relay`.
+5. For browser mode, `npm i --no-save playwright-core` at the root of the clone (a plain
+   `npm i` would add it to `package.json`), then `node scripts/cf-tunnel-relay.mjs login <url>` for
+   any sign-ins.
+
+A `cloudflared` service installed the usual way (`sudo cloudflared service install <token>`) would
+connect the Mac to `WMac` a second time, and keeps the token in plain text in its plist; the
+installer points it out, and `sudo cloudflared service uninstall` removes it.
+
+Nothing here keeps the Mac awake. The tunnel goes down when the Mac sleeps and comes back when it
+wakes: both programs carry on where they were, and `cloudflared` reconnects. While it is down,
+`mcp-fetch` finds out from `/health` within 2 seconds and skips it for a minute.
 
 The order is `via`: a list, `["tunnel", "unblocker", "direct"]`, or the same as a string,
 `"tunnel,unblocker,direct"`. One route means no fallback, so `["tunnel"]` fails when the Mac is

@@ -4,7 +4,7 @@
  *
  *   unblocker  Apify Proxy's Unblocker, through core/proxy.ts: it deals with bot checks and
  *              CAPTCHAs itself and picks the country. Billed per successful request.
- *   tunnel     the Mac behind Cloudflare Tunnel, via scripts/tunnel-relay.mjs: a home
+ *   tunnel     the Mac behind Cloudflare Tunnel, via scripts/cf-tunnel-relay.mjs: a home
  *              connection in Australia. Only as good as the Mac is awake.
  *   browser    the same Mac, the page loaded in its Chrome: gets past challenges that clear
  *              themselves, and has the sign-ins made there. The relay refuses it for every domain
@@ -101,19 +101,63 @@ class Pass extends Error {}
 
 // ─── tunnel ───────────────────────────────────────────────────────────────────────────────────
 /**
- * How long a tunnel that did not answer is left alone. Without it every fetch while the Mac is
- * asleep would wait out the full timeout before moving on. Per isolate, so it is a hint that
- * costs one slow request per isolate, not a shared switch.
+ * The page and the relay's `/health` are asked for together. `/health` answers at once, so it
+ * tells a Mac that is not there from a site that is slow, which the page alone cannot: the relay
+ * sends nothing back until it has the whole page, so a slow site and a Mac that has just gone to
+ * sleep both look like silence.
+ *
+ * Whichever settles first decides. The page answering means the Mac is there, and the check is
+ * dropped. A failed check — Cloudflare's own `destination_unavailable` at once, silence for
+ * HEALTH_TIMEOUT_MS, or something other than the relay answering — means it is not, and the page
+ * is dropped. A good check leaves the page to take as long as it takes, up to its own timeout,
+ * which then costs that request only.
+ *
+ * Both outcomes are remembered, per isolate, so they are hints that cost one check per isolate,
+ * not shared switches: the Mac missing skips the tunnel for DOWN_FOR_MS, and the Mac there skips
+ * the check for UP_FOR_MS. A page that times out forgets the latter, in case the Mac went to sleep.
  */
+const HEALTH_TIMEOUT_MS = 2_000;
 const DOWN_FOR_MS = 60_000;
-const TUNNEL_TIMEOUT_MS = 8_000;
+const UP_FOR_MS = 30_000;
+/** The relay gives up on a site after 30 seconds and says so; this is for when it cannot. */
+const PAGE_TIMEOUT_MS = 35_000;
 /** Chrome loads the page and waits out a challenge; the relay gives up on its own before this. */
 const BROWSER_TIMEOUT_MS = 60_000;
 let tunnelDownUntil = 0;
+let tunnelUpUntil = 0;
 
 /** For tests, which would otherwise inherit one another's outage. */
 export const resetTunnel = () => {
   tunnelDownUntil = 0;
+  tunnelUpUntil = 0;
+};
+
+const tunnelDown = (route: string, why: string) => {
+  tunnelDownUntil = Date.now() + DOWN_FOR_MS;
+  tunnelUpUntil = 0;
+  return new Pass(`${route}: ${why}`);
+};
+
+const isTimeout = (e: unknown) => e instanceof Error && e.name === "TimeoutError";
+const message = (e: unknown) => (e instanceof Error ? e.message : String(e));
+
+/** Why cf-tunnel-relay is not there to ask, or nothing if it is. Never throws. */
+const unhealthy = async (tunnel: Fetcher, stop: AbortSignal): Promise<string | undefined> => {
+  try {
+    // The VPC Service fixes host and port (localhost:8811 on the Mac); only the path matters.
+    const res = await tunnel.fetch("http://cf-tunnel-relay/health", {
+      signal: AbortSignal.any([stop, AbortSignal.timeout(HEALTH_TIMEOUT_MS)]),
+    });
+    // Anything else is not the relay: a 5xx is cloudflared finding nothing listening on the
+    // port, and a 404 some other program on it (`python -m http.server` answers every URL so).
+    if (res.ok && (await res.text()).trim() === "ok") return undefined;
+    await res.body?.cancel();
+    return `cf-tunnel-relay not answering (HTTP ${res.status})`;
+  } catch (e) {
+    return isTimeout(e)
+      ? `cf-tunnel-relay did not answer /health within ${HEALTH_TIMEOUT_MS / 1000}s`
+      : message(e);
+  }
 };
 
 const viaTunnel = async (
@@ -124,29 +168,49 @@ const viaTunnel = async (
 ) => {
   if (Date.now() < tunnelDownUntil) throw new Pass(`${route}: down in the last minute`);
   const browser = route === "browser";
+  const timeout = browser ? BROWSER_TIMEOUT_MS : PAGE_TIMEOUT_MS;
+  // Two switches, since dropping the check must not cut off a page already being read.
+  const dropPage = new AbortController();
+  const dropCheck = new AbortController();
+  const mode = browser ? "&mode=browser" : "";
+  const page = tunnel.fetch(`http://cf-tunnel-relay/fetch?url=${encodeURIComponent(url)}${mode}`, {
+    headers,
+    signal: AbortSignal.any([dropPage.signal, AbortSignal.timeout(timeout)]),
+  });
   let res: Response;
   try {
-    // The VPC Service fixes host and port (localhost:8811 on the Mac); only the path matters.
-    const mode = browser ? "&mode=browser" : "";
-    res = await tunnel.fetch(`http://relay/fetch?url=${encodeURIComponent(url)}${mode}`, {
-      headers,
-      signal: AbortSignal.timeout(browser ? BROWSER_TIMEOUT_MS : TUNNEL_TIMEOUT_MS),
-    });
+    if (Date.now() >= tunnelUpUntil) {
+      const first = await Promise.race([
+        page.then((r) => ({ page: r })),
+        unhealthy(tunnel, dropCheck.signal).then((why) => ({ why })),
+      ]);
+      if ("why" in first && first.why) {
+        dropPage.abort();
+        page.catch(() => {});
+        throw tunnelDown(route, first.why);
+      }
+      dropCheck.abort();
+    }
+    res = await page;
   } catch (e) {
-    // A page slow to load in Chrome says nothing about whether the Mac is there.
-    const slowPage = browser && e instanceof Error && e.name === "TimeoutError";
-    if (!slowPage) tunnelDownUntil = Date.now() + DOWN_FOR_MS;
-    throw new Pass(`${route}: ${e instanceof Error ? e.message : String(e)}`);
+    dropCheck.abort();
+    if (e instanceof Pass) throw e;
+    // The Mac was there a moment ago, so a timeout is most likely the site. Check again next time.
+    if (isTimeout(e)) {
+      tunnelUpUntil = 0;
+      throw new Pass(`${route}: no answer within ${timeout / 1000}s`);
+    }
+    throw tunnelDown(route, message(e));
   }
-  // The relay marks everything it says itself. An unmarked answer is not the relay: a 5xx is
-  // cloudflared finding nothing listening on the port, and anything else is some other program
-  // on it (`python -m http.server` answers every URL with a 404). The Mac is up, the relay is not.
-  const relayError = res.headers.get("x-relay-error");
+  // The relay marks everything it says itself, so an unmarked answer is not the relay.
+  const relayError = res.headers.get("x-cf-tunnel-relay-error");
+  if (!relayError && !res.headers.has("x-cf-tunnel-relay-status")) {
+    await res.body?.cancel();
+    throw tunnelDown(route, `cf-tunnel-relay not answering (HTTP ${res.status})`);
+  }
+  // Either way the relay answered, so the Mac is there.
+  tunnelUpUntil = Date.now() + UP_FOR_MS;
   if (relayError) throw new Pass(`${route}: ${relayError}`);
-  if (!res.headers.has("x-relay-status")) {
-    tunnelDownUntil = Date.now() + DOWN_FOR_MS;
-    throw new Pass(`${route}: relay not answering (HTTP ${res.status})`);
-  }
   return res;
 };
 
