@@ -21,7 +21,7 @@ workers/mcp-apify/           what Apify is costing you, by service and by Actor
 scripts/mock-wp.mjs          fake WordPress for local testing
 scripts/mock-ghost.mjs       fake Ghost, including the magic-link sign-in
 scripts/cf-tunnel-relay.mjs  runs on the Mac at the far end of the tunnel
-scripts/install-cf-tunnel-relay-agent.sh
+scripts/cf-tunnel-relay-agent.sh
                              makes the Mac start cf-tunnel-relay at login and keep it running
 scripts/mock-proxy.mjs       fake Apify Proxy, for the proxy tests
 ```
@@ -184,16 +184,17 @@ checked; the body is never read to decide. Any other answer, 404 included, is ke
    and refused for every other domain, where the page starts and wherever it is redirected. Every
    connection Chrome makes goes through a proxy inside the relay with the same private-address
    check as plain mode. Needs
-   `npm i playwright-core` next to the relay. Up to 60 seconds a page.
+   playwright-core, which `npm install` at the root of the clone brings, and Node 20 or later. Up to
+   60 seconds a page.
 
 ### Setting up the Mac
 
 The tunnel `WMac` and the VPC Service `wmac` live in Cloudflare, so a wiped Mac only needs one
 LaunchAgent back: the relay, which also runs `cloudflared` for `WMac`.
 
-1. Install Node 18 or later and `brew install cloudflared` — the program only, with no
+1. Install Node 18 or later (20 for browser mode) and `brew install cloudflared` — the program only, with no
    `cloudflared service install`; the relay runs it. Clone this repo.
-2. From the clone, `sh scripts/install-cf-tunnel-relay-agent.sh`, with `ALLOW_DOMAINS=…` and
+2. From the clone, `sh scripts/cf-tunnel-relay-agent.sh`, with `ALLOW_DOMAINS=…` and
    `BROWSER_ALLOW_DOMAINS=…` in front if you want them. The first time, it asks for the tunnel
    token: in the dashboard, Networking -> Tunnels -> `WMac` -> Add a replica, copy the install
    command, and paste only its long `eyJ…` part. It goes into the login Keychain as the item
@@ -203,12 +204,12 @@ LaunchAgent back: the relay, which also runs `cloudflared` for `WMac`.
    `cloudflared`, restarting that too if it dies. The installer waits until `/health` answers and
    `cloudflared` reports a live connection to Cloudflare (its metrics, on `127.0.0.1:8812`), and
    shows the end of `/tmp/cf-tunnel-relay.err` if either does not happen.
-4. `sh scripts/install-cf-tunnel-relay-agent.sh off` stops both until `on` or the next login;
+4. `sh scripts/cf-tunnel-relay-agent.sh off` stops both until `on` or the next login;
    `--token` asks for a new token. After a `git pull`, restart with
    `launchctl kickstart -k gui/$(id -u)/local.cf-tunnel-relay`.
-5. For browser mode, `npm i --no-save playwright-core` at the root of the clone (a plain
-   `npm i` would add it to `package.json`), then `node scripts/cf-tunnel-relay.mjs login <url>` for
-   any sign-ins.
+5. For browser mode, `npm install` at the root of the clone (it brings playwright-core) and Google
+   Chrome (`brew install --cask google-chrome`, or `CHROME_PATH` set to another Chromium browser's
+   executable); then `node scripts/cf-tunnel-relay.mjs login <url>` for any sign-ins.
 
 A `cloudflared` service installed the usual way (`sudo cloudflared service install <token>`) would
 connect the Mac to `WMac` a second time, and keeps the token in plain text in its plist; the

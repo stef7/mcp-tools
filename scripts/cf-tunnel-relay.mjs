@@ -33,10 +33,11 @@
  * `ALLOW_DOMAINS`, when set), where the page starts and wherever it is sent; unset, it is off. What
  * the page loads along the way may come from anywhere public: every connection Chrome makes goes
  * through a proxy inside the relay with the same connect-time check as plain mode. Needs
- * `npm i playwright-core` next to this file, and Google Chrome or `CHROME_PATH`. Chrome closes
+ * playwright-core (a devDependency of this repo, so `npm install` at its root; Node 20 or later),
+ * and Google Chrome or `CHROME_PATH`. Chrome closes
  * after 5 idle minutes; `login` cannot open the profile while it is running.
  *
- * THE CONNECTOR: with CF_TUNNEL_RELAY_CLOUDFLARED set, which install-cf-tunnel-relay-agent.sh
+ * THE CONNECTOR: with CF_TUNNEL_RELAY_CLOUDFLARED set, which cf-tunnel-relay-agent.sh
  * does, the relay also runs `cloudflared tunnel run` for tunnel `WMac`, so one LaunchAgent keeps
  * both up and `cloudflared` needs no service of its own. The tunnel token comes from the login
  * Keychain (item `cf-tunnel-relay`) and reaches cloudflared in TUNNEL_TOKEN: never on a command
@@ -274,7 +275,7 @@ const startProxy = () =>
 const openChrome = ({ headless }) =>
   (chrome ??= (async () => {
     const { chromium } = await import("playwright-core").catch(() => {
-      throw new Error("browser mode needs `npm i playwright-core` next to cf-tunnel-relay.mjs");
+      throw new Error("browser mode needs playwright-core: `npm install` at the root of the repo");
     });
     const ctx = await chromium.launchPersistentContext(PROFILE, {
       ...(process.env.CHROME_PATH
@@ -297,6 +298,12 @@ const openChrome = ({ headless }) =>
     return ctx;
   })().catch((e) => {
     chrome = undefined;
+    if (/is not found at|executable doesn't exist/i.test(e.message ?? "")) {
+      throw new Error(
+        "browser mode needs Google Chrome (brew install --cask google-chrome), or CHROME_PATH " +
+          "set to another Chromium browser's executable",
+      );
+    }
     throw e;
   }));
 
@@ -429,10 +436,10 @@ const runConnector = async (wait = 5_000) => {
       "warn",
       "--grace-period",
       "2s",
-      // Shown in place of the Mac's hostname against this connector, as custom:cf-tunnel-relay.mjs.
+      // Shown in place of the Mac's hostname against this connector, as custom:cf-tunnel-relay.
       "--label",
-      "cf-tunnel-relay.mjs",
-      // Fixed, so install-cf-tunnel-relay-agent.sh knows where to ask whether it has connected.
+      "cf-tunnel-relay",
+      // Fixed, so cf-tunnel-relay-agent.sh knows where to ask whether it has connected.
       "--metrics",
       "127.0.0.1:8812",
       "run",

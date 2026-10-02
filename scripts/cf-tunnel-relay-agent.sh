@@ -4,12 +4,12 @@
 # (KeepAlive). Run it from wherever the repo is cloned; run it again after moving the clone,
 # changing Node or cloudflared, or changing the lists, and it replaces the agent each time.
 #
-#   sh scripts/install-cf-tunnel-relay-agent.sh            install, or reinstall
-#   sh scripts/install-cf-tunnel-relay-agent.sh --token    ...asking for a new tunnel token first
-#   sh scripts/install-cf-tunnel-relay-agent.sh off        stop both until `on` or the next login
-#   sh scripts/install-cf-tunnel-relay-agent.sh on         start them again
+#   sh scripts/cf-tunnel-relay-agent.sh            install, or reinstall
+#   sh scripts/cf-tunnel-relay-agent.sh --token    ...asking for a new tunnel token first
+#   sh scripts/cf-tunnel-relay-agent.sh off        stop both until `on` or the next login
+#   sh scripts/cf-tunnel-relay-agent.sh on         start them again
 #
-#   ALLOW_DOMAINS=a.org BROWSER_ALLOW_DOMAINS=b.gov.au sh scripts/install-cf-tunnel-relay-agent.sh
+#   ALLOW_DOMAINS=a.org BROWSER_ALLOW_DOMAINS=b.gov.au sh scripts/cf-tunnel-relay-agent.sh
 #
 # The tunnel token is asked for the first time, checked to be a whole one, and kept in the login
 # Keychain as the item `cf-tunnel-relay`, without ever appearing on a command line. The relay reads
