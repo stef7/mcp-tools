@@ -5,7 +5,7 @@ Cloudflare Workers that speak MCP, in one TypeScript repo.
 ```
 core/mcp.ts                  shared plumbing: HTTP MCP endpoint + RPC surface + tool typing
 core/web.ts                  what a worker touching the open web needs: stripHtml, a browser UA
-core/egress.ts               plain fetch / unblocker / tunnel, in the order you pick; for mcp-fetch
+core/egress.ts               smart / tunnel / browser in the order you pick, then a plain fetch
 core/proxy.ts                fetch through an HTTP proxy over a raw socket (CONNECT + TLS)
 core/apify-ca.ts             the key Apify's Unblocker re-signs HTTPS with, for core/proxy.ts
 core/vendor/subtls.mjs       TLS 1.3 in JavaScript (jawj/subtls), built by scripts/vendor-subtls.mjs
@@ -162,11 +162,15 @@ keeps plain variables too, so `WP_SITES` survives a deploy).
 you name them. It moves to the next when a route cannot connect, or when the answer is a block:
 status 403, 429, 451 or 503, or a challenge header — Cloudflare's `cf-mitigated: challenge`, or
 AWS WAF's `x-amzn-waf-action: challenge` (sent as a 202) or `captcha` (a 405). Only headers are
-checked; the body is never read to decide. Any other answer, 404 included, is kept. If every route is blocked, the last blocked answer comes back.
+checked; the body is never read to decide. Any other answer, 404 included, is kept.
 
-1. **direct** — the worker's own `fetch`, from a Cloudflare colo. Free.
-2. **unblocker** — Apify Proxy's `UNBLOCKER` group, through `core/proxy.ts`. It handles bot checks
-   and CAPTCHAs and picks the country itself; none is pinned, since Apify says that weakens it. A
+After the named routes comes the **fallback**: the worker's own `fetch`, from a Cloudflare colo.
+It is free, always there and has no name, and its answer stands, whatever it is. Only if it cannot
+connect at all does the last blocked answer from a named route come back instead.
+
+1. **smart** (the default) — Apify Proxy's `UNBLOCKER` group, through `core/proxy.ts`. It routes
+   each request to get the page, usually through a proxy, dealing with bot checks and CAPTCHAs
+   itself, and picks the country; none is pinned, since Apify says that weakens it. A
    Worker's `fetch` cannot use an HTTP proxy, so this opens a TCP socket to `proxy.apify.com:8000`
    and sends `CONNECT`. Needs `APIFY_PROXY_PASSWORD` on `mcp-fetch` — the password on Apify
    Console -> Proxy, not an API token — and a paid Apify plan. Billed per successful request. Any
@@ -194,7 +198,7 @@ checked; the body is never read to decide. Any other answer, 404 included, is ke
    python3 scripts/apify-trust-anchor.py a.pem b.pem  # prints the new certificate
    ```
 
-3. **tunnel** — a home connection in Australia, only while the Mac is on. `env.TUNNEL` is a VPC
+2. **tunnel** — a home connection in Australia, only while the Mac is on. `env.TUNNEL` is a VPC
    Service binding (`vpc_services` in `mcp-fetch/wrangler.json`) to the `wmac` service:
    `localhost:8811` on the Mac behind Cloudflare Tunnel `WMac`. Run
    `node scripts/cf-tunnel-relay.mjs` there; `ALLOW_DOMAINS=a.org,b.gov.au` limits it to those
@@ -203,7 +207,7 @@ checked; the body is never read to decide. Any other answer, 404 included, is ke
    is down), the page is dropped and the tunnel skipped for a minute; if the page answers first,
    the check is dropped. Either sign of a live Mac is remembered for 30 seconds, and a page that is
    merely slow costs only that request (the relay gives up on a site after 30 seconds).
-4. **browser** — the same Mac and relay, with the page loaded in Brave there: it waits out
+3. **browser** — the same Mac and relay, with the page loaded in Brave there: it waits out
    challenge pages that clear themselves and has whatever sign-ins you made with
    `node cf-tunnel-relay.mjs login <url>`. The browser keeps its own profile in
    `~/.cf-tunnel-relay/profile`. Off unless the relay has `BROWSER_ALLOW_DOMAINS=a.org,b.gov.au`,
@@ -244,11 +248,10 @@ Nothing here keeps the Mac awake. The tunnel goes down when the Mac sleeps and c
 wakes: both programs carry on where they were, and `cloudflared` reconnects. While it is down,
 `mcp-fetch` finds out from `/health` within 2 seconds and skips it for a minute.
 
-The order is `via`: a list, `["tunnel", "unblocker", "direct"]`, or the same as a string,
-`"tunnel,unblocker,direct"`. One route means no fallback, so `["tunnel"]` fails when the Mac is
-off. Unset, it is `EGRESS_VIA` on `mcp-fetch` (a plain-text variable, same format), and failing
-that `direct,unblocker`: free first, paid only when turned away. An unknown name is an error, not
-skipped.
+The order is `via`: a list, `["tunnel", "smart"]`, or the same as a string, `"tunnel,smart"`.
+The fallback always follows, so `["tunnel"]` with the Mac off gets Cloudflare's own fetch. Unset,
+it is `EGRESS_VIA` on `mcp-fetch` (a plain-text variable, same format), and failing that `smart`.
+An unknown name is an error, not skipped.
 
 `fetch_url` records which route served each URL, and why earlier ones were skipped, in
 `docs.meta_json`.
@@ -256,7 +259,7 @@ skipped.
 Any other worker can use the same routes without holding the tunnel or the password: bind
 `{ "binding": "FETCH", "service": "mcp-fetch" }` and call
 `await env.FETCH.egress(url, { headers, via })`. It returns the site's `Response` with
-`x-egress-via` and `x-egress-skipped` headers.
+`x-egress-via` (`fallback` for Cloudflare's own fetch) and `x-egress-skipped` headers.
 
 Binding a VPC Service needs the **Connectivity Directory Bind** role on whoever deploys, so the
 `CLOUDFLARE_API_TOKEN` in Actions needs it too, or the `mcp-fetch` deploy fails.

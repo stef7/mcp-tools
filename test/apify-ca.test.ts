@@ -51,7 +51,7 @@ const p1363 = (sig: Uint8Array) => {
 
 const hex = (b: Uint8Array) => [...b].map((x) => x.toString(16).padStart(2, "0")).join("");
 
-describe("the Apify Proxy CA trusted by the unblocker route", () => {
+describe("the Apify Proxy CA trusted by the smart route", () => {
   const anchor = parse(APIFY_PROXY_CA);
   const spki = anchor.fields[6]!.all;
 

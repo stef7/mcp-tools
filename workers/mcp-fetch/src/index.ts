@@ -5,9 +5,9 @@
  * you name a URL and a format, you get that URL in that format. Everything fetched is kept, so
  * `search` can look across whatever you have fetched before without going back to the network.
  *
- * Every download goes out through core/egress.ts — by default Cloudflare itself, then Apify's
- * Unblocker if the site blocks it; `via` picks the routes and their order — and `egress` offers the same to
- * other workers.
+ * Every download goes out through core/egress.ts — by default the smart route (Apify's
+ * Unblocker), then Cloudflare itself as the fallback; `via` picks the routes and their order — and
+ * `egress` offers the same to other workers.
  *
  * Storage (unchanged from the previous version, so existing cached documents still work):
  *   KV  raw:<url>   the original bytes, forever — re-formatting never re-downloads
@@ -269,12 +269,12 @@ const Tools = mcpWorker({
             items: { type: "string", enum: [...ROUTES] },
             description:
               "Routes to try, in order. The next is tried when one cannot connect or the site " +
-              "answers 403, 429, 451 or 503 or with a challenge header. `direct`: Cloudflare's " +
-              "own fetch. `unblocker`: gets past bot checks and CAPTCHAs, paid per page. " +
-              "`tunnel`: an Australian home connection, only while that Mac is on. `browser`: " +
-              "the same Mac's browser (Brave), for challenge pages and sign-ins, only for domains the " +
-              "Mac allows. One route " +
-              'means no fallback. Default ["direct", "unblocker"].',
+              "answers 403, 429, 451 or 503 or with a challenge header; after the last, a plain " +
+              "fetch from Cloudflare is the fallback, and its answer stands. `smart`: routes each " +
+              "request to get the page, usually through a proxy; paid per page. `tunnel`: an " +
+              "Australian home connection, only while that Mac is on. `browser`: the same " +
+              "Mac's browser (Brave), for challenge pages and sign-ins, only for domains the Mac " +
+              'allows. Default ["smart"].',
           },
         },
       },
@@ -437,9 +437,10 @@ const Tools = mcpWorker({
 
 /**
  * The same routes for any worker that binds this one — `{ "binding": "FETCH", "service":
- * "mcp-fetch" }` — and calls `await env.FETCH.egress(url, { via: ["tunnel", "direct"] })`. It
+ * "mcp-fetch" }` — and calls `await env.FETCH.egress(url, { via: ["tunnel", "smart"] })`. It
  * gets the site's Response back, uncached and untouched, with `x-egress-via` saying which route
- * served it and `x-egress-skipped` why the ones before it did not. The tunnel, the proxy password
+ * served it (`fallback` for Cloudflare's own fetch) and `x-egress-skipped` why the ones before it
+ * did not. The tunnel, the proxy password
  * and the cost of both stay here.
  */
 export default class extends Tools {

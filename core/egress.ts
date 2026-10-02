@@ -2,35 +2,40 @@
  * Getting a URL off the open web past whatever blocks a Cloudflare IP, through whichever routes
  * the caller names, in the order it names them:
  *
- *   unblocker  Apify Proxy's Unblocker, through core/proxy.ts: it deals with bot checks and
- *              CAPTCHAs itself and picks the country. Billed per successful request.
+ *   smart      Apify Proxy's Unblocker, through core/proxy.ts: it routes each request to get
+ *              past bot checks, CAPTCHAs and geo-blocks, usually through a proxy, and picks the
+ *              country itself. Billed per page.
  *   tunnel     the Mac behind Cloudflare Tunnel, via scripts/cf-tunnel-relay.mjs: a home
  *              connection in Australia. Only as good as the Mac is awake.
  *   browser    the same Mac, the page loaded in its browser (Brave): gets past challenges that clear
  *              themselves, and has the sign-ins made there. The relay refuses it for every domain
  *              it has not been told to allow.
- *   direct     the worker's own `fetch`, from whichever Cloudflare colo ran it. Always there.
  *
- * `via` is that order: `["tunnel", "unblocker", "direct"]`, or the same as a comma-separated
- * string. One name means that route and no fallback. Unset, it is the worker's `EGRESS_VIA`, and
- * failing that `direct,unblocker`: free first, paid only when the free one was turned away.
+ * Whatever they cannot get, the fallback is tried last: the worker's own `fetch`, from whichever
+ * Cloudflare colo ran it. It is always there and has no name, and its answer stands, whatever it
+ * is. Only if it cannot connect at all does the last blocked answer from a named route come back
+ * instead, and failing that an error.
+ *
+ * `via` is the order of the named routes: `["tunnel", "smart"]`, or the same as a comma-separated
+ * string. Unset, it is the worker's `EGRESS_VIA`, and failing that `smart`.
  *
  * The next route is tried when one cannot get an answer at all, or when the answer is one of
- * `blockedBy` — a status a bot check or geo-block hands out, or a challenge header. Any other answer, a 404 included, is
- * the site speaking and is returned. If every route is blocked, the last blocked answer is
- * returned rather than an error, since it is still what the site said. What was passed over comes
- * back in `skipped`, so a caller can see that the unblocker was paid for because Cloudflare got a
- * 403. The unblocker alone also tries once more on any error status before its answer stands;
- * that goes in `skipped` too.
+ * `blockedBy` — a status a bot check or geo-block hands out, or a challenge header. Any other
+ * answer, a 404 included, is the site speaking and is returned. What was passed over comes back in
+ * `skipped`, so a caller can see why the fallback answered. The smart route also tries once more
+ * on any error status before its answer stands; that goes in `skipped` too.
  */
 
 import { APIFY_PROXY_CA } from "./apify-ca";
 import { ProxyError, proxyFetch, type ProxyFetchOptions } from "./proxy";
 
-export const ROUTES = ["unblocker", "tunnel", "browser", "direct"] as const;
+export const ROUTES = ["smart", "tunnel", "browser"] as const;
 export type Route = (typeof ROUTES)[number];
 
-export const DEFAULT_VIA: readonly Route[] = ["direct", "unblocker"];
+export const DEFAULT_VIA: readonly Route[] = ["smart"];
+
+/** What answered: a named route, or the worker's own fetch after them. */
+export type Answered = Route | "fallback";
 
 /**
  * Answers that mean "not you", not "not here": 403 and 429 from bot checks and rate limits, 451
@@ -56,7 +61,7 @@ export const blockedBy = (res: Response): string | undefined => {
   return undefined;
 };
 
-/** Routes in order, as a list or as `"tunnel,unblocker"`. */
+/** Routes in order, as a list or as `"tunnel,smart"`. */
 export type Via = string | readonly string[];
 
 /**
@@ -82,7 +87,7 @@ type Fetcher = { fetch(input: string, init?: RequestInit): Promise<Response> };
 export type EgressEnv = {
   TUNNEL?: Fetcher;
   APIFY_PROXY_PASSWORD?: string;
-  /** This worker's default order, e.g. "tunnel,unblocker,direct". */
+  /** This worker's default order, e.g. "tunnel,smart". */
   EGRESS_VIA?: string;
 };
 
@@ -90,15 +95,15 @@ export type EgressOptions = {
   headers?: Record<string, string>;
   /** Routes to try, in order; see the top of this file. */
   via?: Via;
-  /** The direct route's fetch; tests replace it. */
+  /** The fallback's fetch; tests replace it. */
   fetch?: typeof fetch;
-  /** The proxy route's TCP connect; tests replace it. */
+  /** The smart route's TCP connect; tests replace it. */
   connect?: ProxyFetchOptions["connect"];
-  /** The certificate the unblocker route trusts; tests replace it. */
+  /** The certificate the smart route trusts; tests replace it. */
   trust?: string;
 };
 
-export type Egress = { response: Response; via: Route; skipped: string[] };
+export type Egress = { response: Response; via: Answered; skipped: string[] };
 
 /** A route that could not serve this URL, and why, in words that go straight into `skipped`. */
 class Pass extends Error {}
@@ -218,10 +223,11 @@ const viaTunnel = async (
   return res;
 };
 
-// ─── unblocker ────────────────────────────────────────────────────────────────────────────────────
+// ─── smart ────────────────────────────────────────────────────────────────────────────────────
 /**
- * Apify Proxy's Unblocker. The group rides in the username; the password is the proxy password
- * from Apify Console -> Proxy, not the API token. External connections need a paid Apify plan.
+ * The smart route is Apify Proxy's Unblocker. The group rides in the username; the password is
+ * the proxy password from Apify Console -> Proxy, not the API token. External connections need a
+ * paid Apify plan.
  *
  * No country: Apify says pinning one "can reduce how effectively Unblocker bypasses anti-bot
  * protection", and getting past the block is the point. The tunnel is the Australian route.
@@ -232,17 +238,17 @@ const viaTunnel = async (
 const APIFY_PROXY = { hostname: "proxy.apify.com", port: 8000, username: "groups-UNBLOCKER" };
 
 /** What a failed attempt through Unblocker goes into `skipped` as. */
-const unblockerPass = (e: unknown) => {
+const smartPass = (e: unknown) => {
   // Apify does not document what it answers once Unblocker units run out, so every refusal
   // moves on; the status says which it was.
   if (e instanceof ProxyError && e.status === 407)
-    return new Pass("unblocker: refused (407): wrong password, or no paid plan or units left");
+    return new Pass("smart: refused (407): wrong password, or no paid plan or units left");
   const message = e instanceof Error ? e.message : String(e);
   // subtls's words for a certificate that does not lead to the one trusted.
   const cert = /trusted root|certificate|subjectAltName/i.test(message)
     ? " (if every https URL fails like this, Apify may have changed its signing key: see core/apify-ca.ts)"
     : "";
-  return new Pass(`unblocker: ${message}${cert}`);
+  return new Pass(`smart: ${message}${cert}`);
 };
 
 /**
@@ -252,12 +258,7 @@ const unblockerPass = (e: unknown) => {
  * the password or the units will not change in a second, nor is a failure with no code (TLS, a
  * timeout, a dropped connection). A retry is noted in `notes`, which is `skipped`.
  */
-const viaUnblocker = async (
-  password: string,
-  url: string,
-  opts: EgressOptions,
-  notes: string[],
-) => {
+const viaSmart = async (password: string, url: string, opts: EgressOptions, notes: string[]) => {
   const attempt = () =>
     proxyFetch({ ...APIFY_PROXY, password }, url, {
       ...(opts.headers && { headers: opts.headers }),
@@ -271,15 +272,15 @@ const viaUnblocker = async (
     first = await attempt();
     if (first.status < 400) return first;
   } catch (e) {
-    if (!(e instanceof ProxyError) || e.status === 407) throw unblockerPass(e);
-    notes.push(`${unblockerPass(e).message}; tried again`);
+    if (!(e instanceof ProxyError) || e.status === 407) throw smartPass(e);
+    notes.push(`${smartPass(e).message}; tried again`);
     try {
       return await attempt();
     } catch (again) {
-      throw unblockerPass(again);
+      throw smartPass(again);
     }
   }
-  notes.push(`unblocker: HTTP ${first.status}; tried again`);
+  notes.push(`smart: HTTP ${first.status}; tried again`);
   try {
     const second = await attempt();
     await first.body?.cancel();
@@ -300,17 +301,13 @@ export const egress = async (
   const get = opts.fetch ?? fetch;
   const skipped: string[] = [];
   const routes: Record<Route, (() => Promise<Response>) | string> = {
+    smart: env.APIFY_PROXY_PASSWORD
+      ? () => viaSmart(env.APIFY_PROXY_PASSWORD!, url, opts, skipped)
+      : "smart: no APIFY_PROXY_PASSWORD",
     tunnel: env.TUNNEL ? () => viaTunnel(env.TUNNEL!, url, headers) : "tunnel: not bound",
     browser: env.TUNNEL
       ? () => viaTunnel(env.TUNNEL!, url, headers, "browser")
       : "browser: not bound",
-    unblocker: env.APIFY_PROXY_PASSWORD
-      ? () => viaUnblocker(env.APIFY_PROXY_PASSWORD!, url, opts, skipped)
-      : "unblocker: no APIFY_PROXY_PASSWORD",
-    direct: () =>
-      get(url, { headers }).catch((e: unknown) => {
-        throw new Pass(`direct: ${e instanceof Error ? e.message : String(e)}`);
-      }),
   };
   /** The latest blocked answer, and where its note sits in `skipped`. */
   let blocked: { response: Response; via: Route; at: number } | undefined;
@@ -330,15 +327,21 @@ export const egress = async (
     }
     const why = blockedBy(response);
     if (!why) return { response, via, skipped };
-    // Kept, not read: the next route may do better, and if none does this is the answer.
+    // Kept, not read: the fallback is next, and if it cannot connect this is the answer.
     await blocked?.response.body?.cancel();
     blocked = { response, via, at: skipped.length };
     skipped.push(`${via}: ${why}`);
   }
-  if (blocked) {
+  let response: Response;
+  try {
+    response = await get(url, { headers });
+  } catch (e) {
+    skipped.push(`fallback: ${e instanceof Error ? e.message : String(e)}`);
+    if (!blocked) throw new Error(`No route could fetch ${url}: ${skipped.join("; ")}`);
     // Its note describes the very answer being returned, so it was not skipped.
     skipped.splice(blocked.at, 1);
     return { response: blocked.response, via: blocked.via, skipped };
   }
-  throw new Error(`No route could fetch ${url}: ${skipped.join("; ")}`);
+  await blocked?.response.body?.cancel();
+  return { response, via: "fallback", skipped };
 };
