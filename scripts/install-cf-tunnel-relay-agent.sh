@@ -65,13 +65,21 @@ CLOUDFLARED="$(command -v cloudflared)" || {
   exit 1
 }
 
-# A cloudflared service of its own would connect the Mac to WMac a second time, and keeps the token
-# in its plist in plain text.
+# A cloudflared service of its own would connect the Mac to WMac a second time, or keep failing in
+# the background; the one `cloudflared service install` makes keeps the token in plain text too.
 for old in /Library/LaunchDaemons/com.cloudflare.cloudflared.plist \
   "$HOME/Library/LaunchAgents/com.cloudflare.cloudflared.plist"; do
   if [ -f "$old" ]; then
     echo "note: $old is a separate cloudflared service; remove it with" \
       "\`sudo cloudflared service uninstall\` (no sudo for the one in your home folder)" >&2
+  fi
+done
+for old in /Library/LaunchDaemons/homebrew.mxcl.cloudflared.plist \
+  "$HOME/Library/LaunchAgents/homebrew.mxcl.cloudflared.plist" \
+  /Library/LaunchDaemons/sh.brew.cloudflared.plist "$HOME/Library/LaunchAgents/sh.brew.cloudflared.plist"; do
+  if [ -f "$old" ]; then
+    echo "note: $old is Homebrew's cloudflared service; remove it with" \
+      "\`brew services stop cloudflared\` (with sudo for one in /Library)" >&2
   fi
 done
 

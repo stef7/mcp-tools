@@ -429,6 +429,9 @@ const runConnector = async (wait = 5_000) => {
       "warn",
       "--grace-period",
       "2s",
+      // Shown in place of the Mac's hostname against this connector, as custom:cf-tunnel-relay.mjs.
+      "--label",
+      "cf-tunnel-relay.mjs",
       // Fixed, so install-cf-tunnel-relay-agent.sh knows where to ask whether it has connected.
       "--metrics",
       "127.0.0.1:8812",
