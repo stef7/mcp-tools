@@ -21,6 +21,7 @@ workers/mcp-apify/           what Apify is costing you, by service and by Actor
 scripts/mock-wp.mjs          fake WordPress for local testing
 scripts/mock-ghost.mjs       fake Ghost, including the magic-link sign-in
 scripts/tunnel-relay.mjs     runs on the Mac at the far end of the tunnel
+scripts/install-relay-agent.sh  makes the Mac start the relay at login and keep it running
 scripts/mock-proxy.mjs       fake Apify Proxy, for the proxy tests
 ```
 
@@ -179,6 +180,26 @@ checked; the body is never read to decide. Any other answer, 404 included, is ke
    domain, where the page starts and wherever it is redirected. Every connection Chrome makes goes
    through a proxy inside the relay with the same private-address check as plain mode. Needs
    `npm i playwright-core` next to the relay. Up to 60 seconds a page.
+
+### Setting up the Mac
+
+The tunnel `WMac` and the VPC Service `wmac` live in Cloudflare, so a wiped Mac only needs its
+two programs back: the connector, and the relay it hands requests to.
+
+1. Install Node 18 or later and `cloudflared`, and clone this repo.
+2. Connect the Mac to `WMac`: in the dashboard, Networking -> Tunnels -> `WMac` -> Add a replica,
+   copy the install command, and run it — `sudo cloudflared service install <token>`, which starts
+   it at every boot. The token is a credential: it stays out of this repo.
+3. From the clone, `sh scripts/install-relay-agent.sh` — with `ALLOW_DOMAINS=…` and
+   `BROWSER_ALLOW_DOMAINS=…` in front if you want them. It writes
+   `~/Library/LaunchAgents/local.tunnel-relay.plist`, which starts the relay at login and restarts
+   it if it dies, loads it, and checks that `/health` answers. After a `git pull`, restart it with
+   `launchctl kickstart -k gui/$(id -u)/local.tunnel-relay`.
+4. For browser mode, `npm i --no-save playwright-core` at the root of the clone (a plain
+   `npm i` would add it to `package.json`), then `node scripts/tunnel-relay.mjs login <url>` for
+   any sign-ins.
+5. Keep the Mac awake: System Settings -> Battery -> Options, prevent automatic sleeping on power
+   adapter when the display is off. A closed lid still sleeps a laptop.
 
 The order is `via`: a list, `["tunnel", "unblocker", "direct"]`, or the same as a string,
 `"tunnel,unblocker,direct"`. One route means no fallback, so `["tunnel"]` fails when the Mac is
