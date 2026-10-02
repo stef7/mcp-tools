@@ -188,21 +188,30 @@ checked; the body is never read to decide. Any other answer, 404 included, is ke
 
 ### Setting up the Mac
 
-The tunnel `WMac` and the VPC Service `wmac` live in Cloudflare, so a wiped Mac only needs its
-two programs back: the connector, and the relay it hands requests to.
+The tunnel `WMac` and the VPC Service `wmac` live in Cloudflare, so a wiped Mac only needs one
+LaunchAgent back: the relay, which also runs `cloudflared` for `WMac`.
 
-1. Install Node 18 or later and `cloudflared`, and clone this repo.
-2. Connect the Mac to `WMac`: in the dashboard, Networking -> Tunnels -> `WMac` -> Add a replica,
-   copy the install command, and run it — `sudo cloudflared service install <token>`, which starts
-   it at every boot. The token is a credential: it stays out of this repo.
-3. From the clone, `sh scripts/install-cf-tunnel-relay-agent.sh` — with `ALLOW_DOMAINS=…` and
-   `BROWSER_ALLOW_DOMAINS=…` in front if you want them. It writes
-   `~/Library/LaunchAgents/local.cf-tunnel-relay.plist`, which starts the relay at login and
-   restarts it if it dies, loads it, and checks that `/health` answers. After a `git pull`, restart
-   it with `launchctl kickstart -k gui/$(id -u)/local.cf-tunnel-relay`.
-4. For browser mode, `npm i --no-save playwright-core` at the root of the clone (a plain
+1. Install Node 18 or later and `brew install cloudflared` — the program only, with no
+   `cloudflared service install`; the relay runs it. Clone this repo.
+2. From the clone, `sh scripts/install-cf-tunnel-relay-agent.sh`, with `ALLOW_DOMAINS=…` and
+   `BROWSER_ALLOW_DOMAINS=…` in front if you want them. The first time, it asks for the tunnel
+   token: in the dashboard, Networking -> Tunnels -> `WMac` -> Add a replica, copy the install
+   command, and paste only its long `eyJ…` part. It goes into the login Keychain as the item
+   `cf-tunnel-relay`, and never into a file, a plist or a command line.
+3. It writes `~/Library/LaunchAgents/local.cf-tunnel-relay.plist`, which starts the relay at login
+   and restarts it if it dies, loads it, and checks that `/health` answers. The relay reads the
+   token from the Keychain and starts `cloudflared`, restarting that too if it dies; the dashboard
+   shows `WMac` as Healthy once it has connected.
+4. `sh scripts/install-cf-tunnel-relay-agent.sh off` stops both until `on` or the next login;
+   `--token` asks for a new token. After a `git pull`, restart with
+   `launchctl kickstart -k gui/$(id -u)/local.cf-tunnel-relay`.
+5. For browser mode, `npm i --no-save playwright-core` at the root of the clone (a plain
    `npm i` would add it to `package.json`), then `node scripts/cf-tunnel-relay.mjs login <url>` for
    any sign-ins.
+
+A `cloudflared` service installed the usual way (`sudo cloudflared service install <token>`) would
+connect the Mac to `WMac` a second time, and keeps the token in plain text in its plist; the
+installer points it out, and `sudo cloudflared service uninstall` removes it.
 
 Nothing here keeps the Mac awake. The tunnel goes down when the Mac sleeps and comes back when it
 wakes: both programs carry on where they were, and `cloudflared` reconnects. While it is down,
