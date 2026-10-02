@@ -4,12 +4,18 @@
  * site's hostname as `expectedServerHostname` — in the runtime's types, though not on the docs
  * page — so the certificate is checked against the site, not the proxy.
  *
+ * With `trust`, TLS inside the tunnel is done here instead, by subtls (core/vendor/subtls.mjs),
+ * trusting only the certificates given. That is for a proxy that re-signs HTTPS with its own key,
+ * as Apify's Unblocker does: the runtime's TLS trusts only public authorities and cannot be told
+ * otherwise. subtls speaks TLS 1.3 alone (AES-128-GCM, P-256), which the proxy has to accept.
+ *
  * Plain `http://` URLs skip the tunnel: the request goes to the proxy in absolute form.
  *
  * Deliberately small: GET, HTTP/1.1 with `Connection: close`, so a response ends when the socket
  * does. It handles chunked bodies, gzip and deflate, and redirects; nothing else.
  */
 import { connect as tcp } from "cloudflare:sockets";
+import { TrustedCert, startTls } from "./vendor/subtls.mjs";
 
 export type Proxy = { hostname: string; port: number; username: string; password: string };
 
@@ -20,6 +26,8 @@ export type ProxyFetchOptions = {
   timeoutMs?: number;
   /** Past this many bytes the response is abandoned. */
   maxBytes?: number;
+  /** PEM certificates to trust for https, in place of the runtime's TLS; see the top. */
+  trust?: string;
 };
 
 /** The proxy said no. Its own status, not the site's, so the caller can try another route. */
@@ -116,18 +124,60 @@ const decode = async (body: Uint8Array, encoding: string | null): Promise<Uint8A
   return new Uint8Array(await new Response(stream).arrayBuffer());
 };
 
+/**
+ * `read(n, mode)` for subtls: the next n bytes, fewer only at the end, undefined once it is spent.
+ * Mode 1 is subtls's PEEK, which it uses to look for the next record without taking it.
+ */
+const exactly = (reader: ReadableStreamDefaultReader<Uint8Array>) => {
+  let queue: Uint8Array[] = [];
+  let queued = 0;
+  let ended = false;
+  return async (n: number, mode?: number) => {
+    while (queued < n && !ended) {
+      const { value, done } = await reader.read();
+      if (done) ended = true;
+      else if (value.length) {
+        queue.push(value);
+        queued += value.length;
+      }
+    }
+    if (!queued) return undefined;
+    const all = concat(queue, queued);
+    const out = all.subarray(0, Math.min(n, queued));
+    if (mode === 1) {
+      queue = [all];
+      return out;
+    }
+    queued -= out.length;
+    queue = queued ? [all.subarray(out.length)] : [];
+    return out;
+  };
+};
+
+/** Decrypted records until the server closes, as one array. */
+const readRecords = async (read: () => Promise<Uint8Array | undefined>, max: number) => {
+  const parts: Uint8Array[] = [];
+  let total = 0;
+  for (let record = await read(); record; record = await read()) {
+    parts.push(record);
+    total += record.length;
+    if (total > max) throw new Error(`response larger than ${max} bytes`);
+  }
+  return concat(parts, total);
+};
+
 const basic = (p: Proxy) => "Basic " + btoa(`${p.username}:${p.password}`);
 
 /** One request, one connection, no redirects. */
 const once = async (
   proxy: Proxy,
   url: URL,
-  opts: Required<Omit<ProxyFetchOptions, "headers">> & ProxyFetchOptions,
+  opts: Required<Omit<ProxyFetchOptions, "headers" | "trust">> & ProxyFetchOptions,
 ) => {
   const secure = url.protocol === "https:";
   const socket = opts.connect(
     { hostname: proxy.hostname, port: proxy.port },
-    { secureTransport: secure ? "starttls" : "off", allowHalfOpen: false },
+    { secureTransport: secure && !opts.trust ? "starttls" : "off", allowHalfOpen: false },
   );
   const lines = [
     `Host: ${url.host}`,
@@ -135,7 +185,10 @@ const once = async (
     "Accept-Encoding: gzip, deflate",
     ...Object.entries(opts.headers ?? {}).map(([k, v]) => `${k}: ${v}`),
   ];
+  const request = (target: string, extra = "") =>
+    enc.encode(`GET ${target} HTTP/1.1\r\n${extra}${lines.join("\r\n")}\r\n\r\n`);
   let stream = socket;
+  let raw: Uint8Array | undefined;
   try {
     if (secure) {
       const w = socket.writable.getWriter();
@@ -150,25 +203,31 @@ const once = async (
       const head = await readHead(r);
       if (head.status !== 200)
         throw new ProxyError(head.status, `CONNECT ${head.status} ${head.reason}`);
-      w.releaseLock();
-      r.releaseLock();
-      stream = socket.startTls({ expectedServerHostname: url.hostname });
-      const tw = stream.writable.getWriter();
-      await tw.write(
-        enc.encode(`GET ${url.pathname}${url.search} HTTP/1.1\r\n${lines.join("\r\n")}\r\n\r\n`),
-      );
-      tw.releaseLock();
+      if (opts.trust) {
+        // subtls does not wait on its writes; the writer keeps them in order, and a failed one
+        // surfaces as the read that follows it failing.
+        const tls = await startTls(
+          url.hostname,
+          await TrustedCert.databaseFromPEM(opts.trust),
+          exactly(r),
+          (data) => void w.write(data).catch(() => {}),
+        );
+        await tls.write(request(`${url.pathname}${url.search}`));
+        raw = await readRecords(tls.read, opts.maxBytes);
+      } else {
+        w.releaseLock();
+        r.releaseLock();
+        stream = socket.startTls({ expectedServerHostname: url.hostname });
+        const tw = stream.writable.getWriter();
+        await tw.write(request(`${url.pathname}${url.search}`));
+        tw.releaseLock();
+      }
     } else {
       const w = socket.writable.getWriter();
-      await w.write(
-        enc.encode(
-          `GET ${url.href} HTTP/1.1\r\nProxy-Authorization: ${basic(proxy)}\r\n` +
-            `${lines.join("\r\n")}\r\n\r\n`,
-        ),
-      );
+      await w.write(request(url.href, `Proxy-Authorization: ${basic(proxy)}\r\n`));
       w.releaseLock();
     }
-    const raw = await readAll(stream.readable, opts.maxBytes);
+    raw ??= await readAll(stream.readable, opts.maxBytes);
     const end = headEnd(raw);
     if (end < 0) throw new Error("connection closed before the response headers ended");
     const head = parseHead(dec.decode(raw.subarray(0, end - 4)));

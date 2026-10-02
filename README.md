@@ -6,7 +6,9 @@ Cloudflare Workers that speak MCP, in one TypeScript repo.
 core/mcp.ts                  shared plumbing: HTTP MCP endpoint + RPC surface + tool typing
 core/web.ts                  what a worker touching the open web needs: stripHtml, a browser UA
 core/egress.ts               plain fetch / unblocker / tunnel, in the order you pick; for mcp-fetch
-core/proxy.ts                fetch through an HTTP proxy over a raw socket (CONNECT + startTls)
+core/proxy.ts                fetch through an HTTP proxy over a raw socket (CONNECT + TLS)
+core/apify-ca.ts             the key Apify's Unblocker re-signs HTTPS with, for core/proxy.ts
+core/vendor/subtls.mjs       TLS 1.3 in JavaScript (jawj/subtls), built by scripts/vendor-subtls.mjs
 test/                        vitest, run against mocks rather than anyone's live service
 workers/mcp-toolkit/         aggregator: its own tools + every worker bound under `services`
 workers/mcp-wp/              WordPress REST API -> MCP, read and write
@@ -23,7 +25,10 @@ scripts/mock-ghost.mjs       fake Ghost, including the magic-link sign-in
 scripts/cf-tunnel-relay.mjs  runs on the Mac at the far end of the tunnel
 scripts/cf-tunnel-relay-agent.sh
                              makes the Mac start cf-tunnel-relay at login and keep it running
-scripts/mock-proxy.mjs       fake Apify Proxy, for the proxy tests
+scripts/mock-proxy.mjs       fake Apify Proxy, for the proxy tests, re-signing HTTPS as Apify does
+scripts/apify-tls-probe.mjs  checks HTTPS through the real Unblocker the way the Worker does it
+scripts/apify-trust-anchor.py
+                             rebuilds core/apify-ca.ts from certificates Unblocker presented
 ```
 
 ## A worker is a tools object
@@ -162,12 +167,30 @@ checked; the body is never read to decide. Any other answer, 404 included, is ke
 1. **direct** — the worker's own `fetch`, from a Cloudflare colo. Free.
 2. **unblocker** — Apify Proxy's `UNBLOCKER` group, through `core/proxy.ts`. It handles bot checks
    and CAPTCHAs and picks the country itself; none is pinned, since Apify says that weakens it. A
-   Worker's `fetch` cannot use an HTTP proxy, so this opens a TCP socket to `proxy.apify.com:8000`,
-   sends `CONNECT`, and starts TLS to the site inside it with
-   `startTls({ expectedServerHostname })`. Needs `APIFY_PROXY_PASSWORD` on `mcp-fetch` — the
-   password on Apify Console -> Proxy, not an API token — and a paid Apify plan. Billed per
-   successful request. Any refusal (407, Apify's 590–599) moves on. Apify does not say whether
-   Unblocker re-signs HTTPS; if it does, every https URL fails this route with a TLS error.
+   Worker's `fetch` cannot use an HTTP proxy, so this opens a TCP socket to `proxy.apify.com:8000`
+   and sends `CONNECT`. Needs `APIFY_PROXY_PASSWORD` on `mcp-fetch` — the password on Apify
+   Console -> Proxy, not an API token — and a paid Apify plan. Billed per successful request. Any
+   refusal (407, Apify's 590–599) moves on.
+
+   Unblocker re-signs HTTPS with its own key ("Apify Proxy CA"), which the runtime's TLS will not
+   accept and cannot be told to. So TLS inside the tunnel is done in JavaScript, by a vendored
+   build of [subtls](https://github.com/jawj/subtls) (`core/vendor/subtls.mjs`), trusting that key
+   alone: certificates are still checked, against Apify instead of the public authorities. Apify
+   does not publish the key, so it was recovered from the signatures on two certificates
+   Unblocker presented, and `test/apify-ca.test.ts` checks it against them. subtls speaks TLS 1.3
+   only, which Unblocker accepts. Its author calls it a proof of concept, not for production use.
+
+   If every https URL starts failing this route on the certificate, Apify has probably changed its
+   key. To check, and to rebuild `core/apify-ca.ts`:
+
+   ```sh
+   read -rs APIFY_PROXY_PASSWORD; export APIFY_PROXY_PASSWORD
+   node scripts/apify-tls-probe.mjs example.com      # last line: subtls OK or FAILED
+   node scripts/apify-tls-probe.mjs www.austlii.edu.au
+   # save each certificate it prints to a .pem file, then:
+   python3 scripts/apify-trust-anchor.py a.pem b.pem  # prints the new certificate
+   ```
+
 3. **tunnel** — a home connection in Australia, only while the Mac is on. `env.TUNNEL` is a VPC
    Service binding (`vpc_services` in `mcp-fetch/wrangler.json`) to the `wmac` service:
    `localhost:8811` on the Mac behind Cloudflare Tunnel `WMac`. Run

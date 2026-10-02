@@ -3,6 +3,7 @@
  * the worker sandbox, so their ports are handed to the tests through vitest's provide/inject.
  */
 import { spawn } from "node:child_process";
+import { readFileSync, readdirSync } from "node:fs";
 import type { TestProject } from "vitest/node";
 
 const MOCKS = [
@@ -58,6 +59,16 @@ export default async function setup(project: TestProject) {
   project.provide("mockBase", `http://localhost:${MOCKS[0].port}`);
   project.provide("ghostBase", `http://localhost:${MOCKS[1].port}`);
   project.provide("proxyPort", MOCKS[2].port);
+  // The sandbox has no file system, so certificates come in as text.
+  const fixtures = new URL("./fixtures/", import.meta.url);
+  const read = (name: string) => readFileSync(new URL(name, fixtures), "utf8");
+  project.provide("mockCa", read("mock-ca.pem"));
+  project.provide(
+    "apifyLeaves",
+    readdirSync(fixtures)
+      .filter((f) => f.startsWith("apify-leaf-"))
+      .map(read),
+  );
   return () => children.forEach((c) => c.kill());
 }
 
@@ -66,5 +77,7 @@ declare module "vitest" {
     mockBase: string;
     ghostBase: string;
     proxyPort: number;
+    mockCa: string;
+    apifyLeaves: string[];
   }
 }
