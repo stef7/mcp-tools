@@ -14,7 +14,8 @@ const page = (body: string, status = 200, headers: Record<string, string> = {}) 
  * A tunnel that answers the way the relay does, or throws the way a dead tunnel does. `/health`
  * answers "ok" unless told otherwise; `seen` holds the pages asked for, `checks` the health checks.
  */
-const tunnel = (answer: () => Response, health: () => Response = () => page("ok")) => {
+type Answer = (signal?: AbortSignal) => Response | Promise<Response>;
+const tunnel = (answer: Answer, health: Answer = () => page("ok")) => {
   const seen: string[] = [];
   let checks = 0;
   return {
@@ -22,13 +23,14 @@ const tunnel = (answer: () => Response, health: () => Response = () => page("ok"
     get checks() {
       return checks;
     },
-    async fetch(input: string) {
+    async fetch(input: string, init?: RequestInit) {
+      const signal = init?.signal ?? undefined;
       if (input.endsWith("/health")) {
         checks++;
-        return health();
+        return health(signal);
       }
       seen.push(input);
-      return answer();
+      return answer(signal);
     },
   };
 };
@@ -41,6 +43,9 @@ const dead = tunnel(lost, lost);
 const timedOut = () => {
   throw new DOMException("The operation was aborted due to timeout", "TimeoutError");
 };
+/** A page still loading: it answers only by failing, once it is dropped. */
+const loading: Answer = (signal) =>
+  new Promise((_, reject) => signal?.addEventListener("abort", () => reject(signal.reason)));
 
 /** The worker's own fetch, answering as the site. */
 const site = () => {
@@ -255,7 +260,7 @@ describe("the tunnel", () => {
     expect(t.seen).toHaveLength(2);
   });
 
-  it("checks /health before asking for the page, and only once in 30 seconds", async () => {
+  it("checks /health with the page, and only once in 30 seconds", async () => {
     const t = tunnel(() => relayed("from home"));
     await egress({ TUNNEL: t }, URL_, { ...alone, fetch: site().get });
     await egress({ TUNNEL: t }, URL_, { ...alone, fetch: site().get });
@@ -271,16 +276,38 @@ describe("the tunnel", () => {
     }
   });
 
-  it("moves straight on when /health does not answer, without asking for the page", async () => {
-    const t = tunnel(() => relayed("from home"), timedOut);
+  it("asks for /health alongside the page, and drops the page when /health does not answer", async () => {
+    let dropped = false;
+    const t = tunnel((signal) => {
+      signal?.addEventListener("abort", () => (dropped = true));
+      return loading(signal);
+    }, timedOut);
     const got = await egress({ TUNNEL: t }, URL_, { via: ["tunnel", "direct"], fetch: site().get });
     expect(got.via).toBe("direct");
     expect(got.skipped).toEqual(["tunnel: cf-tunnel-relay did not answer /health within 2s"]);
-    expect(t.seen).toEqual([]);
+    expect(t.seen).toHaveLength(1);
+    expect(t.checks).toBe(1);
+    expect(dropped).toBe(true);
+  });
+
+  it("drops /health when the page answers first, and counts the Mac as there", async () => {
+    let dropped = false;
+    const t = tunnel(
+      () => relayed("from home"),
+      (signal) => {
+        signal?.addEventListener("abort", () => (dropped = true));
+        return loading(signal);
+      },
+    );
+    const got = await egress({ TUNNEL: t }, URL_, { ...alone, fetch: site().get });
+    expect(got.via).toBe("tunnel");
+    expect(dropped).toBe(true);
+    await egress({ TUNNEL: t }, URL_, { ...alone, fetch: site().get });
+    expect(t.checks).toBe(1);
   });
 
   it("passes on Cloudflare's own word when it knows the tunnel is down", async () => {
-    const t = tunnel(lost, () => {
+    const t = tunnel(loading, () => {
       throw new Error("destination_unavailable");
     });
     await expect(egress({ TUNNEL: t }, URL_, { ...alone, fetch: site().get })).rejects.toThrow(
@@ -293,14 +320,10 @@ describe("the tunnel", () => {
   });
 
   it("counts a /health that is not the relay's as the relay not answering", async () => {
-    const t = tunnel(
-      () => relayed("from home"),
-      () => page("File not found", 404),
-    );
+    const t = tunnel(loading, () => page("File not found", 404));
     await expect(egress({ TUNNEL: t }, URL_, { ...alone, fetch: site().get })).rejects.toThrow(
       "tunnel: cf-tunnel-relay not answering (HTTP 404)",
     );
-    expect(t.seen).toEqual([]);
   });
 
   it("is not written off when only the page was slow, but checks /health again", async () => {

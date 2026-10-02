@@ -172,10 +172,11 @@ checked; the body is never read to decide. Any other answer, 404 included, is ke
    Service binding (`vpc_services` in `mcp-fetch/wrangler.json`) to the `wmac` service:
    `localhost:8811` on the Mac behind Cloudflare Tunnel `WMac`. Run
    `node scripts/cf-tunnel-relay.mjs` there; `ALLOW_DOMAINS=a.org,b.gov.au` limits it to those
-   domains and their subdomains. Before each page the Worker asks the relay's `/health`, which
-   answers at once: no answer within 2 seconds means the Mac is not there, and the tunnel is skipped
-   for a minute without asking for the page. A good answer is remembered for 30 seconds. A page that
-   is merely slow then costs only that request (the relay gives up on a site after 30 seconds).
+   domains and their subdomains. Alongside each page the Worker asks the relay's `/health`, which
+   answers at once. If it fails first (no answer within 2 seconds, or Cloudflare saying the tunnel
+   is down), the page is dropped and the tunnel skipped for a minute; if the page answers first,
+   the check is dropped. Either sign of a live Mac is remembered for 30 seconds, and a page that is
+   merely slow costs only that request (the relay gives up on a site after 30 seconds).
 4. **browser** — the same Mac and relay, with the page loaded in Google Chrome there: it waits out
    challenge pages that clear themselves and has whatever sign-ins you made with
    `node cf-tunnel-relay.mjs login <url>`. Chrome keeps its own profile in
