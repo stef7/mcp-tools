@@ -11,9 +11,9 @@
 #
 #   ALLOW_DOMAINS=a.org BROWSER_ALLOW_DOMAINS=b.gov.au sh scripts/install-cf-tunnel-relay-agent.sh
 #
-# The tunnel token is asked for the first time, by `security` itself so it never appears on a
-# command line, and kept in the login Keychain as the item `cf-tunnel-relay`. The relay reads it
-# from there each time it starts cloudflared.
+# The tunnel token is asked for the first time, checked to be a whole one, and kept in the login
+# Keychain as the item `cf-tunnel-relay`, without ever appearing on a command line. The relay reads
+# it from there each time it starts cloudflared.
 #
 # ALLOW_DOMAINS, BROWSER_ALLOW_DOMAINS, CF_TUNNEL_RELAY_PROFILE and CHROME_PATH are written into the
 # plist as they are when this runs; unset ones are left out. Normal output goes to /dev/null, so
@@ -77,10 +77,36 @@ done
 
 if [ "${1:-}" = --token ] || ! security find-generic-password -s "$KEYCHAIN_ITEM" >/dev/null 2>&1; then
   echo "The tunnel token for WMac: in the Cloudflare dashboard, Networking -> Tunnels -> WMac ->"
-  echo "Add a replica, copy the install command, and paste only its long eyJ... part below."
-  # -w last makes security ask for the value itself; -U replaces a token already there.
-  security add-generic-password -U -s "$KEYCHAIN_ITEM" -a "$(id -un)" -l "$KEYCHAIN_ITEM" \
-    -j "Tunnel token for WMac, read by scripts/cf-tunnel-relay.mjs" -w
+  echo "Add a replica, copy the install command, and paste only its long eyJ... part here, then"
+  echo "press Return. It is not shown as you paste."
+  # Read here rather than at security's own prompt, which cuts a paste off at 128 characters.
+  stty -echo 2>/dev/null || true
+  IFS= read -r TOKEN || TOKEN=""
+  stty echo 2>/dev/null || true
+  echo
+  TOKEN=$(printf '%s' "$TOKEN" | tr -d '[:space:]')
+  # A tunnel token is base64 of {"a": account, "t": tunnel id, "s": secret}; a cut-off one is not.
+  TUNNEL_ID=$(printf '%s' "$TOKEN" | "$NODE" -e '
+    let t = "";
+    process.stdin.on("data", (c) => (t += c)).on("end", () => {
+      try {
+        const j = JSON.parse(Buffer.from(t, "base64").toString());
+        if (j.a && j.t && j.s) return console.log(j.t);
+      } catch {}
+      process.exit(1);
+    });') || {
+    echo "That is not a whole tunnel token (${#TOKEN} characters, where one is about 180):" \
+      "nothing was stored. Run this again with --token and paste the eyJ... part again." >&2
+    exit 1
+  }
+  # Through security's standard input, so the token is never on a command line where ps shows it.
+  printf 'add-generic-password -U -s %s -a %s -l %s -w %s\n' \
+    "$KEYCHAIN_ITEM" "$(id -un)" "$KEYCHAIN_ITEM" "$TOKEN" | security -i >/dev/null
+  if [ "$(security find-generic-password -s "$KEYCHAIN_ITEM" -w 2>/dev/null)" != "$TOKEN" ]; then
+    echo "The Keychain item $KEYCHAIN_ITEM does not hold the token just pasted." >&2
+    exit 1
+  fi
+  echo "Stored the token for tunnel $TUNNEL_ID in the Keychain item $KEYCHAIN_ITEM."
 fi
 
 esc() { printf '%s' "$1" | sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g'; }
