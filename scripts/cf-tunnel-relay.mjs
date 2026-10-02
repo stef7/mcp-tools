@@ -25,23 +25,26 @@
  * `ALLOW_DOMAINS` narrows it further: a comma-separated list, each entry also covering its
  * subdomains, checked at every hop as well.
  *
- * BROWSER MODE loads the page in Google Chrome on this Mac, with a profile of its own
+ * BROWSER MODE loads the page in Brave on this Mac, with a profile of its own
  * (~/.cf-tunnel-relay/profile, or CF_TUNNEL_RELAY_PROFILE) that keeps cookies between loads: a
  * challenge passed or a sign-in made with `login` holds for later ones. The answer is the rendered
  * HTML, or the raw body of anything that is not HTML. Whoever can call mcp-fetch can read whatever
  * that profile can, so browser mode is refused for every domain not in `BROWSER_ALLOW_DOMAINS` (and
  * `ALLOW_DOMAINS`, when set), where the page starts and wherever it is sent; unset, it is off. What
- * the page loads along the way may come from anywhere public: every connection Chrome makes goes
+ * the page loads along the way may come from anywhere public: every connection the browser makes goes
  * through a proxy inside the relay with the same connect-time check as plain mode. Needs
- * `npm i playwright-core` next to this file, and Google Chrome or `CHROME_PATH`. Chrome closes
- * after 5 idle minutes; `login` cannot open the profile while it is running.
+ * playwright-core (a devDependency of this repo, so `npm install` at its root; Node 20 or later),
+ * and Brave in /Applications, or `CHROME_PATH` set to another Chromium browser's executable. The
+ * browser closes after 5 idle minutes; `login` cannot open the profile while it is running.
  *
- * THE CONNECTOR: with CF_TUNNEL_RELAY_CLOUDFLARED set, which install-cf-tunnel-relay-agent.sh
+ * THE CONNECTOR: with CF_TUNNEL_RELAY_CLOUDFLARED set, which cf-tunnel-relay-agent.sh
  * does, the relay also runs `cloudflared tunnel run` for tunnel `WMac`, so one LaunchAgent keeps
  * both up and `cloudflared` needs no service of its own. The tunnel token comes from the login
  * Keychain (item `cf-tunnel-relay`) and reaches cloudflared in TUNNEL_TOKEN: never on a command
  * line, where `ps` would show it, nor in a file. cloudflared is started again whenever it stops,
- * after 5 seconds, doubling up to a minute while it keeps failing, and stopped with the relay.
+ * after 5 seconds, doubling up to a minute while it keeps failing, and stopped with the relay. Its
+ * metrics are on 127.0.0.1:8812, where `cloudflared_tunnel_ha_connections` counts its live
+ * connections to Cloudflare.
  *
  * Everything the relay says itself carries `x-cf-tunnel-relay-error`; a response it passes on
  * carries `x-cf-tunnel-relay-status`. That is how the Worker tells "the site said 502" from "the
@@ -62,6 +65,8 @@ const MAX_REDIRECTS = 10;
 const TIMEOUT_MS = 30_000;
 const BROWSER_TIMEOUT_MS = 30_000;
 const IDLE_MS = 5 * 60_000;
+/** Browser mode's browser, unless CHROME_PATH names another Chromium one. */
+const BRAVE = "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser";
 const PROFILE =
   process.env.CF_TUNNEL_RELAY_PROFILE || join(homedir(), ".cf-tunnel-relay", "profile");
 /** Titles of the interstitials that clear themselves given a few seconds. */
@@ -272,12 +277,10 @@ const startProxy = () =>
 const openChrome = ({ headless }) =>
   (chrome ??= (async () => {
     const { chromium } = await import("playwright-core").catch(() => {
-      throw new Error("browser mode needs `npm i playwright-core` next to cf-tunnel-relay.mjs");
+      throw new Error("browser mode needs playwright-core: `npm install` at the root of the repo");
     });
     const ctx = await chromium.launchPersistentContext(PROFILE, {
-      ...(process.env.CHROME_PATH
-        ? { executablePath: process.env.CHROME_PATH }
-        : { channel: "chrome" }),
+      executablePath: process.env.CHROME_PATH || BRAVE,
       headless,
       // `<-loopback>` sends localhost through the proxy too, where it is refused.
       proxy: { server: `http://127.0.0.1:${await startProxy()}` },
@@ -295,6 +298,12 @@ const openChrome = ({ headless }) =>
     return ctx;
   })().catch((e) => {
     chrome = undefined;
+    if (/ENOENT|is not found at|executable doesn't exist/i.test(e.message ?? "")) {
+      throw new Error(
+        `browser mode needs Brave at ${BRAVE}, or CHROME_PATH set to another Chromium ` +
+          "browser's executable",
+      );
+    }
     throw e;
   }));
 
@@ -328,7 +337,7 @@ const browse = async (target) => {
         await page.waitForTimeout(1000);
       }
       await page.waitForLoadState("domcontentloaded", { timeout: 5000 }).catch(() => {});
-      if (!main) throw new Error("Chrome got no answer");
+      if (!main) throw new Error("the browser got no answer");
       const headers = await main.allHeaders();
       const html = /html/i.test(headers["content-type"] ?? "text/html");
       const body = html ? Buffer.from(await page.content()) : await main.body();
@@ -420,7 +429,21 @@ const runConnector = async (wait = 5_000) => {
   }
   const child = spawn(
     CLOUDFLARED,
-    ["tunnel", "--no-autoupdate", "--loglevel", "warn", "--grace-period", "2s", "run"],
+    [
+      "tunnel",
+      "--no-autoupdate",
+      "--loglevel",
+      "warn",
+      "--grace-period",
+      "2s",
+      // Shown in place of the Mac's hostname against this connector, as custom:cf-tunnel-relay.
+      "--label",
+      "cf-tunnel-relay",
+      // Fixed, so cf-tunnel-relay-agent.sh knows where to ask whether it has connected.
+      "--metrics",
+      "127.0.0.1:8812",
+      "run",
+    ],
     { env: { ...process.env, TUNNEL_TOKEN: token }, stdio: ["ignore", "ignore", "inherit"] },
   );
   connector = child;

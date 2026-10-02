@@ -12,6 +12,7 @@
   },
   "devDependencies": {
     "@cloudflare/vitest-pool-workers": "^0.22.0",
+    "playwright-core": "^1.63.0",
     "prettier": "^3.6.2",
     "vitest": "^4.1.11"
   },
