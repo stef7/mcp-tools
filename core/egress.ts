@@ -6,7 +6,7 @@
  *              CAPTCHAs itself and picks the country. Billed per successful request.
  *   tunnel     the Mac behind Cloudflare Tunnel, via scripts/cf-tunnel-relay.mjs: a home
  *              connection in Australia. Only as good as the Mac is awake.
- *   browser    the same Mac, the page loaded in its Chrome: gets past challenges that clear
+ *   browser    the same Mac, the page loaded in its browser (Brave): gets past challenges that clear
  *              themselves, and has the sign-ins made there. The relay refuses it for every domain
  *              it has not been told to allow.
  *   direct     the worker's own `fetch`, from whichever Cloudflare colo ran it. Always there.

@@ -177,12 +177,12 @@ checked; the body is never read to decide. Any other answer, 404 included, is ke
    is down), the page is dropped and the tunnel skipped for a minute; if the page answers first,
    the check is dropped. Either sign of a live Mac is remembered for 30 seconds, and a page that is
    merely slow costs only that request (the relay gives up on a site after 30 seconds).
-4. **browser** — the same Mac and relay, with the page loaded in Google Chrome there: it waits out
+4. **browser** — the same Mac and relay, with the page loaded in Brave there: it waits out
    challenge pages that clear themselves and has whatever sign-ins you made with
-   `node cf-tunnel-relay.mjs login <url>`. Chrome keeps its own profile in
+   `node cf-tunnel-relay.mjs login <url>`. The browser keeps its own profile in
    `~/.cf-tunnel-relay/profile`. Off unless the relay has `BROWSER_ALLOW_DOMAINS=a.org,b.gov.au`,
    and refused for every other domain, where the page starts and wherever it is redirected. Every
-   connection Chrome makes goes through a proxy inside the relay with the same private-address
+   connection the browser makes goes through a proxy inside the relay with the same private-address
    check as plain mode. Needs
    playwright-core, which `npm install` at the root of the clone brings, and Node 20 or later. Up to
    60 seconds a page.
@@ -207,9 +207,8 @@ LaunchAgent back: the relay, which also runs `cloudflared` for `WMac`.
 4. `sh scripts/cf-tunnel-relay-agent.sh off` stops both until `on` or the next login;
    `--token` asks for a new token. After a `git pull`, restart with
    `launchctl kickstart -k gui/$(id -u)/local.cf-tunnel-relay`.
-5. For browser mode, `npm install` at the root of the clone (it brings playwright-core) and Google
-   Chrome (`brew install --cask google-chrome`, or `CHROME_PATH` set to another Chromium browser's
-   executable); then `node scripts/cf-tunnel-relay.mjs login <url>` for any sign-ins.
+5. For browser mode, `npm install` at the root of the clone (it brings playwright-core) and Brave in
+   `/Applications` (or `CHROME_PATH` set to another Chromium browser's executable); then `node scripts/cf-tunnel-relay.mjs login <url>` for any sign-ins.
 
 A `cloudflared` service installed the usual way (`sudo cloudflared service install <token>`) would
 connect the Mac to `WMac` a second time, and keeps the token in plain text in its plist; the

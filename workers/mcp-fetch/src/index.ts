@@ -272,7 +272,7 @@ const Tools = mcpWorker({
               "answers 403, 429, 451 or 503 or with a challenge header. `direct`: Cloudflare's " +
               "own fetch. `unblocker`: gets past bot checks and CAPTCHAs, paid per page. " +
               "`tunnel`: an Australian home connection, only while that Mac is on. `browser`: " +
-              "the same Mac's Chrome, for challenge pages and sign-ins, only for domains the " +
+              "the same Mac's browser (Brave), for challenge pages and sign-ins, only for domains the " +
               "Mac allows. One route " +
               'means no fallback. Default ["direct", "unblocker"].',
           },
