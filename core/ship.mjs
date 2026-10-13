@@ -34,6 +34,7 @@ import { createHash } from "node:crypto";
 import { appendFileSync, existsSync, readFileSync, readdirSync } from "node:fs";
 import { readFile, readdir, rm } from "node:fs/promises";
 import { basename, join, resolve } from "node:path";
+import { setTimeout as sleep } from "node:timers/promises";
 import { promisify } from "node:util";
 
 const run = promisify(execFile);
@@ -78,15 +79,41 @@ const fingerprint = async (dir, out) => {
   return hash.digest("hex").slice(0, 24);
 };
 
+/**
+ * Cloudflare's API has bad minutes, and one failed read should not cost a whole run. A 5xx, a 429,
+ * a timeout or a dropped connection gets another try, after 2, 4 then 8 seconds (or what a 429's
+ * Retry-After asks, up to a minute); the fourth failure stands. Any other status is not retried:
+ * a 401 or 403 will not change in a few seconds.
+ */
+const TRIES = 4;
 const api = async (path) => {
-  const res = await fetch(
-    `https://api.cloudflare.com/client/v4/accounts/${process.env.CLOUDFLARE_ACCOUNT_ID}${path}`,
-    { headers: { Authorization: `Bearer ${process.env.CLOUDFLARE_API_TOKEN}` } },
-  );
-  if (res.status === 404) return null;
-  // Anything else going wrong is a failure: guessing "changed" would hide a broken token.
-  if (!res.ok) throw new Error(`Cloudflare answered HTTP ${res.status} for ${path}`);
-  return (await res.json()).result;
+  const url = `https://api.cloudflare.com/client/v4/accounts/${process.env.CLOUDFLARE_ACCOUNT_ID}${path}`;
+  for (let attempt = 1; ; attempt++) {
+    let res, why, retryAfter;
+    try {
+      res = await fetch(url, {
+        headers: { Authorization: `Bearer ${process.env.CLOUDFLARE_API_TOKEN}` },
+        signal: AbortSignal.timeout(30_000),
+      });
+      if (res.ok) return (await res.json()).result;
+    } catch (e) {
+      why = e.message;
+    }
+    if (res && !res.ok) {
+      if (res.status === 404) return null;
+      // Anything else going wrong is a failure: guessing "changed" would hide a broken token.
+      if (res.status !== 429 && res.status < 500) {
+        throw new Error(`Cloudflare answered HTTP ${res.status} for ${path}`);
+      }
+      await res.body?.cancel();
+      why = `HTTP ${res.status}`;
+      retryAfter = Number(res.headers.get("retry-after"));
+    }
+    if (attempt === TRIES) throw new Error(`Cloudflare API ${path}: ${why}, ${TRIES} times`);
+    const wait = retryAfter > 0 ? Math.min(retryAfter, 60) * 1000 : 1000 * 2 ** attempt;
+    console.error(`Cloudflare API ${path}: ${why}; trying again in ${wait / 1000}s`);
+    await sleep(wait);
+  }
 };
 
 /** Whether the worker exists, and the tag of the one version serving all its traffic, if any. */
