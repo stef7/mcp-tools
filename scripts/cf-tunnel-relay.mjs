@@ -37,9 +37,10 @@
  * and Brave in /Applications, or `CHROME_PATH` set to another Chromium browser's executable. The
  * browser closes after 5 idle minutes; `login` cannot open the profile while it is running.
  *
- * THE CONNECTOR: with CF_TUNNEL_RELAY_CLOUDFLARED set, which cf-tunnel-relay-agent.sh
- * does, the relay also runs `cloudflared tunnel run` for tunnel `WMac`, so one LaunchAgent keeps
- * both up and `cloudflared` needs no service of its own. The tunnel token comes from the login
+ * THE CONNECTOR: with CF_TUNNEL_RELAY_CLOUDFLARED set, which CF Tunnel Relay.app
+ * (scripts/cf-tunnel-relay-menu.swift) does, the relay also runs `cloudflared tunnel run` for
+ * tunnel `WMac`, so the one menu bar app keeps both up and `cloudflared` needs no service of its
+ * own. The tunnel token comes from the login
  * Keychain (item `cf-tunnel-relay`) and reaches cloudflared in TUNNEL_TOKEN: never on a command
  * line, where `ps` would show it, nor in a file. cloudflared is started again whenever it stops,
  * after 5 seconds, doubling up to a minute while it keeps failing, and stopped with the relay. Its
@@ -439,7 +440,7 @@ const runConnector = async (wait = 5_000) => {
       // Shown in place of the Mac's hostname against this connector, as custom:cf-tunnel-relay.
       "--label",
       "cf-tunnel-relay",
-      // Fixed, so cf-tunnel-relay-agent.sh knows where to ask whether it has connected.
+      // Fixed, so CF Tunnel Relay.app knows where to ask whether it has connected.
       "--metrics",
       "127.0.0.1:8812",
       "run",
@@ -468,7 +469,7 @@ const stopConnector = () =>
     connector.kill("SIGTERM");
   });
 
-// Ctrl+C, and launchd restarting it: stop cloudflared, close Chrome if it is open, then go.
+// Ctrl+C, and the app turning it off or quitting: stop cloudflared, close Chrome if it is open, then go.
 for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"]) {
   process.on(signal, () => {
     setTimeout(() => process.exit(0), 3000).unref();
@@ -500,4 +501,12 @@ if (process.argv[2] === "login") {
       .listen(PORT, host, () => console.log(`cf-tunnel-relay on ${host}:${PORT}`));
   }
   if (CLOUDFLARED) runConnector();
+  // Run by CF Tunnel Relay.app, which holds the other end of standard input and never writes to
+  // it: when the app goes, however it goes, the pipe closes and the relay stops as on SIGTERM.
+  if (process.env.CF_TUNNEL_RELAY_LIFELINE) {
+    process.stdin
+      .on("end", () => process.kill(process.pid, "SIGTERM"))
+      .on("error", () => {})
+      .resume();
+  }
 }
