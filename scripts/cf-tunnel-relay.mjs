@@ -287,6 +287,9 @@ const openChrome = () =>
     const ctx = await chromium.launchPersistentContext(PROFILE, {
       executablePath: process.env.CHROME_PATH || BRAVE,
       headless: false,
+      // Playwright turns Chromium's sandbox off (--no-sandbox) unless told otherwise. This browser
+      // loads pages from anywhere on this Mac, which is what the sandbox is there to contain.
+      chromiumSandbox: true,
       // `<-loopback>` sends localhost through the proxy too, where it is refused.
       proxy: { server: `http://127.0.0.1:${await startProxy()}` },
       args: ["--proxy-bypass-list=<-loopback>"],
