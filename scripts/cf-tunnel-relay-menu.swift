@@ -13,7 +13,7 @@
 // without stopping it (a crash, a force quit), the pipe closes and the relay stops itself and
 // cloudflared, so nothing is left running that the menu bar does not show.
 //
-// The icon, a flat-bottomed cloud:
+// The menu bar icon, Cloudflare's cloud shape:
 //            solid           on: relay up and cloudflared connected to Cloudflare
 //            faint           on, but the relay or cloudflared is not up yet (or keeps failing)
 //            faint, slashed  off: neither is running
@@ -479,31 +479,36 @@ final class Controller: NSObject, NSApplicationDelegate, NSMenuDelegate {
   }
 }
 
-/// The one cloud shape, for the menu bar and the app icon: a big lobe right of centre, a smaller
-/// one either side, and a flat bottom along r.minY, filled in the current fill colour. It is about
-/// half as tall as it is wide; r's height is only a guide.
-func fillCloud(in r: NSRect) {
-  // Laid out on a cloud 0.96 wide (from 0.03 to 0.99) and 0.51 tall.
-  let k = r.width / 0.96
-  func at(_ u: CGFloat, _ v: CGFloat) -> NSPoint {
-    NSPoint(x: r.minX + (u - 0.03) * k, y: r.minY + v * k)
+/// The one cloud shape, for the menu bar and the app icon: the outline of Cloudflare's logo cloud
+/// (its two parts as one, without the streaks), with a flat base along r.minY. It is 0.45 times as
+/// tall as it is wide; r's height is only a guide.
+///
+/// The logo's SVG arcs, turned into centres and angles once: each row is the centre (x, y) and
+/// radius, as fractions of the width with y up from the base, and the start and end angles in
+/// degrees, each drawn anticlockwise from where the last ended.
+func cloudPath(in r: NSRect) -> NSBezierPath {
+  let k = r.width
+  func at(_ u: CGFloat, _ v: CGFloat) -> NSPoint { NSPoint(x: r.minX + u * k, y: r.minY + v * k) }
+  let arcs: [(CGFloat, CGFloat, CGFloat, CGFloat, CGFloat)] = [
+    (0.9927, 0.0073, 0.0073, -90.8, -16.4),  // bottom right corner
+    (0.8101, 0.0583, 0.1969, -15.6, 92.8),  // right lobe
+    (0.5379, 0.2144, 0.2364, 12.6, 161.2),  // the big lobe
+    (0.2503, 0.2053, 0.1064, 53.2, 174.2),  // small top left lobe
+    (0.2518, 0.2053, 0.1079, 174.3, 194.2),
+    (0.1516, 0.0278, 0.1512, 91.7, 180.0),  // left lobe
+    (0.1535, 0.0278, 0.1531, 180.0, 188.2),
+    (0.0089, 0.0070, 0.0071, 189.3, 264.4),  // bottom left corner
+  ]
+  let path = NSBezierPath()
+  path.move(to: at(0.9926, 0))
+  for (i, a) in arcs.enumerated() {
+    // The dip where the right lobe meets the big one.
+    if i == 2 { path.line(to: at(0.7687, 0.2659)) }
+    path.appendArc(
+      withCenter: at(a.0, a.1), radius: a.2 * k, startAngle: a.3, endAngle: a.4, clockwise: false)
   }
-  NSGraphicsContext.saveGraphicsState()
-  // Everything below the base is cut away: that is the flat bottom.
-  NSBezierPath(rect: NSRect(x: r.minX - k, y: r.minY, width: r.width + 2 * k, height: 2 * k))
-    .addClip()
-  let lobes: [(CGFloat, CGFloat, CGFloat)] = [(0.20, 0.12, 0.17), (0.55, 0.18, 0.33), (0.84, 0.10, 0.15)]
-  for (u, v, radius) in lobes {
-    let c = at(u, v)
-    NSBezierPath(
-      ovalIn: NSRect(x: c.x - radius * k, y: c.y - radius * k, width: 2 * radius * k, height: 2 * radius * k)
-    ).fill()
-  }
-  // Fills the dips between the lobes down at the base.
-  let a = at(0.20, 0)
-  let b = at(0.84, 0.12)
-  NSBezierPath(rect: NSRect(x: a.x, y: a.y, width: b.x - a.x, height: b.y - a.y)).fill()
-  NSGraphicsContext.restoreGraphicsState()
+  path.close()
+  return path
 }
 
 enum CloudLook { case on, starting, off }
@@ -513,7 +518,7 @@ func menuIcon(_ look: CloudLook) -> NSImage {
   let size = NSSize(width: 22, height: 16)
   let solid = NSImage(size: size, flipped: false) { _ in
     NSColor.black.setFill()
-    fillCloud(in: NSRect(x: 1, y: 3, width: 20, height: 10.6))
+    cloudPath(in: NSRect(x: 1, y: 3.5, width: 20, height: 9)).fill()
     if look == .off {
       let slash = NSBezierPath()
       slash.move(to: NSPoint(x: 4, y: 0.5))
@@ -542,7 +547,7 @@ func menuIcon(_ look: CloudLook) -> NSImage {
   return image
 }
 
-/// The app icon, drawn rather than kept as a file: a white cloud on a blue tile, at every size an
+/// The app icon, drawn rather than kept as a file: an orange cloud on a white tile, at every size an
 /// .iconset needs. The build runs `CFTunnelRelay --write-iconset <dir>` and hands it to iconutil.
 func writeIconset(to dir: String) -> Bool {
   let sizes: [(String, Int)] = [
@@ -566,10 +571,17 @@ func writeIconset(to dir: String) -> Bool {
       roundedRect: NSRect(x: s * 0.1, y: s * 0.1, width: s * 0.8, height: s * 0.8),
       xRadius: s * 0.18, yRadius: s * 0.18)
     NSGradient(
-      starting: NSColor(srgbRed: 0.33, green: 0.62, blue: 1.0, alpha: 1),
-      ending: NSColor(srgbRed: 0.16, green: 0.30, blue: 0.80, alpha: 1))?.draw(in: tile, angle: -90)
-    NSColor.white.setFill()
-    fillCloud(in: NSRect(x: s * 0.2, y: s * 0.34, width: s * 0.6, height: s * 0.32))
+      starting: NSColor(srgbRed: 1, green: 1, blue: 1, alpha: 1),
+      ending: NSColor(srgbRed: 0.92, green: 0.92, blue: 0.93, alpha: 1))?.draw(in: tile, angle: -90)
+    NSColor(srgbRed: 0, green: 0, blue: 0, alpha: 0.12).setStroke()
+    tile.lineWidth = max(1, s / 256)
+    tile.stroke()
+    // Cloudflare's two oranges, the deep one on the left running into the lighter one.
+    NSGradient(
+      starting: NSColor(srgbRed: 1.0, green: 0.37, blue: 0.12, alpha: 1),
+      ending: NSColor(srgbRed: 1.0, green: 0.60, blue: 0.07, alpha: 1))?.draw(
+        in: cloudPath(in: NSRect(x: s * 0.19, y: s * 0.36, width: s * 0.62, height: s * 0.28)),
+        angle: 0)
     NSGraphicsContext.restoreGraphicsState()
     guard let png = rep.representation(using: .png, properties: [:]),
       (try? png.write(to: URL(fileURLWithPath: "\(dir)/icon_\(name).png"))) != nil
