@@ -4,3 +4,4 @@ node_modules/
 wrangler.local.json
 *.log
 bundles/
+.DS_Store
