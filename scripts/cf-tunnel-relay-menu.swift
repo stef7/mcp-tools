@@ -333,6 +333,7 @@ final class Controller: NSObject, NSApplicationDelegate, NSMenuDelegate {
   func askToken() -> Bool {
     NSApp.activate(ignoringOtherApps: true)
     let alert = NSAlert()
+    alert.icon = NSImage(systemSymbolName: "cloud.fill", accessibilityDescription: nil)
     alert.messageText = "Tunnel token for WMac"
     alert.informativeText =
       "In the Cloudflare dashboard: Networking -> Tunnels -> WMac -> Add a replica. Copy the "
@@ -372,21 +373,32 @@ final class Controller: NSObject, NSApplicationDelegate, NSMenuDelegate {
   @objc func editDomains() {
     NSApp.activate(ignoringOtherApps: true)
     let alert = NSAlert()
+    alert.icon = NSImage(systemSymbolName: "cloud.fill", accessibilityDescription: nil)
     alert.messageText = "Allowed domains"
-    alert.informativeText =
-      "Comma-separated; each also covers its subdomains.\n\nFirst: the only domains the relay "
-      + "fetches (empty: any public one).\nSecond: the domains browser mode may load (empty: "
-      + "browser mode is off)."
-    let fields = ["ALLOW_DOMAINS", "BROWSER_ALLOW_DOMAINS"].map { key -> NSTextField in
-      let f = NSTextField(frame: NSRect(x: 0, y: 0, width: 360, height: 24))
-      f.placeholderString = key
-      f.stringValue = defaults.string(forKey: key) ?? ""
-      return f
+    alert.informativeText = "Comma-separated, such as example.org, abc.net.au; each also covers "
+      + "its subdomains. Saving restarts the relay."
+    // Laid out by hand: an alert's accessory view gets the size it is given, and a stack view
+    // given a frame lays its fields out at zero height.
+    let rows = [
+      ("ALLOW_DOMAINS", "Only fetch these (empty: any public domain)"),
+      ("BROWSER_ALLOW_DOMAINS", "Browser mode may load these (empty: browser mode off)"),
+    ]
+    let box = NSView(frame: NSRect(x: 0, y: 0, width: 360, height: 104))
+    var fields: [NSTextField] = []
+    for (i, (key, caption)) in rows.enumerated() {
+      let top = 104 - CGFloat(i) * 54
+      let label = NSTextField(labelWithString: caption)
+      label.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
+      label.frame = NSRect(x: 0, y: top - 18, width: 360, height: 16)
+      let field = NSTextField(frame: NSRect(x: 0, y: top - 44, width: 360, height: 24))
+      field.placeholderString = "none"
+      field.stringValue = defaults.string(forKey: key) ?? ""
+      box.addSubview(label)
+      box.addSubview(field)
+      fields.append(field)
     }
-    let stack = NSStackView(views: fields)
-    stack.orientation = .vertical
-    stack.frame = NSRect(x: 0, y: 0, width: 360, height: 56)
-    alert.accessoryView = stack
+    alert.accessoryView = box
+    alert.window.initialFirstResponder = fields[0]
     alert.addButton(withTitle: "Save")
     alert.addButton(withTitle: "Cancel")
     guard alert.runModal() == .alertFirstButtonReturn else { return }
@@ -458,6 +470,7 @@ final class Controller: NSObject, NSApplicationDelegate, NSMenuDelegate {
   func complain(_ message: String) {
     NSApp.activate(ignoringOtherApps: true)
     let alert = NSAlert()
+    alert.icon = NSImage(systemSymbolName: "cloud.fill", accessibilityDescription: nil)
     alert.messageText = "CF Tunnel Relay"
     alert.informativeText = message
     alert.runModal()
