@@ -5,7 +5,7 @@
  * URL it is handed from this machine's own connection.
  *
  *   node scripts/cf-tunnel-relay.mjs [port]       default 8811
- *   node scripts/cf-tunnel-relay.mjs login [url]  Chrome in a window, to sign in or pass a check
+ *   node scripts/cf-tunnel-relay.mjs login [url]  the browser on its own, to sign in or pass a check
  *
  *   ALLOW_DOMAINS=example.org,acnc.gov.au      optional: refuse every other domain
  *   BROWSER_ALLOW_DOMAINS=example.org          browser mode is off for every domain not listed
@@ -35,11 +35,17 @@
  * through a proxy inside the relay with the same connect-time check as plain mode. Needs
  * playwright-core (a devDependency of this repo, so `npm install` at its root; Node 20 or later),
  * and Brave in /Applications, or `CHROME_PATH` set to another Chromium browser's executable. The
- * browser closes after 5 idle minutes; `login` cannot open the profile while it is running.
+ * browser closes 10 seconds after its last page, so its window is not left open; `login` cannot
+ * open the profile while it is running.
  *
- * THE CONNECTOR: with CF_TUNNEL_RELAY_CLOUDFLARED set, which cf-tunnel-relay-agent.sh
- * does, the relay also runs `cloudflared tunnel run` for tunnel `WMac`, so one LaunchAgent keeps
- * both up and `cloudflared` needs no service of its own. The tunnel token comes from the login
+ * The browser always runs in a window you can see, never headless, so what it is doing is in view.
+ * If a site puts up a check that wants a person, it is there in the window: pass it, and the fetch
+ * carries on, waiting up to 45 seconds for the check to clear.
+ *
+ * THE CONNECTOR: with CF_TUNNEL_RELAY_CLOUDFLARED set, which CF Tunnel Relay.app
+ * (scripts/cf-tunnel-relay-menu.swift) does, the relay also runs `cloudflared tunnel run` for
+ * tunnel `WMac`, so the one menu bar app keeps both up and `cloudflared` needs no service of its
+ * own. The tunnel token comes from the login
  * Keychain (item `cf-tunnel-relay`) and reaches cloudflared in TUNNEL_TOKEN: never on a command
  * line, where `ps` would show it, nor in a file. cloudflared is started again whenever it stops,
  * after 5 seconds, doubling up to a minute while it keeps failing, and stopped with the relay. Its
@@ -64,7 +70,8 @@ const PORT = Number(process.argv[2] ?? 8811);
 const MAX_REDIRECTS = 10;
 const TIMEOUT_MS = 30_000;
 const BROWSER_TIMEOUT_MS = 30_000;
-const IDLE_MS = 5 * 60_000;
+/** Long enough for fetches one after another to share the browser, short enough to tidy up. */
+const IDLE_MS = 10_000;
 /** Browser mode's browser, unless CHROME_PATH names another Chromium one. */
 const BRAVE = "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser";
 const PROFILE =
@@ -221,6 +228,8 @@ const relay = async (target, incoming) => {
 // ─── browser mode ───────────────────────────────────────────────────────────────────────────────
 let chrome;
 let busy = 0;
+/** Tabs a fetch is using, so two at once never share one. */
+const inUse = new WeakSet();
 let idle;
 
 /**
@@ -273,15 +282,18 @@ const startProxy = () =>
     proxy.on("error", reject).listen(0, "127.0.0.1", () => resolve(proxy.address().port));
   }));
 
-/** The one Chrome, opened on first use; `login` opens it in a window. */
-const openChrome = ({ headless }) =>
+/** The one browser, opened on first use, always in a window. */
+const openChrome = () =>
   (chrome ??= (async () => {
     const { chromium } = await import("playwright-core").catch(() => {
       throw new Error("browser mode needs playwright-core: `npm install` at the root of the repo");
     });
     const ctx = await chromium.launchPersistentContext(PROFILE, {
       executablePath: process.env.CHROME_PATH || BRAVE,
-      headless,
+      headless: false,
+      // Playwright turns Chromium's sandbox off (--no-sandbox) unless told otherwise. This browser
+      // loads pages from anywhere on this Mac, which is what the sandbox is there to contain.
+      chromiumSandbox: true,
       // `<-loopback>` sends localhost through the proxy too, where it is refused.
       proxy: { server: `http://127.0.0.1:${await startProxy()}` },
       args: ["--proxy-bypass-list=<-loopback>"],
@@ -314,11 +326,15 @@ const browse = async (target) => {
   busy++;
   clearTimeout(idle);
   try {
-    const page = await (await openChrome({ headless: true })).newPage();
+    const ctx = await openChrome();
+    // The window opens with a blank tab: use that rather than opening a second beside it.
+    const page =
+      ctx.pages().find((p) => p.url() === "about:blank" && !inUse.has(p)) ?? (await ctx.newPage());
+    inUse.add(page);
     let main;
     let refused;
     // The page itself and every hop it is sent on are held to the lists; what it loads is not.
-    page.on("request", (r) => {
+    const onRequest = (r) => {
       if (!r.isNavigationRequest() || r.frame() !== page.mainFrame()) return;
       try {
         checkBrowserUrl(new URL(r.url()));
@@ -326,14 +342,17 @@ const browse = async (target) => {
         refused ??= e;
         page.close().catch(() => {});
       }
-    });
-    page.on("response", (r) => {
+    };
+    const onResponse = (r) => {
       if (r.request().isNavigationRequest() && r.frame() === page.mainFrame()) main = r;
-    });
+    };
+    page.on("request", onRequest);
+    page.on("response", onResponse);
     try {
       await page.goto(url.href, { waitUntil: "domcontentloaded", timeout: BROWSER_TIMEOUT_MS });
-      // A challenge that clears itself moves on to the real page; give it the time to.
-      for (let i = 0; i < 20 && CHALLENGE.test(await page.title().catch(() => "")); i++) {
+      // A check that clears itself moves on to the real page; one that wants a person waits for
+      // them in the window. 45 seconds, so the page still gets back inside mcp-fetch's minute.
+      for (let i = 0; i < 45 && CHALLENGE.test(await page.title().catch(() => "")); i++) {
         await page.waitForTimeout(1000);
       }
       await page.waitForLoadState("domcontentloaded", { timeout: 5000 }).catch(() => {});
@@ -352,7 +371,12 @@ const browse = async (target) => {
     } catch (e) {
       throw refused ?? e;
     } finally {
-      await page.close().catch(() => {});
+      page.off("request", onRequest);
+      page.off("response", onResponse);
+      inUse.delete(page);
+      // The last tab is kept, blank, so the window stays open until the browser goes idle.
+      if (ctx.pages().length > 1) await page.close().catch(() => {});
+      else await page.goto("about:blank").catch(() => {});
     }
   } finally {
     busy--;
@@ -439,7 +463,7 @@ const runConnector = async (wait = 5_000) => {
       // Shown in place of the Mac's hostname against this connector, as custom:cf-tunnel-relay.
       "--label",
       "cf-tunnel-relay",
-      // Fixed, so cf-tunnel-relay-agent.sh knows where to ask whether it has connected.
+      // Fixed, so CF Tunnel Relay.app knows where to ask whether it has connected.
       "--metrics",
       "127.0.0.1:8812",
       "run",
@@ -468,7 +492,7 @@ const stopConnector = () =>
     connector.kill("SIGTERM");
   });
 
-// Ctrl+C, and launchd restarting it: stop cloudflared, close Chrome if it is open, then go.
+// Ctrl+C, and the app turning it off or quitting: stop cloudflared, close Chrome if it is open, then go.
 for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"]) {
   process.on(signal, () => {
     setTimeout(() => process.exit(0), 3000).unref();
@@ -479,18 +503,36 @@ for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"]) {
 }
 
 if (process.argv[2] === "login") {
-  const ctx = await openChrome({ headless: false }).catch((e) => {
-    console.log(
-      `${e.message}\nIf the relay has Chrome open, try again once it has been idle 5 minutes.`,
-    );
+  // The browser on its own, with no Playwright driving it: you, at the keyboard, in browser mode's
+  // profile. What you sign in to or pass here, browser mode has afterwards, for as long as the
+  // site lets it last. Mock keychain and basic password store as Playwright uses, so the cookies
+  // are kept the way browser mode can read them back.
+  const browser = spawn(
+    process.env.CHROME_PATH || BRAVE,
+    [
+      `--user-data-dir=${PROFILE}`,
+      "--use-mock-keychain",
+      "--password-store=basic",
+      "--no-first-run",
+      "--no-default-browser-check",
+      process.argv[3] ?? "about:blank",
+    ],
+    { stdio: "ignore" },
+  );
+  for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"]) process.on(signal, () => browser.kill());
+  browser.on("error", (e) => {
+    console.log(`could not open the browser: ${e.message}`);
     process.exit(1);
   });
-  await (ctx.pages()[0] ?? (await ctx.newPage())).goto(process.argv[3] ?? "about:blank");
   console.log(
-    "Sign in or pass the check in that window, then close it. The profile keeps the cookies.",
+    "Sign in or pass the check in that window, then quit that browser (⌘Q). The profile keeps " +
+      "the cookies.",
   );
-  await new Promise((done) => ctx.on("close", done));
-  process.exit(0);
+  browser.on("exit", (code) => {
+    // Chromium's exit code for a profile already open in another copy of it.
+    if (code === 21) console.log("The profile is open elsewhere: turn the tunnel off first.");
+    process.exit(code ? 1 : 0);
+  });
 } else {
   // The VPC Service points at `localhost`, which cloudflared may resolve to either family.
   for (const host of ["127.0.0.1", "::1"]) {
@@ -500,4 +542,12 @@ if (process.argv[2] === "login") {
       .listen(PORT, host, () => console.log(`cf-tunnel-relay on ${host}:${PORT}`));
   }
   if (CLOUDFLARED) runConnector();
+  // Run by CF Tunnel Relay.app, which holds the other end of standard input and never writes to
+  // it: when the app goes, however it goes, the pipe closes and the relay stops as on SIGTERM.
+  if (process.env.CF_TUNNEL_RELAY_LIFELINE) {
+    process.stdin
+      .on("end", () => process.kill(process.pid, "SIGTERM"))
+      .on("error", () => {})
+      .resume();
+  }
 }

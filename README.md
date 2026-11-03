@@ -23,8 +23,10 @@ workers/mcp-apify/           what Apify is costing you, by service and by Actor
 scripts/mock-wp.mjs          fake WordPress for local testing
 scripts/mock-ghost.mjs       fake Ghost, including the magic-link sign-in
 scripts/cf-tunnel-relay.mjs  runs on the Mac at the far end of the tunnel
-scripts/cf-tunnel-relay-agent.sh
-                             makes the Mac start cf-tunnel-relay at login and keep it running
+scripts/cf-tunnel-relay-menu.swift
+                             CF Tunnel Relay.app: menu bar switch that runs the relay and cloudflared
+scripts/build-cf-tunnel-relay-app.sh
+                             builds that app into ~/Applications and opens it
 scripts/mock-proxy.mjs       fake Apify Proxy, for the proxy tests, re-signing HTTPS as Apify does
 scripts/apify-tls-probe.mjs  checks HTTPS through the real Unblocker the way the Worker does it
 scripts/apify-trust-anchor.py
@@ -209,9 +211,10 @@ connect at all does the last blocked answer from a named route come back instead
    is down), the page is dropped and the tunnel skipped for a minute; if the page answers first,
    the check is dropped. Either sign of a live Mac is remembered for 30 seconds, and a page that is
    merely slow costs only that request (the relay gives up on a site after 30 seconds).
-3. **browser** — the same Mac and relay, with the page loaded in Brave there: it waits out
-   challenge pages that clear themselves and has whatever sign-ins you made with
-   `node cf-tunnel-relay.mjs login <url>`. The browser keeps its own profile in
+3. **browser** — the same Mac and relay, with the page loaded in Brave there, always in a window
+   you can see: it waits up to 45 seconds on a check page, for one that clears itself or for you
+   to pass it in that window, and has whatever sign-ins and passed checks you made with Pass a
+   check in Brave… in the app's menu. The browser keeps its own profile in
    `~/.cf-tunnel-relay/profile`. Off unless the relay has `BROWSER_ALLOW_DOMAINS=a.org,b.gov.au`,
    and refused for every other domain, where the page starts and wherever it is redirected. Every
    connection the browser makes goes through a proxy inside the relay with the same private-address
@@ -222,29 +225,45 @@ connect at all does the last blocked answer from a named route come back instead
 ### Setting up the Mac
 
 The tunnel `WMac` and the VPC Service `wmac` live in Cloudflare, so a wiped Mac only needs one
-LaunchAgent back: the relay, which also runs `cloudflared` for `WMac`.
+app back: CF Tunnel Relay, a menu bar switch that runs the relay, which runs `cloudflared` for
+`WMac`. There is no LaunchAgent or other background item: the app sits in System Settings ->
+General -> Login Items -> Open at Login like any other, and quitting it stops both.
 
-1. Install Node 18 or later (20 for browser mode) and `brew install cloudflared` — the program only, with no
-   `cloudflared service install`; the relay runs it. Clone this repo.
-2. From the clone, `sh scripts/cf-tunnel-relay-agent.sh`, with `ALLOW_DOMAINS=…` and
-   `BROWSER_ALLOW_DOMAINS=…` in front if you want them. The first time, it asks for the tunnel
-   token: in the dashboard, Networking -> Tunnels -> `WMac` -> Add a replica, copy the install
-   command, and paste only its long `eyJ…` part. It goes into the login Keychain as the item
-   `cf-tunnel-relay`, and never into a file, a plist or a command line.
-3. It writes `~/Library/LaunchAgents/local.cf-tunnel-relay.plist`, which starts the relay at login
-   and restarts it if it dies, and loads it. The relay reads the token from the Keychain and starts
-   `cloudflared`, restarting that too if it dies. The installer waits until `/health` answers and
-   `cloudflared` reports a live connection to Cloudflare (its metrics, on `127.0.0.1:8812`), and
-   shows the end of `/tmp/cf-tunnel-relay.err` if either does not happen.
-4. `sh scripts/cf-tunnel-relay-agent.sh off` stops both until `on` or the next login;
-   `--token` asks for a new token. After a `git pull`, restart with
-   `launchctl kickstart -k gui/$(id -u)/local.cf-tunnel-relay`.
-5. For browser mode, `npm install` at the root of the clone (it brings playwright-core) and Brave in
-   `/Applications` (or `CHROME_PATH` set to another Chromium browser's executable); then `node scripts/cf-tunnel-relay.mjs login <url>` for any sign-ins.
+1. Install Node 18 or later (20 for browser mode), `brew install cloudflared` (the program only,
+   with no `cloudflared service install`; the app runs it) and the Command Line Tools
+   (`xcode-select --install`). Clone this repo.
+2. From the clone, `sh scripts/build-cf-tunnel-relay-app.sh`. It builds
+   `~/Applications/CF Tunnel Relay.app` and opens it; macOS 13 or later. It also removes the
+   LaunchAgent `local.cf-tunnel-relay` that earlier versions installed.
+3. The first time, the app asks for the tunnel token: in the dashboard, Networking -> Tunnels ->
+   `WMac` -> Add a replica, copy the install command, and paste only its long `eyJ…` part. It goes
+   into the login Keychain as the item `cf-tunnel-relay`, and never into a file or a command line.
+   The app also puts itself in Open at Login (a notification says so).
+4. The cloud in the menu bar: filled when the relay answers `/health` and `cloudflared` reports a
+   live connection to Cloudflare (its metrics, on `127.0.0.1:8812`); with a `!` while either is
+   starting or failing; slashed when off. Its menu has the on/off switch (which stays as left,
+   across logins), Restart, Allowed domains… (`ALLOW_DOMAINS` and `BROWSER_ALLOW_DOMAINS`),
+   Pass a check in Brave…, Replace tunnel token…, Open at Login, and the error log,
+   `/tmp/cf-tunnel-relay.err`.
+   `CHROME_PATH` and `CF_TUNNEL_RELAY_PROFILE` are set with
+   `defaults write local.cf-tunnel-relay CHROME_PATH /path/to/browser`.
+5. If the relay stops, the app starts it again after 5 seconds, doubling up to a minute while it
+   keeps failing; the relay does the same for `cloudflared`. If the app goes without stopping
+   them (a crash, a force quit), the relay notices its standard input close and stops both.
+6. After a `git pull`, Restart in the menu picks up a new relay; run the build again only if
+   `cf-tunnel-relay-menu.swift` changed or the clone moved. To remove it all: Quit, turn off Open
+   at Login first if you like, and delete the app.
+7. For browser mode, `npm install` at the root of the clone (it brings playwright-core) and Brave in
+   `/Applications` (or `CHROME_PATH` as above). Some sites' checks will not clear for a browser
+   that is being automated; for those, Pass a check in Brave… pauses the relay and opens the page
+   in browser mode's own profile with nothing automating it. Pass the check or sign in, quit that
+   Brave (⌘Q), and the relay starts again, with browser mode reusing what you got there until the
+   site lets it lapse. `node scripts/cf-tunnel-relay.mjs login <url>` does the same from Terminal,
+   with the tunnel switched off, since the profile can only be open in one browser at a time.
 
 A `cloudflared` service installed the usual way (`sudo cloudflared service install <token>`) would
 connect the Mac to `WMac` a second time, and keeps the token in plain text in its plist; the
-installer points it out, and `sudo cloudflared service uninstall` removes it.
+app points it out, and `sudo cloudflared service uninstall` removes it.
 
 Nothing here keeps the Mac awake. The tunnel goes down when the Mac sleeps and comes back when it
 wakes: both programs carry on where they were, and `cloudflared` reconnects. While it is down,
