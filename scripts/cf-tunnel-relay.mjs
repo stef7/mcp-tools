@@ -35,7 +35,8 @@
  * through a proxy inside the relay with the same connect-time check as plain mode. Needs
  * playwright-core (a devDependency of this repo, so `npm install` at its root; Node 20 or later),
  * and Brave in /Applications, or `CHROME_PATH` set to another Chromium browser's executable. The
- * browser closes after 5 idle minutes; `login` cannot open the profile while it is running.
+ * browser closes 10 seconds after its last page, so its window is not left open; `login` cannot
+ * open the profile while it is running.
  *
  * The browser always runs in a window you can see, never headless, so what it is doing is in view.
  * If a site puts up a check that wants a person, it is there in the window: pass it, and the fetch
@@ -69,7 +70,8 @@ const PORT = Number(process.argv[2] ?? 8811);
 const MAX_REDIRECTS = 10;
 const TIMEOUT_MS = 30_000;
 const BROWSER_TIMEOUT_MS = 30_000;
-const IDLE_MS = 5 * 60_000;
+/** Long enough for fetches one after another to share the browser, short enough to tidy up. */
+const IDLE_MS = 10_000;
 /** Browser mode's browser, unless CHROME_PATH names another Chromium one. */
 const BRAVE = "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser";
 const PROFILE =
