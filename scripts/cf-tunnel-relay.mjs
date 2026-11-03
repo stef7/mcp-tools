@@ -226,6 +226,8 @@ const relay = async (target, incoming) => {
 // ─── browser mode ───────────────────────────────────────────────────────────────────────────────
 let chrome;
 let busy = 0;
+/** Tabs a fetch is using, so two at once never share one. */
+const inUse = new WeakSet();
 let idle;
 
 /**
@@ -322,11 +324,15 @@ const browse = async (target) => {
   busy++;
   clearTimeout(idle);
   try {
-    const page = await (await openChrome()).newPage();
+    const ctx = await openChrome();
+    // The window opens with a blank tab: use that rather than opening a second beside it.
+    const page =
+      ctx.pages().find((p) => p.url() === "about:blank" && !inUse.has(p)) ?? (await ctx.newPage());
+    inUse.add(page);
     let main;
     let refused;
     // The page itself and every hop it is sent on are held to the lists; what it loads is not.
-    page.on("request", (r) => {
+    const onRequest = (r) => {
       if (!r.isNavigationRequest() || r.frame() !== page.mainFrame()) return;
       try {
         checkBrowserUrl(new URL(r.url()));
@@ -334,10 +340,12 @@ const browse = async (target) => {
         refused ??= e;
         page.close().catch(() => {});
       }
-    });
-    page.on("response", (r) => {
+    };
+    const onResponse = (r) => {
       if (r.request().isNavigationRequest() && r.frame() === page.mainFrame()) main = r;
-    });
+    };
+    page.on("request", onRequest);
+    page.on("response", onResponse);
     try {
       await page.goto(url.href, { waitUntil: "domcontentloaded", timeout: BROWSER_TIMEOUT_MS });
       // A check that clears itself moves on to the real page; one that wants a person waits for
@@ -361,7 +369,12 @@ const browse = async (target) => {
     } catch (e) {
       throw refused ?? e;
     } finally {
-      await page.close().catch(() => {});
+      page.off("request", onRequest);
+      page.off("response", onResponse);
+      inUse.delete(page);
+      // The last tab is kept, blank, so the window stays open until the browser goes idle.
+      if (ctx.pages().length > 1) await page.close().catch(() => {});
+      else await page.goto("about:blank").catch(() => {});
     }
   } finally {
     busy--;
