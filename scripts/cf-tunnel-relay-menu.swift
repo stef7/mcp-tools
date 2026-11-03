@@ -164,6 +164,22 @@ final class Controller: NSObject, NSApplicationDelegate, NSMenuDelegate {
         action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q"))
     item.menu = menu
 
+    // Never shown, since the app has no menu bar of its own, but ⌘X/⌘C/⌘V/⌘A in a text field
+    // only work through an Edit menu; without one, pasting into the dialogs does nothing.
+    let edit = NSMenu(title: "Edit")
+    edit.addItem(withTitle: "Undo", action: Selector(("undo:")), keyEquivalent: "z")
+    edit.addItem(withTitle: "Redo", action: Selector(("redo:")), keyEquivalent: "Z")
+    edit.addItem(.separator())
+    edit.addItem(withTitle: "Cut", action: #selector(NSText.cut(_:)), keyEquivalent: "x")
+    edit.addItem(withTitle: "Copy", action: #selector(NSText.copy(_:)), keyEquivalent: "c")
+    edit.addItem(withTitle: "Paste", action: #selector(NSText.paste(_:)), keyEquivalent: "v")
+    edit.addItem(withTitle: "Select All", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a")
+    let editItem = NSMenuItem()
+    editItem.submenu = edit
+    let main = NSMenu()
+    main.addItem(editItem)
+    NSApp.mainMenu = main
+
     // The first time it runs, it puts itself in Open at Login, which is what it is for; after
     // that, the menu item (or System Settings) decides.
     if #available(macOS 13, *), defaults.object(forKey: "loginItemSet") == nil {
@@ -402,7 +418,7 @@ final class Controller: NSObject, NSApplicationDelegate, NSMenuDelegate {
     alert.addButton(withTitle: "Cancel")
     guard alert.runModal() == .alertFirstButtonReturn else { return }
     for (key, f) in zip(["ALLOW_DOMAINS", "BROWSER_ALLOW_DOMAINS"], fields) {
-      defaults.set(f.stringValue.replacingOccurrences(of: " ", with: ""), forKey: key)
+      defaults.set(domainList(f.stringValue), forKey: key)
     }
     if child != nil { restartRelay() }
   }
@@ -509,6 +525,19 @@ func cloudPath(in r: NSRect) -> NSBezierPath {
   }
   path.close()
   return path
+}
+
+/// What was typed or pasted, as the relay wants it: bare domains, comma-separated. A pasted
+/// link loses its scheme, path and port, and a leading `www.` goes, since an entry covers its
+/// subdomains and www.example.org would leave out example.org itself (a redirect to it included).
+func domainList(_ typed: String) -> String {
+  typed.split(whereSeparator: { ", ;\n\t".contains($0) }).map { entry -> String in
+    var d = entry.lowercased()
+    if let scheme = d.range(of: "://") { d = String(d[scheme.upperBound...]) }
+    if let end = d.firstIndex(where: { "/?#:".contains($0) }) { d = String(d[..<end]) }
+    if d.hasPrefix("www.") { d.removeFirst(4) }
+    return d.trimmingCharacters(in: CharacterSet(charactersIn: "."))
+  }.filter { !$0.isEmpty }.joined(separator: ",")
 }
 
 enum CloudLook { case on, starting, off }
