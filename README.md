@@ -211,8 +211,9 @@ connect at all does the last blocked answer from a named route come back instead
    is down), the page is dropped and the tunnel skipped for a minute; if the page answers first,
    the check is dropped. Either sign of a live Mac is remembered for 30 seconds, and a page that is
    merely slow costs only that request (the relay gives up on a site after 30 seconds).
-3. **browser** — the same Mac and relay, with the page loaded in Brave there: it waits out
-   challenge pages that clear themselves and has whatever sign-ins you made with
+3. **browser** — the same Mac and relay, with the page loaded in Brave there, always in a window
+   you can see: it waits up to 45 seconds on a check page, for one that clears itself or for you
+   to pass it in that window, and has whatever sign-ins you made with
    `node cf-tunnel-relay.mjs login <url>`. The browser keeps its own profile in
    `~/.cf-tunnel-relay/profile`. Off unless the relay has `BROWSER_ALLOW_DOMAINS=a.org,b.gov.au`,
    and refused for every other domain, where the page starts and wherever it is redirected. Every

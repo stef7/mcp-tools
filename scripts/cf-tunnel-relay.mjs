@@ -37,6 +37,10 @@
  * and Brave in /Applications, or `CHROME_PATH` set to another Chromium browser's executable. The
  * browser closes after 5 idle minutes; `login` cannot open the profile while it is running.
  *
+ * The browser always runs in a window you can see, never headless, so what it is doing is in view.
+ * If a site puts up a check that wants a person, it is there in the window: pass it, and the fetch
+ * carries on, waiting up to 45 seconds for the check to clear.
+ *
  * THE CONNECTOR: with CF_TUNNEL_RELAY_CLOUDFLARED set, which CF Tunnel Relay.app
  * (scripts/cf-tunnel-relay-menu.swift) does, the relay also runs `cloudflared tunnel run` for
  * tunnel `WMac`, so the one menu bar app keeps both up and `cloudflared` needs no service of its
@@ -274,15 +278,15 @@ const startProxy = () =>
     proxy.on("error", reject).listen(0, "127.0.0.1", () => resolve(proxy.address().port));
   }));
 
-/** The one Chrome, opened on first use; `login` opens it in a window. */
-const openChrome = ({ headless }) =>
+/** The one browser, opened on first use, always in a window. */
+const openChrome = () =>
   (chrome ??= (async () => {
     const { chromium } = await import("playwright-core").catch(() => {
       throw new Error("browser mode needs playwright-core: `npm install` at the root of the repo");
     });
     const ctx = await chromium.launchPersistentContext(PROFILE, {
       executablePath: process.env.CHROME_PATH || BRAVE,
-      headless,
+      headless: false,
       // `<-loopback>` sends localhost through the proxy too, where it is refused.
       proxy: { server: `http://127.0.0.1:${await startProxy()}` },
       args: ["--proxy-bypass-list=<-loopback>"],
@@ -315,7 +319,7 @@ const browse = async (target) => {
   busy++;
   clearTimeout(idle);
   try {
-    const page = await (await openChrome({ headless: true })).newPage();
+    const page = await (await openChrome()).newPage();
     let main;
     let refused;
     // The page itself and every hop it is sent on are held to the lists; what it loads is not.
@@ -333,8 +337,9 @@ const browse = async (target) => {
     });
     try {
       await page.goto(url.href, { waitUntil: "domcontentloaded", timeout: BROWSER_TIMEOUT_MS });
-      // A challenge that clears itself moves on to the real page; give it the time to.
-      for (let i = 0; i < 20 && CHALLENGE.test(await page.title().catch(() => "")); i++) {
+      // A check that clears itself moves on to the real page; one that wants a person waits for
+      // them in the window. 45 seconds, so the page still gets back inside mcp-fetch's minute.
+      for (let i = 0; i < 45 && CHALLENGE.test(await page.title().catch(() => "")); i++) {
         await page.waitForTimeout(1000);
       }
       await page.waitForLoadState("domcontentloaded", { timeout: 5000 }).catch(() => {});
@@ -480,7 +485,7 @@ for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"]) {
 }
 
 if (process.argv[2] === "login") {
-  const ctx = await openChrome({ headless: false }).catch((e) => {
+  const ctx = await openChrome().catch((e) => {
     console.log(
       `${e.message}\nIf the relay has Chrome open, try again once it has been idle 5 minutes.`,
     );
