@@ -53,6 +53,16 @@ esc() { printf '%s' "$1" | sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS"
 xcrun swiftc -swift-version 5 -O -o "$APP/Contents/MacOS/$BIN" "$SRC"
+# The icon is drawn by the app itself, so the repo holds no image for it.
+ICONS="$(mktemp -d)"
+mkdir -p "$APP/Contents/Resources"
+if "$APP/Contents/MacOS/$BIN" --write-iconset "$ICONS/AppIcon.iconset" &&
+  iconutil -c icns -o "$APP/Contents/Resources/AppIcon.icns" "$ICONS/AppIcon.iconset"; then
+  :
+else
+  echo "note: could not make the icon; the app works without one" >&2
+fi
+rm -rf "$ICONS"
 cat >"$APP/Contents/Info.plist" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -60,6 +70,7 @@ cat >"$APP/Contents/Info.plist" <<EOF
   <key>CFBundleIdentifier</key><string>local.cf-tunnel-relay</string>
   <key>CFBundleName</key><string>CF Tunnel Relay</string>
   <key>CFBundleExecutable</key><string>$BIN</string>
+  <key>CFBundleIconFile</key><string>AppIcon</string>
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>CFBundleShortVersionString</key><string>1.0</string>
   <key>CFBundleVersion</key><string>1</string>
@@ -75,6 +86,8 @@ EOF
 plutil -lint "$APP/Contents/Info.plist" >/dev/null
 # Signed as a whole (ad hoc), so the Info.plist is part of what macOS checks.
 codesign --force --sign - "$APP"
+# Finder keeps the old icon until the bundle looks changed.
+touch "$APP"
 
 open "$APP"
 echo "ok - built $APP and opened it: look for the cloud in the menu bar"

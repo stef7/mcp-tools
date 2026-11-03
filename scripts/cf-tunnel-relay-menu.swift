@@ -333,7 +333,6 @@ final class Controller: NSObject, NSApplicationDelegate, NSMenuDelegate {
   func askToken() -> Bool {
     NSApp.activate(ignoringOtherApps: true)
     let alert = NSAlert()
-    alert.icon = NSImage(systemSymbolName: "cloud.fill", accessibilityDescription: nil)
     alert.messageText = "Tunnel token for WMac"
     alert.informativeText =
       "In the Cloudflare dashboard: Networking -> Tunnels -> WMac -> Add a replica. Copy the "
@@ -373,7 +372,6 @@ final class Controller: NSObject, NSApplicationDelegate, NSMenuDelegate {
   @objc func editDomains() {
     NSApp.activate(ignoringOtherApps: true)
     let alert = NSAlert()
-    alert.icon = NSImage(systemSymbolName: "cloud.fill", accessibilityDescription: nil)
     alert.messageText = "Allowed domains"
     alert.informativeText = "Comma-separated, such as example.org, abc.net.au; each also covers "
       + "its subdomains. Saving restarts the relay."
@@ -470,7 +468,6 @@ final class Controller: NSObject, NSApplicationDelegate, NSMenuDelegate {
   func complain(_ message: String) {
     NSApp.activate(ignoringOtherApps: true)
     let alert = NSAlert()
-    alert.icon = NSImage(systemSymbolName: "cloud.fill", accessibilityDescription: nil)
     alert.messageText = "CF Tunnel Relay"
     alert.informativeText = message
     alert.runModal()
@@ -485,6 +482,56 @@ final class Controller: NSObject, NSApplicationDelegate, NSMenuDelegate {
     // ended() replies once the relay has gone.
     return .terminateLater
   }
+}
+
+/// The app icon, drawn rather than kept as a file: a white cloud on a blue tile, at every size an
+/// .iconset needs. The build runs `CFTunnelRelay --write-iconset <dir>` and hands it to iconutil.
+func writeIconset(to dir: String) -> Bool {
+  guard #available(macOS 12, *) else { return false }
+  let sizes: [(String, Int)] = [
+    ("16x16", 16), ("16x16@2x", 32), ("32x32", 32), ("32x32@2x", 64), ("128x128", 128),
+    ("128x128@2x", 256), ("256x256", 256), ("256x256@2x", 512), ("512x512", 512),
+    ("512x512@2x", 1024),
+  ]
+  try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
+  for (name, px) in sizes {
+    guard
+      let rep = NSBitmapImageRep(
+        bitmapDataPlanes: nil, pixelsWide: px, pixelsHigh: px, bitsPerSample: 8,
+        samplesPerPixel: 4, hasAlpha: true, isPlanar: false, colorSpaceName: .deviceRGB,
+        bytesPerRow: 0, bitsPerPixel: 0)
+    else { return false }
+    let s = CGFloat(px)
+    NSGraphicsContext.saveGraphicsState()
+    NSGraphicsContext.current = NSGraphicsContext(bitmapImageRep: rep)
+    // The proportions of macOS's own icons: a tile 80% of the canvas, corners at 18%.
+    let tile = NSBezierPath(
+      roundedRect: NSRect(x: s * 0.1, y: s * 0.1, width: s * 0.8, height: s * 0.8),
+      xRadius: s * 0.18, yRadius: s * 0.18)
+    NSGradient(
+      starting: NSColor(srgbRed: 0.33, green: 0.62, blue: 1.0, alpha: 1),
+      ending: NSColor(srgbRed: 0.16, green: 0.30, blue: 0.80, alpha: 1))?.draw(in: tile, angle: -90)
+    let look = NSImage.SymbolConfiguration(pointSize: s * 0.36, weight: .regular)
+      .applying(NSImage.SymbolConfiguration(paletteColors: [.white]))
+    if let cloud = NSImage(systemSymbolName: "cloud.fill", accessibilityDescription: nil)?
+      .withSymbolConfiguration(look)
+    {
+      let size = cloud.size
+      cloud.draw(
+        in: NSRect(
+          x: (s - size.width) / 2, y: (s - size.height) / 2, width: size.width,
+          height: size.height))
+    }
+    NSGraphicsContext.restoreGraphicsState()
+    guard let png = rep.representation(using: .png, properties: [:]),
+      (try? png.write(to: URL(fileURLWithPath: "\(dir)/icon_\(name).png"))) != nil
+    else { return false }
+  }
+  return true
+}
+
+if CommandLine.arguments.count == 3 && CommandLine.arguments[1] == "--write-iconset" {
+  exit(writeIconset(to: CommandLine.arguments[2]) ? 0 : 1)
 }
 
 let app = NSApplication.shared
