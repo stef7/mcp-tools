@@ -137,6 +137,10 @@ final class Controller: NSObject, NSApplicationDelegate, NSMenuDelegate {
   var retryDelay: TimeInterval = 5
   var retryPending = false
   var quitting = false
+  /// The browser opened to pass a check by hand (`cf-tunnel-relay.mjs login`), while it is open.
+  var browsing: Process?
+  /// What to do once the relay has stopped, in place of starting it again.
+  var afterStop: (() -> Void)?
 
   func applicationDidFinishLaunching(_ note: Notification) {
     item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
@@ -147,13 +151,15 @@ final class Controller: NSObject, NSApplicationDelegate, NSMenuDelegate {
     let log = NSMenuItem(title: "Show error log", action: #selector(showLog), keyEquivalent: "")
     let domains = NSMenuItem(title: "Allowed domains…", action: #selector(editDomains), keyEquivalent: "")
     let token = NSMenuItem(title: "Replace tunnel token…", action: #selector(replaceToken), keyEquivalent: "")
-    for i in [toggle, restart, atLogin, log, domains, token] { i.target = self }
+    let check = NSMenuItem(title: "Pass a check in Brave…", action: #selector(passCheck), keyEquivalent: "")
+    for i in [toggle, restart, atLogin, log, domains, token, check] { i.target = self }
     menu.addItem(status)
     menu.addItem(.separator())
     menu.addItem(toggle)
     menu.addItem(restart)
     menu.addItem(.separator())
     menu.addItem(domains)
+    menu.addItem(check)
     menu.addItem(token)
     menu.addItem(atLogin)
     menu.addItem(log)
@@ -206,7 +212,7 @@ final class Controller: NSObject, NSApplicationDelegate, NSMenuDelegate {
   // MARK: the relay
 
   func start() {
-    guard child == nil, !quitting else { return }
+    guard child == nil, browsing == nil, !quitting else { return }
     guard let script = config["Script"], FileManager.default.fileExists(atPath: script) else {
       wantOn = false
       draw(nil)
@@ -293,14 +299,18 @@ final class Controller: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
     draw(nil)
     if quitting { return NSApp.reply(toApplicationShouldTerminate: true) }
-    guard wantOn, !retryPending else { return }
+    if let next = afterStop {
+      afterStop = nil
+      return next()
+    }
+    guard wantOn, browsing == nil, !retryPending else { return }
     if Date().timeIntervalSince(startedAt) > 60 { retryDelay = 5 }
     let wait = retryDelay
     retryDelay = min(retryDelay * 2, 60)
     retryPending = true
     DispatchQueue.main.asyncAfter(deadline: .now() + wait) {
       self.retryPending = false
-      if self.wantOn { self.start() }
+      if self.wantOn && self.browsing == nil { self.start() }
     }
   }
 
@@ -341,6 +351,79 @@ final class Controller: NSObject, NSApplicationDelegate, NSMenuDelegate {
       complain(
         "Could not change Open at Login: \(error.localizedDescription)\n\nSystem Settings -> "
           + "General -> Login Items does the same.")
+    }
+    draw(nil)
+  }
+
+  /// Opens browser mode's own profile in Brave with nothing automating it, for a person to pass a
+  /// check or sign in; what they get there, browser mode reuses until the site lets it lapse. The
+  /// relay is paused meanwhile, since one profile can be open in only one browser at a time, and
+  /// starts again when that Brave is quit.
+  @objc func passCheck() {
+    if browsing != nil {
+      return complain("Brave is already open for this. Quit it (⌘Q) to carry on.")
+    }
+    guard let script = config["Script"], let node = locate("Node", "node") else {
+      return complain("The relay or Node cannot be found: turn the tunnel on to see why.")
+    }
+    NSApp.activate(ignoringOtherApps: true)
+    let alert = NSAlert()
+    alert.messageText = "Pass a check in Brave"
+    alert.informativeText =
+      "Brave opens this page in browser mode's own profile, with nothing automating it. Pass the "
+      + "check or sign in, then quit that Brave (⌘Q). The relay is paused until then."
+    let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 360, height: 24))
+    field.stringValue = defaults.string(forKey: "checkURL") ?? "https://"
+    alert.accessoryView = field
+    alert.addButton(withTitle: "Open")
+    alert.addButton(withTitle: "Cancel")
+    alert.window.initialFirstResponder = field
+    guard alert.runModal() == .alertFirstButtonReturn else { return }
+    let url = field.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+    defaults.set(url, forKey: "checkURL")
+    let open = { self.openBrowser(node: node, script: script, url: url) }
+    if child != nil {
+      afterStop = open
+      stop()
+    } else {
+      open()
+    }
+    draw(nil)
+  }
+
+  func openBrowser(node: String, script: String, url: String) {
+    let p = Process()
+    p.executableURL = URL(fileURLWithPath: node)
+    p.arguments = [script, "login", url]
+    var env = ProcessInfo.processInfo.environment
+    for key in relaySettings {
+      env[key] = nil
+      if let v = defaults.string(forKey: key), !v.isEmpty { env[key] = v }
+    }
+    p.environment = env
+    p.standardInput = FileHandle.nullDevice
+    let out = Pipe()
+    p.standardOutput = out
+    p.standardError = out
+    p.terminationHandler = { [weak self] proc in
+      let said = String(decoding: out.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
+      DispatchQueue.main.async {
+        guard let self = self else { return }
+        self.browsing = nil
+        if proc.terminationStatus != 0 && !self.quitting {
+          self.complain("Brave did not open as it should:\n\n\(said)")
+        }
+        self.retryDelay = 5
+        if self.wantOn { self.start() }
+        self.draw(nil)
+      }
+    }
+    do {
+      try p.run()
+      browsing = p
+    } catch {
+      complain("Could not run \(node) \(script) login:\n\(error.localizedDescription)")
+      if wantOn { start() }
     }
     draw(nil)
   }
@@ -445,7 +528,10 @@ final class Controller: NSObject, NSApplicationDelegate, NSMenuDelegate {
   /// probe: whether /health answered and how many connections cloudflared has, when known.
   func draw(_ probe: (relay: Bool, connections: Int)?) {
     let look: CloudLook
-    if !wantOn {
+    if browsing != nil || afterStop != nil {
+      look = .starting
+      status.title = "Paused: Brave is open to pass a check. Quit it (⌘Q) to carry on"
+    } else if !wantOn {
       look = .off
       status.title = child == nil ? "Off: relay and cloudflared stopped" : "Turning off…"
     } else if child == nil {
@@ -487,6 +573,8 @@ final class Controller: NSObject, NSApplicationDelegate, NSMenuDelegate {
   // MARK: quitting
 
   func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+    // The relay's `login` closes its Brave on the way out.
+    browsing?.terminate()
     guard child != nil else { return .terminateNow }
     quitting = true
     stop()

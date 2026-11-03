@@ -213,8 +213,8 @@ connect at all does the last blocked answer from a named route come back instead
    merely slow costs only that request (the relay gives up on a site after 30 seconds).
 3. **browser** — the same Mac and relay, with the page loaded in Brave there, always in a window
    you can see: it waits up to 45 seconds on a check page, for one that clears itself or for you
-   to pass it in that window, and has whatever sign-ins you made with
-   `node cf-tunnel-relay.mjs login <url>`. The browser keeps its own profile in
+   to pass it in that window, and has whatever sign-ins and passed checks you made with Pass a
+   check in Brave… in the app's menu. The browser keeps its own profile in
    `~/.cf-tunnel-relay/profile`. Off unless the relay has `BROWSER_ALLOW_DOMAINS=a.org,b.gov.au`,
    and refused for every other domain, where the page starts and wherever it is redirected. Every
    connection the browser makes goes through a proxy inside the relay with the same private-address
@@ -243,7 +243,8 @@ General -> Login Items -> Open at Login like any other, and quitting it stops bo
    live connection to Cloudflare (its metrics, on `127.0.0.1:8812`); with a `!` while either is
    starting or failing; slashed when off. Its menu has the on/off switch (which stays as left,
    across logins), Restart, Allowed domains… (`ALLOW_DOMAINS` and `BROWSER_ALLOW_DOMAINS`),
-   Replace tunnel token…, Open at Login, and the error log, `/tmp/cf-tunnel-relay.err`.
+   Pass a check in Brave…, Replace tunnel token…, Open at Login, and the error log,
+   `/tmp/cf-tunnel-relay.err`.
    `CHROME_PATH` and `CF_TUNNEL_RELAY_PROFILE` are set with
    `defaults write local.cf-tunnel-relay CHROME_PATH /path/to/browser`.
 5. If the relay stops, the app starts it again after 5 seconds, doubling up to a minute while it
@@ -253,8 +254,12 @@ General -> Login Items -> Open at Login like any other, and quitting it stops bo
    `cf-tunnel-relay-menu.swift` changed or the clone moved. To remove it all: Quit, turn off Open
    at Login first if you like, and delete the app.
 7. For browser mode, `npm install` at the root of the clone (it brings playwright-core) and Brave in
-   `/Applications` (or `CHROME_PATH` as above); then `node scripts/cf-tunnel-relay.mjs login <url>`
-   for any sign-ins, with the tunnel switched off, since the profile can only be open once.
+   `/Applications` (or `CHROME_PATH` as above). Some sites' checks will not clear for a browser
+   that is being automated; for those, Pass a check in Brave… pauses the relay and opens the page
+   in browser mode's own profile with nothing automating it. Pass the check or sign in, quit that
+   Brave (⌘Q), and the relay starts again, with browser mode reusing what you got there until the
+   site lets it lapse. `node scripts/cf-tunnel-relay.mjs login <url>` does the same from Terminal,
+   with the tunnel switched off, since the profile can only be open in one browser at a time.
 
 A `cloudflared` service installed the usual way (`sudo cloudflared service install <token>`) would
 connect the Mac to `WMac` a second time, and keeps the token in plain text in its plist; the

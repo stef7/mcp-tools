@@ -5,7 +5,7 @@
  * URL it is handed from this machine's own connection.
  *
  *   node scripts/cf-tunnel-relay.mjs [port]       default 8811
- *   node scripts/cf-tunnel-relay.mjs login [url]  Chrome in a window, to sign in or pass a check
+ *   node scripts/cf-tunnel-relay.mjs login [url]  the browser on its own, to sign in or pass a check
  *
  *   ALLOW_DOMAINS=example.org,acnc.gov.au      optional: refuse every other domain
  *   BROWSER_ALLOW_DOMAINS=example.org          browser mode is off for every domain not listed
@@ -501,18 +501,36 @@ for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"]) {
 }
 
 if (process.argv[2] === "login") {
-  const ctx = await openChrome().catch((e) => {
-    console.log(
-      `${e.message}\nIf the relay has Chrome open, try again once it has been idle 5 minutes.`,
-    );
+  // The browser on its own, with no Playwright driving it: you, at the keyboard, in browser mode's
+  // profile. What you sign in to or pass here, browser mode has afterwards, for as long as the
+  // site lets it last. Mock keychain and basic password store as Playwright uses, so the cookies
+  // are kept the way browser mode can read them back.
+  const browser = spawn(
+    process.env.CHROME_PATH || BRAVE,
+    [
+      `--user-data-dir=${PROFILE}`,
+      "--use-mock-keychain",
+      "--password-store=basic",
+      "--no-first-run",
+      "--no-default-browser-check",
+      process.argv[3] ?? "about:blank",
+    ],
+    { stdio: "ignore" },
+  );
+  for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"]) process.on(signal, () => browser.kill());
+  browser.on("error", (e) => {
+    console.log(`could not open the browser: ${e.message}`);
     process.exit(1);
   });
-  await (ctx.pages()[0] ?? (await ctx.newPage())).goto(process.argv[3] ?? "about:blank");
   console.log(
-    "Sign in or pass the check in that window, then close it. The profile keeps the cookies.",
+    "Sign in or pass the check in that window, then quit that browser (⌘Q). The profile keeps " +
+      "the cookies.",
   );
-  await new Promise((done) => ctx.on("close", done));
-  process.exit(0);
+  browser.on("exit", (code) => {
+    // Chromium's exit code for a profile already open in another copy of it.
+    if (code === 21) console.log("The profile is open elsewhere: turn the tunnel off first.");
+    process.exit(code ? 1 : 0);
+  });
 } else {
   // The VPC Service points at `localhost`, which cloudflared may resolve to either family.
   for (const host of ["127.0.0.1", "::1"]) {
