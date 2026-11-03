@@ -17,7 +17,13 @@
 import cfg from "../wrangler.json";
 import { version } from "../package.json";
 import { mcpWorker, tool, type Ctx } from "../../../core/mcp";
-import { BROWSER_UA as UA, stripHtml, withBase } from "../../../core/web";
+import {
+  BROWSER_UA as UA,
+  fragmentSelector,
+  selectHtml,
+  stripHtml,
+  withBase,
+} from "../../../core/web";
 import { egress, ROUTES, type Via } from "../../../core/egress";
 
 const FORMATS = ["auto", "markdown", "text", "raw"] as const;
@@ -170,6 +176,41 @@ const render = async (env: Env, bytes: Uint8Array, url: string, kind: string, fo
   return { text: decoded(), via: "plain" };
 };
 
+/**
+ * Cut an HTML page down to what `select` matches, before any format sees it, so markdown, text
+ * and raw all get the same piece. With no `select`, the URL's #fragment picks the element with
+ * that id. A fragment that names no element (an old `name=` anchor, a script route) leaves the
+ * page whole, with a note saying so; a `select` that matches nothing is an error, since it was
+ * asked for outright.
+ */
+const narrow = async (bytes: Uint8Array, url: string, kind: string, select?: string) => {
+  const selector = select?.trim() || fragmentSelector(url);
+  if (!selector) return { bytes };
+  const explicit = Boolean(select?.trim());
+  if (kind !== "html") {
+    if (explicit) throw new Error(`select only applies to HTML; this is ${kind}.`);
+    return { bytes }; // a PDF's #page=3 and the like
+  }
+  let parts: string[];
+  try {
+    parts = await selectHtml(new TextDecoder().decode(bytes), selector);
+  } catch (e) {
+    throw new Error(
+      `select ${JSON.stringify(selector)} is not a selector HTMLRewriter accepts: ${e}`,
+    );
+  }
+  if (!parts.length) {
+    if (explicit) throw new Error(`Nothing on the page matches ${JSON.stringify(selector)}.`);
+    return {
+      bytes,
+      selector,
+      matches: 0,
+      note: `(No element has the id in the URL's #fragment, so this is the whole page.)\n\n`,
+    };
+  }
+  return { bytes: new TextEncoder().encode(parts.join("\n")), selector, matches: parts.length };
+};
+
 // ─── Storage ───────────────────────────────────────────────────────────────────────────────────
 type Row = {
   url: string;
@@ -264,6 +305,14 @@ const Tools = mcpWorker({
             type: "boolean",
             description: "Re-download instead of using the cached bytes. Default false.",
           },
+          select: {
+            type: "string",
+            description:
+              "CSS selector: keep only the elements it matches, cut from the HTML before any " +
+              "format is applied, e.g. `#incoming-51471` or `div.correspondence`. Without it, a " +
+              "#fragment in `url` keeps just the element with that id, or the whole page if no " +
+              "element has it. HTML only.",
+          },
           via: {
             type: "array",
             items: { type: "string", enum: [...ROUTES] },
@@ -278,13 +327,18 @@ const Tools = mcpWorker({
           },
         },
       },
-      async run({ url, format, force, via }, c) {
+      async run({ url, format, force, via, select }, c) {
         const env = await schema(c);
         const fmt: Format = FORMATS.includes(format as Format) ? (format as Format) : "auto";
+        // The server never sees a #fragment, so every fragment of a page shares one download.
+        const page = url.split("#")[0] ?? url;
         try {
-          const { bytes, ct, cached, route } = await bytesFor(env, url, force === true, via);
-          const kind = kindOf(url, ct ?? null);
-          const { text, via: how } = await render(env, bytes, url, kind, fmt);
+          const { bytes, ct, cached, route } = await bytesFor(env, page, force === true, via);
+          const kind = kindOf(page, ct ?? null);
+          const cut = await narrow(bytes, url, kind, select);
+          const rendered = await render(env, cut.bytes, page, kind, fmt);
+          const text = (cut.note ?? "") + rendered.text;
+          const how = rendered.via;
           await store(env, {
             url,
             kind,
@@ -292,7 +346,13 @@ const Tools = mcpWorker({
             status: "ok",
             text,
             bytes_len: bytes.length,
-            meta_json: JSON.stringify({ format: fmt, via: how, cached, route }),
+            meta_json: JSON.stringify({
+              format: fmt,
+              via: how,
+              cached,
+              route,
+              ...(cut.selector && { select: cut.selector, matches: cut.matches }),
+            }),
           });
           return text;
         } catch (e) {
