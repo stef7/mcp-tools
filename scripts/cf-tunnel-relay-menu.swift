@@ -13,9 +13,10 @@
 // without stopping it (a crash, a force quit), the pipe closes and the relay stops itself and
 // cloudflared, so nothing is left running that the menu bar does not show.
 //
-// The icon:  cloud filled    on: relay up and cloudflared connected to Cloudflare
-//            cloud with !    on, but the relay or cloudflared is not up yet (or keeps failing)
-//            cloud slashed   off: neither is running
+// The icon, a flat-bottomed cloud:
+//            solid           on: relay up and cloudflared connected to Cloudflare
+//            faint           on, but the relay or cloudflared is not up yet (or keeps failing)
+//            faint, slashed  off: neither is running
 import AppKit
 import ServiceManagement
 
@@ -427,22 +428,22 @@ final class Controller: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
   /// probe: whether /health answered and how many connections cloudflared has, when known.
   func draw(_ probe: (relay: Bool, connections: Int)?) {
-    let symbol: String
+    let look: CloudLook
     if !wantOn {
-      symbol = "icloud.slash"
+      look = .off
       status.title = child == nil ? "Off: relay and cloudflared stopped" : "Turning off…"
     } else if child == nil {
-      symbol = "exclamationmark.icloud"
+      look = .starting
       status.title = "On: relay stopped, starting it again shortly (see the error log)"
     } else if let probe = probe, probe.relay, probe.connections > 0 {
-      symbol = "cloud.fill"
+      look = .on
       let n = probe.connections
       status.title = "On: connected to WMac (\(n) connection\(n == 1 ? "" : "s"))"
     } else if let probe = probe, probe.relay {
-      symbol = "exclamationmark.icloud"
+      look = .starting
       status.title = "On: relay up, cloudflared not connected yet"
     } else {
-      symbol = "exclamationmark.icloud"
+      look = .starting
       status.title = "On: relay starting…"
     }
     toggle.state = wantOn ? .on : .off
@@ -453,14 +454,8 @@ final class Controller: NSObject, NSApplicationDelegate, NSMenuDelegate {
       atLogin.isHidden = true
     }
     if let button = item?.button {
-      if let image = NSImage(systemSymbolName: symbol, accessibilityDescription: status.title) {
-        image.isTemplate = true
-        button.image = image
-        button.title = ""
-      } else {
-        button.image = nil
-        button.title = wantOn ? "WMac" : "WMac off"
-      }
+      button.image = menuIcon(look)
+      button.image?.accessibilityDescription = status.title
       button.toolTip = "CF Tunnel Relay — \(status.title)"
     }
   }
@@ -484,10 +479,72 @@ final class Controller: NSObject, NSApplicationDelegate, NSMenuDelegate {
   }
 }
 
+/// The one cloud shape, for the menu bar and the app icon: a big lobe right of centre, a smaller
+/// one either side, and a flat bottom along r.minY, filled in the current fill colour. It is about
+/// half as tall as it is wide; r's height is only a guide.
+func fillCloud(in r: NSRect) {
+  // Laid out on a cloud 0.96 wide (from 0.03 to 0.99) and 0.51 tall.
+  let k = r.width / 0.96
+  func at(_ u: CGFloat, _ v: CGFloat) -> NSPoint {
+    NSPoint(x: r.minX + (u - 0.03) * k, y: r.minY + v * k)
+  }
+  NSGraphicsContext.saveGraphicsState()
+  // Everything below the base is cut away: that is the flat bottom.
+  NSBezierPath(rect: NSRect(x: r.minX - k, y: r.minY, width: r.width + 2 * k, height: 2 * k))
+    .addClip()
+  let lobes: [(CGFloat, CGFloat, CGFloat)] = [(0.20, 0.12, 0.17), (0.55, 0.18, 0.33), (0.84, 0.10, 0.15)]
+  for (u, v, radius) in lobes {
+    let c = at(u, v)
+    NSBezierPath(
+      ovalIn: NSRect(x: c.x - radius * k, y: c.y - radius * k, width: 2 * radius * k, height: 2 * radius * k)
+    ).fill()
+  }
+  // Fills the dips between the lobes down at the base.
+  let a = at(0.20, 0)
+  let b = at(0.84, 0.12)
+  NSBezierPath(rect: NSRect(x: a.x, y: a.y, width: b.x - a.x, height: b.y - a.y)).fill()
+  NSGraphicsContext.restoreGraphicsState()
+}
+
+enum CloudLook { case on, starting, off }
+
+/// The menu bar's cloud, as a template image so it follows the menu bar's colour.
+func menuIcon(_ look: CloudLook) -> NSImage {
+  let size = NSSize(width: 22, height: 16)
+  let solid = NSImage(size: size, flipped: false) { _ in
+    NSColor.black.setFill()
+    fillCloud(in: NSRect(x: 1, y: 3, width: 20, height: 10.6))
+    if look == .off {
+      let slash = NSBezierPath()
+      slash.move(to: NSPoint(x: 4, y: 0.5))
+      slash.line(to: NSPoint(x: 18, y: 15.5))
+      slash.lineCapStyle = .round
+      // A gap cut either side of the line, so it reads against the cloud.
+      NSGraphicsContext.current?.compositingOperation = .clear
+      slash.lineWidth = 4
+      slash.stroke()
+      NSGraphicsContext.current?.compositingOperation = .sourceOver
+      NSColor.black.setStroke()
+      slash.lineWidth = 1.5
+      slash.stroke()
+    }
+    return true
+  }
+  // Faint whenever it is not connected, drawn through once so the overlapping lobes stay even.
+  let image =
+    look == .on
+    ? solid
+    : NSImage(size: size, flipped: false) { r in
+      solid.draw(in: r, from: .zero, operation: .sourceOver, fraction: 0.45)
+      return true
+    }
+  image.isTemplate = true
+  return image
+}
+
 /// The app icon, drawn rather than kept as a file: a white cloud on a blue tile, at every size an
 /// .iconset needs. The build runs `CFTunnelRelay --write-iconset <dir>` and hands it to iconutil.
 func writeIconset(to dir: String) -> Bool {
-  guard #available(macOS 12, *) else { return false }
   let sizes: [(String, Int)] = [
     ("16x16", 16), ("16x16@2x", 32), ("32x32", 32), ("32x32@2x", 64), ("128x128", 128),
     ("128x128@2x", 256), ("256x256", 256), ("256x256@2x", 512), ("512x512", 512),
@@ -511,17 +568,8 @@ func writeIconset(to dir: String) -> Bool {
     NSGradient(
       starting: NSColor(srgbRed: 0.33, green: 0.62, blue: 1.0, alpha: 1),
       ending: NSColor(srgbRed: 0.16, green: 0.30, blue: 0.80, alpha: 1))?.draw(in: tile, angle: -90)
-    let look = NSImage.SymbolConfiguration(pointSize: s * 0.36, weight: .regular)
-      .applying(NSImage.SymbolConfiguration(paletteColors: [.white]))
-    if let cloud = NSImage(systemSymbolName: "cloud.fill", accessibilityDescription: nil)?
-      .withSymbolConfiguration(look)
-    {
-      let size = cloud.size
-      cloud.draw(
-        in: NSRect(
-          x: (s - size.width) / 2, y: (s - size.height) / 2, width: size.width,
-          height: size.height))
-    }
+    NSColor.white.setFill()
+    fillCloud(in: NSRect(x: s * 0.2, y: s * 0.34, width: s * 0.6, height: s * 0.32))
     NSGraphicsContext.restoreGraphicsState()
     guard let png = rep.representation(using: .png, properties: [:]),
       (try? png.write(to: URL(fileURLWithPath: "\(dir)/icon_\(name).png"))) != nil
