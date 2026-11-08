@@ -296,8 +296,8 @@ toolkit alone — core resolves the signed-in email there and forwards it over R
 `mcp-helios` is the one exception, on purpose: it is **not** bound into the toolkit and keeps
 its own URL. Its admin tools act with a Helios session cookie, which is the administrator
 themselves on Helios, so its tools should not appear on the connector everyone else uses. It gets
-its own Access policy (the same steps as under **Auth**), listing only the people running the
-election. To put it on the toolkit after all, add it to `services` like any other worker — but
+its own Access policy (the same steps as under **Auth**), listing the people running the
+election, and that policy is also what identifies them to its `/login` page. To put it on the toolkit after all, add it to `services` like any other worker — but
 then everyone on the toolkit's policy can see those tools, and the warning above about bindings
 bypassing Access applies.
 
@@ -434,18 +434,20 @@ none of their own. Prefer signing in.
 anyone can fetch; every administrative action is a Django form POST protected by the session
 cookie of a browser that has logged in (Google or GitHub on heliosvoting.org) and a per-session
 `csrf_token`, which `mcp-helios` scrapes from an admin page and submits the way the browser
-would. So an administrator logs in once in a browser, copies the `sessionid` cookie, and hands it
-to the worker one of three ways, first match wins:
+would. There is no way for a worker to do that login for anyone, so each administrator does it
+once in a browser and then opens the worker's own **`/login`** page, which is behind Cloudflare
+Access: it names the cookie to copy (`sessionid`, under the browser's developer tools or a
+cookie-manager extension), checks the pasted value against Helios, and keeps it in the
+`SESSIONS` KV namespace against their Access email. From then on the tools act as that Helios
+user for that person alone. The cookie never passes through a tool call, so it never sits in a
+model's context; `helios_session_status` says who you are acting as without revealing it, and
+`helios_sign_out` (or the page) forgets it. Logging out of Helios in the browser ends the session
+everywhere; otherwise it lasts as long as Helios keeps it (two weeks of inactivity).
 
-1. The connector's `X-Auth-Token` header — the caller's own cookie, stored nowhere here.
-2. `HELIOS_SESSIONS`, a secret mapping Cloudflare Access emails to cookies, so each person acts as
-   themselves: `{ "me@example.com": "<sessionid value>" }`. A value may be
-   `{ "cookie": "…", "url": "https://helios.example.org" }` for someone on another Helios.
-3. `HELIOS_SESSION`, one shared cookie.
-
-The cookie is that person on Helios until they log out there, which also invalidates it: do that
-when the election is over. `?helios=https://…` on the connector URL points the worker at a
-self-hosted Helios instead of heliosvoting.org (`HELIOS_URL` sets the default).
+Access therefore has to be on `mcp-helios` — it is what tells the worker who is calling, as
+well as who may. `?helios=https://…` on the connector URL points the worker at a self-hosted
+Helios instead of heliosvoting.org (`HELIOS_URL` sets the default); sessions are kept per
+server.
 
 The tools follow the election through its life: `helios_create_election` → `helios_set_questions`
 → trustees → `helios_upload_voters` → `helios_freeze_election` → `helios_email_voters` →

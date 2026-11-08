@@ -4,13 +4,14 @@
  * Helios's real cryptography is not exercised here; what is pinned down is everything the worker
  * does on its own: Python-compatible hashing, the form flows (csrf token, redirect-on-success,
  * the two-step voter upload), the admin page parsing that election_status depends on, winner and
- * tie arithmetic, UTC conversion, and the three ways a session cookie can arrive.
+ * tie arithmetic, UTC conversion, and the /login page that is the one way a session arrives.
  */
 import { createExecutionContext, env } from "cloudflare:test";
-import { describe, expect, inject, it } from "vitest";
+import { beforeEach, describe, expect, inject, it } from "vitest";
 import Worker from "../workers/mcp-helios/src/index";
 import { heliosHash, pythonJsonDumps } from "../workers/mcp-helios/src/canonical";
 import { questionWinners, toHeliosUtc } from "../workers/mcp-helios/src/model";
+import { forget, save } from "../workers/mcp-helios/src/session";
 
 const base = inject("heliosBase");
 const SESSION = inject("heliosSession");
@@ -28,12 +29,12 @@ type Res = { content: { text: string }[]; isError?: boolean; structuredContent?:
 
 const helios = () => new Worker(createExecutionContext(), env);
 const tools = () => helios().tools({ search }) as Promise<Spec[]>;
-/** A call as an administrator: the cookie travels in the connector's X-Auth-Token header. */
-const call = (
-  name: string,
-  args: Record<string, unknown> = {},
-  headers = { "x-auth-token": SESSION },
-) => helios().call(name, args, { search, email: ME, headers }) as Promise<Res>;
+/** A call as ME, whose session (if any) is whatever /login or signIn() put in KV. */
+const call = (name: string, args: Record<string, unknown> = {}, email: string | undefined = ME) =>
+  helios().call(name, args, { search, email }) as Promise<Res>;
+/** What /login does once a cookie has been checked. KV rolls back between tests. */
+const signIn = (cookie = SESSION) =>
+  save(env.SESSIONS, ME, { cookie, url: base, user: "admin@example.org", at: Date.now() });
 const ok = async (name: string, args: Record<string, unknown> = {}) => {
   const r = await call(name, args);
   expect(r.isError, `${name}: ${r.content[0]?.text}`).toBeFalsy();
@@ -49,13 +50,28 @@ const data = async <T = Record<string, unknown>>(
 const fails = async (
   name: string,
   args: Record<string, unknown> = {},
-  headers?: Record<string, string>,
+  email: string | undefined = ME,
 ) => {
-  const r = await call(name, args, headers);
+  const r = await call(name, args, email);
   expect(r.isError, `${name} should have failed`).toBe(true);
   return r.content[0]!.text;
 };
+/** A browser request to the worker as ME, the way Cloudflare Access would present it. */
+const browse = (path: string, init: RequestInit = {}) => {
+  const ctx = createExecutionContext() as ExecutionContext & { access?: unknown };
+  ctx.access = { getIdentity: async () => ({ email: ME }) };
+  return new Worker(ctx, env).fetch(new Request(`https://mcp-helios.example${path}`, init));
+};
+const post = (path: string, fields: Record<string, string>) =>
+  browse(path, {
+    method: "POST",
+    body: new URLSearchParams(fields),
+    headers: { origin: "https://mcp-helios.example" },
+  });
 const confirmed = { user_confirmed: true };
+
+// Sessions outlive a test within this file, so each starts signed out.
+beforeEach(() => forget(env.SESSIONS, ME, base));
 
 describe("the tool list", () => {
   it("carries the worker's prefix and covers the whole election lifecycle", async () => {
@@ -134,87 +150,128 @@ describe("times", () => {
 });
 
 describe("public data, no session", () => {
-  const anon = { "x-no-token": "" };
   it("resolves a short name and reads the election", async () => {
-    const r = await call(
-      "helios_get_election",
-      { election: "demo-2026", response_format: "json" },
-      anon,
-    );
+    const r = await call("helios_get_election", { election: "demo-2026", response_format: "json" });
     expect(r.isError).toBeFalsy();
     expect(payload<{ uuid: string }>(r).uuid).toBe(DEMO);
   });
   it("lists ballots and verifies the fingerprint and a tracker from the published JSON", async () => {
     const ballots = payload<{ ballots: { voter_uuid: string; vote_hash: string }[] }>(
-      await call("helios_list_ballots", { election: DEMO, response_format: "json" }, anon),
+      await call("helios_list_ballots", { election: DEMO, response_format: "json" }),
     );
     expect(ballots.ballots).toHaveLength(2);
     const fp = payload<Record<string, unknown>>(
-      await call("helios_verify_election_fingerprint", { election: DEMO }, anon),
+      await call("helios_verify_election_fingerprint", { election: DEMO }),
     );
     expect(fp["matches_displayed"]).toBe(true);
     expect(fp["all_ballots_reference_this_fingerprint"]).toBe(true);
     const b = ballots.ballots[0]!;
     const vb = payload<Record<string, unknown>>(
-      await call(
-        "helios_verify_ballot",
-        { election: DEMO, voter_uuid: b.voter_uuid, expected_tracker: b.vote_hash },
-        anon,
-      ),
+      await call("helios_verify_ballot", {
+        election: DEMO,
+        voter_uuid: b.voter_uuid,
+        expected_tracker: b.vote_hash,
+      }),
     );
     expect(vb["tracker_matches_recorded"]).toBe(true);
     expect(vb["expected_matches_recorded"]).toBe(true);
     const found = payload<Record<string, unknown>>(
-      await call("helios_lookup_ballot", { tracker: b.vote_hash }, anon),
+      await call("helios_lookup_ballot", { tracker: b.vote_hash }),
     );
     expect(found["election_uuid"]).toBe(DEMO);
   });
   it("explains a result that is not released yet", async () => {
-    expect(await fails("helios_get_result", { election: DEMO }, anon)).toMatch(/not been released/);
+    expect(await fails("helios_get_result", { election: DEMO })).toMatch(/not been released/);
   });
-  it("tells an admin tool's caller how to supply a cookie", async () => {
-    expect(await fails("helios_whoami", {}, anon)).toMatch(/X-Auth-Token/);
+  it("tells an admin tool's caller where a session comes from", async () => {
+    expect(await fails("helios_whoami")).toMatch(/\/login/);
   });
   it("sees only the public columns of the roll", async () => {
     const roll = payload<{ admin_view: boolean; summary: { voted: number } }>(
-      await call("helios_search_voters", { election: DEMO, response_format: "json" }, anon),
+      await call("helios_search_voters", { election: DEMO, response_format: "json" }),
     );
     expect(roll.admin_view).toBe(false);
     expect(roll.summary.voted).toBe(2);
   });
 });
 
-describe("where the session cookie comes from", () => {
-  it("X-Auth-Token first", async () => {
-    expect((await ok("helios_whoami")).content[0]!.text).toContain("admin@example.org");
-  });
-  it("then HELIOS_SESSIONS by Access email", async () => {
-    (env as unknown as Record<string, unknown>)["HELIOS_SESSIONS"] = { [ME]: SESSION };
-    try {
-      const r = await call("helios_whoami", {}, {});
-      expect(r.isError, r.content[0]?.text).toBeFalsy();
-    } finally {
-      delete (env as unknown as Record<string, unknown>)["HELIOS_SESSIONS"];
-    }
-  });
-  it("then the shared HELIOS_SESSION", async () => {
-    (env as unknown as Record<string, unknown>)["HELIOS_SESSION"] = SESSION;
-    try {
-      const r = await call("helios_whoami", {}, {});
-      expect(r.isError, r.content[0]?.text).toBeFalsy();
-    } finally {
-      delete (env as unknown as Record<string, unknown>)["HELIOS_SESSION"];
-    }
-  });
-  it("says so when the cookie is stale", async () => {
-    expect(await fails("helios_whoami", {}, { "x-auth-token": "expired" })).toMatch(
-      /invalid or expired/,
+describe("the /login page", () => {
+  it("needs Cloudflare Access to say who is signing in", async () => {
+    const res = await new Worker(createExecutionContext(), env).fetch(
+      new Request("https://mcp-helios.example/login"),
     );
+    expect(res.status).toBe(401);
+    expect(await res.text()).toMatch(/Cloudflare Access/);
+  });
+  it("shows the instructions, naming the cookie and the Helios server", async () => {
+    const res = await browse(`/login?helios=${encodeURIComponent(base)}`);
+    expect(res.status).toBe(200);
+    const html = await res.text();
+    expect(html).toContain(ME);
+    expect(html).toContain("sessionid");
+    expect(html).toContain(`${base}/auth/`);
+    expect(html).not.toContain("Currently signed in");
+  });
+  it("checks a pasted cookie against Helios and keeps it for the person", async () => {
+    const res = await post(`/login?helios=${encodeURIComponent(base)}`, {
+      action: "sign_in",
+      cookie: `sessionid=${SESSION}; Path=/`, // pasted with its name and attributes, as happens
+    });
+    expect(res.status).toBe(200);
+    expect(await res.text()).toContain("as admin@example.org");
+    const r = await ok("helios_whoami");
+    expect(r.content[0]!.text).toContain("admin@example.org");
+    const status = payload<Record<string, unknown>>(await ok("helios_session_status"));
+    expect(status["signed_in"]).toBe(true);
+    expect(status["helios_user"]).toBe("admin@example.org");
+    expect(JSON.stringify(status)).not.toContain(SESSION); // the cookie never comes back out
+  });
+  it("refuses a value Helios does not recognise", async () => {
+    const res = await post(`/login?helios=${encodeURIComponent(base)}`, {
+      action: "sign_in",
+      cookie: "expired",
+    });
+    expect(res.status).toBe(400);
+    expect(await res.text()).toMatch(/does not recognise/);
+    expect(payload<Record<string, unknown>>(await ok("helios_session_status"))["signed_in"]).toBe(
+      false,
+    );
+  });
+  it("refuses a form posted from another site", async () => {
+    const res = await browse(`/login?helios=${encodeURIComponent(base)}`, {
+      method: "POST",
+      body: new URLSearchParams({ action: "sign_in", cookie: SESSION }),
+      headers: { origin: "https://evil.example" },
+    });
+    expect(res.status).toBe(403);
+  });
+  it("signs out from the page or from the tool", async () => {
+    await signIn();
+    const res = await post(`/login?helios=${encodeURIComponent(base)}`, { action: "sign_out" });
+    expect(await res.text()).toContain("Session forgotten");
+    expect(payload<Record<string, unknown>>(await ok("helios_session_status"))["signed_in"]).toBe(
+      false,
+    );
+    await signIn();
+    await ok("helios_sign_out", { user_confirmed: true });
+    expect(await fails("helios_whoami")).toMatch(/\/login/);
+  });
+  it("says when a stored session has gone stale", async () => {
+    await signIn("expired");
+    expect(await fails("helios_whoami")).toMatch(/expired or been logged out/);
+    expect(payload<Record<string, unknown>>(await ok("helios_session_status"))["signed_in"]).toBe(
+      false,
+    );
+  });
+  it("keeps sessions per person", async () => {
+    await signIn();
+    expect(await fails("helios_whoami", {}, "someone-else@example.com")).toMatch(/\/login/);
   });
 });
 
 describe("a whole election, as its administrator", () => {
   it("runs from creation to a released result", async () => {
+    await signIn();
     const created = await data("helios_create_election", {
       ...confirmed,
       short_name: "gg-2026",

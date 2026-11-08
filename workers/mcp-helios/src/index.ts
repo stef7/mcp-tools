@@ -15,23 +15,24 @@
  *
  * Helios has no API tokens: admin actions are Django form POSTs guarded by the session cookie of
  * a browser that logged in (Google or GitHub on heliosvoting.org) plus a per-session csrf_token
- * that client.ts scrapes from an admin page. The cookie reaches this worker one of three ways,
- * first match wins:
+ * that client.ts scrapes from an admin page. Each administrator pastes their cookie once on this
+ * worker's /login page (see session.ts); it is kept in KV against their Cloudflare Access email
+ * and never passes through a tool call. helios_session_status says who you are acting as;
+ * helios_sign_out forgets it.
  *
- *   X-Auth-Token header on the connector   the caller's own cookie, stored nowhere here
- *   HELIOS_SESSIONS[<Access email>]        a cookie kept for that person (secret)
- *   HELIOS_SESSION                         one shared cookie (secret)
- *
- *   POST /?helios=https://helios.example.org   a Helios other than HELIOS_URL / heliosvoting.org
+ *   GET  /login                              the sign-in page, behind Access
+ *   POST /?helios=https://helios.example.org a Helios other than HELIOS_URL / heliosvoting.org
  *
  * This worker is deliberately not bound into mcp-toolkit: a session cookie is the administrator
- * themselves, so it gets its own URL and its own Cloudflare Access policy.
+ * themselves, so it gets its own URL and its own Cloudflare Access policy — which is also what
+ * tells it who is calling.
  */
 import cfg from "../wrangler.json";
 import { version } from "../package.json";
 import { mcpWorker, tool, type Ctx, type Tools } from "../../../core/mcp";
 import { HeliosClient, HeliosError } from "./client";
 import { heliosHash } from "./canonical";
+import { forget, load, loginPage, needsAccess, save, whoami, type Session } from "./session";
 import {
   allMatches,
   csvEscape,
@@ -64,43 +65,32 @@ import {
 } from "./model";
 
 const DEFAULT_URL = "https://vote.heliosvoting.org";
-const HOW_TO_AUTH =
-  "send it as the connector's X-Auth-Token header, or have it stored on this worker as " +
-  "HELIOS_SESSIONS against your Access email.";
+const HOW_TO_AUTH = "open this connector's /login page and paste it there.";
 
-type SessionEntry = string | { cookie?: string; url?: string };
+const normaliseUrl = (raw: string) =>
+  (/^https?:\/\//i.test(raw) ? raw : `https://${raw}`).replace(/\/+$/, "");
+const heliosUrl = (c: Ctx) =>
+  normaliseUrl(c.params.get("helios") ?? c.env.HELIOS_URL ?? DEFAULT_URL);
 
-const readSessions = (v: unknown): Record<string, SessionEntry> => {
-  if (v && typeof v === "object") return v as Record<string, SessionEntry>;
-  if (typeof v !== "string") return {};
-  try {
-    return JSON.parse(v) as Record<string, SessionEntry>;
-  } catch {
-    return {};
-  }
-};
-
-/** One client per call: the cookie may differ per caller, and the csrf token is per session. */
-const clientFor = async (c: Ctx): Promise<HeliosClient> => {
-  let baseUrl = c.params.get("helios") ?? c.env.HELIOS_URL ?? DEFAULT_URL;
-  let cookie = c.headers["x-auth-token"]?.trim();
-  if (!cookie) {
-    const email = await c.email();
-    const entry = email ? readSessions(c.env.HELIOS_SESSIONS)[email] : undefined;
-    if (typeof entry === "string") cookie = entry;
-    else if (entry) {
-      cookie = entry.cookie;
-      if (entry.url && !c.params.get("helios")) baseUrl = entry.url;
-    }
-  }
-  cookie ||= c.env.HELIOS_SESSION;
-  if (!/^https?:\/\//i.test(baseUrl)) baseUrl = `https://${baseUrl}`;
-  return new HeliosClient({
-    baseUrl: baseUrl.replace(/\/+$/, ""),
-    sessionCookie: cookie || undefined,
+const clientWith = (c: Ctx, baseUrl: string, cookie?: string) =>
+  new HeliosClient({
+    baseUrl,
+    sessionCookie: cookie,
     cookieName: c.env.HELIOS_COOKIE_NAME ?? "sessionid",
     howToAuth: HOW_TO_AUTH,
   });
+
+/** The caller's own stored session for this Helios, if they have one. */
+const sessionFor = async (c: Ctx, baseUrl: string): Promise<Session | null> => {
+  const email = await c.email();
+  return email ? load(c.env.SESSIONS, email, baseUrl) : null;
+};
+
+/** One client per call: the cookie is per caller, and the csrf token is per session. */
+const clientFor = async (c: Ctx): Promise<HeliosClient> => {
+  const baseUrl = heliosUrl(c);
+  const s = await sessionFor(c, baseUrl);
+  return clientWith(c, baseUrl, s?.cookie);
 };
 
 const result = (text: string, data?: unknown) => ({
@@ -665,6 +655,51 @@ const tools: Tools = {
     },
   }),
 
+  // ────────────────────────────── session ──────────────────────────────
+  session_status: tool({
+    description:
+      "Whether you have a Helios session on this connector, and which Helios user it is. Sessions are pasted once on the connector's /login page and kept against your Cloudflare Access email; this tool never returns the cookie itself. Call it when an admin tool says there is no session.",
+    annotations: { readOnlyHint: true, idempotentHint: true },
+    run: async (_a, c) => {
+      const baseUrl = heliosUrl(c);
+      const email = await c.email();
+      if (!email) throw needsAccess();
+      const s = await sessionFor(c, baseUrl);
+      if (!s)
+        return result(
+          `${email} has no Helios session for ${baseUrl}. Open this connector's /login page to add one; public tools work regardless.`,
+          { access_email: email, helios: baseUrl, signed_in: false },
+        );
+      const live = await whoami(clientWith(c, baseUrl, s.cookie));
+      return result(
+        live
+          ? `${email} acts on ${baseUrl} as Helios user ${live} (session saved ${new Date(s.at).toISOString().slice(0, 16).replace("T", " ")} UTC).`
+          : `${email} has a stored session for ${baseUrl} but Helios no longer accepts it (logged out or expired). Sign in again on the /login page.`,
+        {
+          access_email: email,
+          helios: baseUrl,
+          signed_in: Boolean(live),
+          helios_user: live ?? null,
+          saved_at: new Date(s.at).toISOString(),
+        },
+      );
+    },
+  }),
+
+  sign_out: tool({
+    description:
+      "Forget your stored Helios session on this connector. Does not log you out of Helios itself — do that in the browser to end the session everywhere.",
+    confirm: "Forgets your stored Helios session.",
+    annotations: { destructiveHint: true },
+    run: async (_a, c) => {
+      const baseUrl = heliosUrl(c);
+      const email = await c.email();
+      if (!email) throw needsAccess();
+      await forget(c.env.SESSIONS, email, baseUrl);
+      return `Forgot ${email}'s Helios session for ${baseUrl}.`;
+    },
+  }),
+
   // ────────────────────────────── status ──────────────────────────────
   whoami: tool({
     description:
@@ -677,7 +712,7 @@ const tools: Tools = {
       const who = firstMatch(home, /logged in as\s*<b>([\s\S]*?)<\/b>/i);
       if (!who)
         throw new HeliosError(
-          `The home page of ${client.baseUrl} shows nobody logged in: the session cookie is invalid or expired. Log in in the browser, copy the "${client.config.cookieName}" cookie again and ${HOW_TO_AUTH}`,
+          `The home page of ${client.baseUrl} shows nobody logged in: the stored session has expired or been logged out. Log in to Helios in the browser again and ${HOW_TO_AUTH}`,
           401,
           "auth",
         );
@@ -1760,7 +1795,7 @@ const tools: Tools = {
   }),
 };
 
-export default mcpWorker({
+const Base = mcpWorker({
   ...cfg,
   version,
   info: (c) => ({
@@ -1768,18 +1803,91 @@ export default mcpWorker({
     description:
       "Read, verify and administer elections on Helios (vote.heliosvoting.org or a self-hosted server).",
     instructions:
-      `Helios at ${c.params.get("helios") ?? c.env.HELIOS_URL ?? DEFAULT_URL}. Public and verification tools need no login. ` +
-      "Admin tools act as the Helios user whose session cookie was supplied (X-Auth-Token header, or stored for your Access email); helios_whoami checks it. " +
+      `Helios at ${heliosUrl(c)}. Public and verification tools need no login. ` +
+      "Admin tools act as the Helios user whose session the caller saved on this connector's /login page; helios_session_status says which, helios_whoami checks it against Helios. " +
       "Call helios_election_status before lifecycle actions. Times on Helios are UTC: give ISO 8601 with an offset and say both local and UTC when confirming. " +
       "Typical order: create_election → set_questions → trustees → upload_voters → freeze_election → email_voters('vote') → compute_tally → combine_decryptions → release_result.",
   }),
   confirmNote: "Changes the election on Helios.",
   tools,
   status: async (c) => {
-    const client = await clientFor(c);
+    const baseUrl = heliosUrl(c);
+    const email = await c.email();
+    const s = email ? await sessionFor(c, baseUrl) : null;
     return {
-      helios: client.baseUrl,
-      session: client.hasSession ? "supplied" : "none (public tools only)",
+      helios: baseUrl,
+      you: email ?? "nobody (Cloudflare Access is not in front of this worker)",
+      session: s ? `saved for ${s.user ?? "a Helios user"}` : "none — open /login",
+      login: "/login",
     };
   },
 });
+
+type WithAccess = { access?: { getIdentity(): Promise<{ email?: string } | null> } };
+
+/**
+ * The /login page: the one place a session cookie is typed, by a person, in a browser, behind
+ * Access. Everything else is the MCP endpoint core provides.
+ */
+export default class extends Base {
+  override async fetch(request: Request): Promise<Response> {
+    const url = new URL(request.url);
+    if (url.pathname !== "/login") return super.fetch(request);
+    const email = (await (this.ctx as WithAccess).access?.getIdentity())?.email;
+    if (!email) return new Response(needsAccess().message, { status: 401 });
+    const env = this.env;
+    const helios = normaliseUrl(url.searchParams.get("helios") ?? env.HELIOS_URL ?? DEFAULT_URL);
+    const cookieName = env.HELIOS_COOKIE_NAME ?? "sessionid";
+    const page = (o: { notice?: string; error?: string }, status = 200) =>
+      load(env.SESSIONS, email, helios).then(
+        (current) =>
+          new Response(loginPage({ email, helios, cookieName, current, ...o }), {
+            status,
+            headers: { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" },
+          }),
+      );
+    if (request.method === "GET") return page({});
+    if (request.method !== "POST") return new Response("GET or POST", { status: 405 });
+    // The form only ever posts to itself: a cross-site POST could store someone else's cookie
+    // against this person's email.
+    const origin = request.headers.get("origin");
+    if (origin && origin !== url.origin)
+      return page({ error: "That form came from another site." }, 403);
+    const form = await request.formData().catch(() => null);
+    if (form?.get("action") === "sign_out") {
+      await forget(env.SESSIONS, email, helios);
+      return page({
+        notice: "Session forgotten. Log out of Helios in the browser to end it there too.",
+      });
+    }
+    const cookie = String(form?.get("cookie") ?? "")
+      .trim()
+      .replace(new RegExp(`^${cookieName}=`), "")
+      .replace(/;.*$/, "");
+    if (!cookie) return page({ error: "Paste the cookie value first." }, 400);
+    const client = new HeliosClient({
+      baseUrl: helios,
+      sessionCookie: cookie,
+      cookieName,
+      howToAuth: HOW_TO_AUTH,
+    });
+    let user: string | undefined;
+    try {
+      user = await whoami(client);
+    } catch (e) {
+      return page(
+        { error: `Could not reach ${helios}: ${e instanceof Error ? e.message : String(e)}` },
+        502,
+      );
+    }
+    if (!user)
+      return page(
+        {
+          error: `${helios} does not recognise that value as a logged-in session. Check you copied the whole value of the "${cookieName}" cookie, from a browser that is logged in.`,
+        },
+        400,
+      );
+    await save(env.SESSIONS, email, { cookie, url: helios, user, at: Date.now() });
+    return page({ notice: `Saved. Tools on this connector now act on ${helios} as ${user}.` });
+  }
+}
