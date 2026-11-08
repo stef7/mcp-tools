@@ -1,0 +1,10 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "mcp-helios",
+  "preview_urls": false,
+  "main": "src/index.ts",
+  "compatibility_date": "2026-09-01",
+  "keep_vars": true,
+  "observability": { "enabled": true },
+  "kv_namespaces": [{ "binding": "SESSIONS", "id": "b2586167dec648a1b5206ef77baae053" }]
+}
