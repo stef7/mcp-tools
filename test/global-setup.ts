@@ -15,7 +15,16 @@ const MOCKS = [
     ready: "/members/api/integrity-token/",
   },
   { name: "proxy", script: "scripts/mock-proxy.mjs", port: 8797, ready: null },
+  {
+    name: "helios",
+    script: "scripts/mock-helios.mjs",
+    port: 8796,
+    ready: "/helios/elections/params",
+  },
 ] as const;
+
+/** The one session cookie the fake Helios accepts, handed to the tests as its admin login. */
+const HELIOS_SESSION = "helios-test-session";
 
 const waitFor = async (url: string) => {
   for (let i = 0; i < 50; i++) {
@@ -47,7 +56,10 @@ const waitForPort = async (port: number) => {
 
 export default async function setup(project: TestProject) {
   // The proxy accepts only the username production sends, so a passing test proves what that is.
-  const args = { proxy: ["groups-UNBLOCKER:secret"] } as Record<string, string[]>;
+  const args = { proxy: ["groups-UNBLOCKER:secret"], helios: [HELIOS_SESSION] } as Record<
+    string,
+    string[]
+  >;
   const children = MOCKS.map((m) =>
     spawn("node", [m.script, String(m.port), ...(args[m.name] ?? [])], { stdio: "ignore" }),
   );
@@ -59,6 +71,8 @@ export default async function setup(project: TestProject) {
   project.provide("mockBase", `http://localhost:${MOCKS[0].port}`);
   project.provide("ghostBase", `http://localhost:${MOCKS[1].port}`);
   project.provide("proxyPort", MOCKS[2].port);
+  project.provide("heliosBase", `http://localhost:${MOCKS[3].port}`);
+  project.provide("heliosSession", HELIOS_SESSION);
   // The sandbox has no file system, so certificates come in as text.
   const fixtures = new URL("./fixtures/", import.meta.url);
   const read = (name: string) => readFileSync(new URL(name, fixtures), "utf8");
@@ -77,6 +91,8 @@ declare module "vitest" {
     mockBase: string;
     ghostBase: string;
     proxyPort: number;
+    heliosBase: string;
+    heliosSession: string;
     mockCa: string;
     apifyLeaves: string[];
   }

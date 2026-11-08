@@ -20,6 +20,7 @@ workers/mcp-abc-ombudsman/   ABC Ombudsman complaint findings
 workers/mcp-data-gov-au/     data.gov.au over CKAN, including raw SQL
 workers/mcp-ghost/           Ghost publications, with member sign-in for paid posts
 workers/mcp-apify/           what Apify is costing you, by service and by Actor
+workers/mcp-helios/          Helios Voting: read, verify and run elections. Its own door, not in the toolkit
 scripts/mock-wp.mjs          fake WordPress for local testing
 scripts/mock-ghost.mjs       fake Ghost, including the magic-link sign-in
 scripts/cf-tunnel-relay.mjs  runs on the Mac at the far end of the tunnel
@@ -28,6 +29,7 @@ scripts/cf-tunnel-relay-menu.swift
 scripts/build-cf-tunnel-relay-app.sh
                              builds that app into ~/Applications and opens it
 scripts/mock-proxy.mjs       fake Apify Proxy, for the proxy tests, re-signing HTTPS as Apify does
+scripts/mock-helios.mjs      fake Helios, for the election lifecycle tests
 scripts/apify-tls-probe.mjs  checks HTTPS through the real Unblocker the way the Worker does it
 scripts/apify-trust-anchor.py
                              rebuilds core/apify-ca.ts from certificates Unblocker presented
@@ -291,6 +293,14 @@ Only `mcp-toolkit` has a `workers.dev` URL. Every other worker sets `"workers_de
 reachable only through the toolkit's service binding, so Cloudflare Access needs to sit on the
 toolkit alone — core resolves the signed-in email there and forwards it over RPC.
 
+`mcp-helios` is the one exception, on purpose: it is **not** bound into the toolkit and keeps
+its own URL. Its admin tools act with a Helios session cookie, which is the administrator
+themselves on Helios, so its tools should not appear on the connector everyone else uses. It gets
+its own Access policy (the same steps as under **Auth**), listing only the people running the
+election. To put it on the toolkit after all, add it to `services` like any other worker — but
+then everyone on the toolkit's policy can see those tools, and the warning above about bindings
+bypassing Access applies.
+
 A bound worker still uses **its own** secrets: `APIFY_TOKEN` lives on `mcp-apify`, `WP_SITES` on
 `mcp-wp`, the Ghost sessions on `mcp-ghost`. The toolkit holds none of them and never sees them.
 
@@ -417,6 +427,43 @@ can be a plain variable:
 
 An entry may still carry `cookie` and `cookie_sig` for a shared session, used when the person has
 none of their own. Prefer signing in.
+
+## Running an election on Helios
+
+[Helios](https://vote.heliosvoting.org) has no API tokens. Public election data is JSON that
+anyone can fetch; every administrative action is a Django form POST protected by the session
+cookie of a browser that has logged in (Google or GitHub on heliosvoting.org) and a per-session
+`csrf_token`, which `mcp-helios` scrapes from an admin page and submits the way the browser
+would. So an administrator logs in once in a browser, copies the `sessionid` cookie, and hands it
+to the worker one of three ways, first match wins:
+
+1. The connector's `X-Auth-Token` header — the caller's own cookie, stored nowhere here.
+2. `HELIOS_SESSIONS`, a secret mapping Cloudflare Access emails to cookies, so each person acts as
+   themselves: `{ "me@example.com": "<sessionid value>" }`. A value may be
+   `{ "cookie": "…", "url": "https://helios.example.org" }` for someone on another Helios.
+3. `HELIOS_SESSION`, one shared cookie.
+
+The cookie is that person on Helios until they log out there, which also invalidates it: do that
+when the election is over. `?helios=https://…` on the connector URL points the worker at a
+self-hosted Helios instead of heliosvoting.org (`HELIOS_URL` sets the default).
+
+The tools follow the election through its life: `helios_create_election` → `helios_set_questions`
+→ trustees → `helios_upload_voters` → `helios_freeze_election` → `helios_email_voters` →
+`helios_compute_tally` → `helios_combine_decryptions` → `helios_release_result`, with
+`helios_election_status` reading Helios's own "Next Step" box to say where things stand and
+showing the tally to admins before release. Every change needs `user_confirmed`, and the
+irreversible ones (freeze, tally, release, delete) say so in their descriptions.
+`helios_freeze_election` runs Helios's readiness check and refuses with the list of issues.
+
+Reading needs no login unless the election is private. `helios_verify_election_fingerprint` and
+`helios_verify_ballot` recompute Helios's SHA-256 fingerprints from the published JSON
+(`canonical.ts` reproduces Python's `json.dumps(sort_keys=True)` byte for byte) and compare them
+with what the server displays, so a voter's tracker can be checked without trusting the server.
+Full zero-knowledge verification stays with Helios's own JavaScript verifier, which the tools
+link to.
+
+Times on Helios are UTC. The tools take ISO 8601 with an offset (`2026-11-14T17:00+11:00`) and
+convert; a value without an offset is taken as UTC.
 
 ## Auth (Cloudflare Access)
 
