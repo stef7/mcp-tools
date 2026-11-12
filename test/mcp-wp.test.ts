@@ -8,6 +8,7 @@
 import { SELF, createExecutionContext, env } from "cloudflare:test";
 import { describe, expect, inject, it } from "vitest";
 import Worker, { sitesInPath } from "../workers/mcp-wp/src/index";
+import { apiFromLink } from "../workers/mcp-wp/src/wp";
 
 const base = inject("mockBase");
 const ME = "me@example.com";
@@ -169,6 +170,45 @@ describe("the MCP endpoint", () => {
     const res = await post({ jsonrpc: "2.0", id: 1, method: "tools/list" }, site(base + "/nope"));
     const body = (await res.json()) as { error?: { message: string } };
     expect(body.error?.message).toContain("Failed to fetch types");
+  });
+});
+
+describe("a free WordPress.com site", () => {
+  // The mock's "/wpcom" answers 404 at its own /wp-json and points elsewhere with a Link header.
+  const wpcom = site(base + "/wpcom");
+
+  it("follows the Link header to the API root and generates tools from it", async () => {
+    const n = await names(wpcom);
+    expect(n).toContain("wp_search_posts");
+    expect(n).toContain("wp_get_posts");
+  });
+
+  it("reads through the API root the header named", async () => {
+    expect(await call("wp_search_posts", {}, wpcom)).toContain("First post");
+  });
+
+  it("maps WordPress.com's ?rest_route=/sites/<host> root to its /wp/v2/sites/<host> routes", () => {
+    const link =
+      '<https://public-api.wordpress.com/wp-json/?rest_route=/sites/x.wordpress.com>; rel="https://api.w.org/"';
+    expect(apiFromLink(link, "https://x.wordpress.com")).toEqual({
+      apiBase: "https://public-api.wordpress.com/wp/v2/sites/x.wordpress.com",
+      root: "https://public-api.wordpress.com/wp-json/?rest_route=/sites/x.wordpress.com",
+    });
+  });
+
+  it("ignores a Link header that names no new root", () => {
+    const self = '<https://a.test/wp-json/>; rel="https://api.w.org/"';
+    expect(apiFromLink(self, "https://a.test")).toBeNull();
+    expect(apiFromLink('<https://a.test/feed>; rel="alternate"', "https://a.test")).toBeNull();
+    expect(apiFromLink(null, "https://a.test")).toBeNull();
+  });
+
+  it("reports a site it cannot read on the GET page instead of crashing", async () => {
+    const res = await SELF.fetch(`https://worker/${site(base + "/nope")}`);
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { tools: string[]; error?: string };
+    expect(body.tools).toEqual([]);
+    expect(body.error).toContain("Failed to fetch types");
   });
 });
 

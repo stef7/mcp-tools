@@ -357,12 +357,21 @@ export const mcpWorker = (cfg: Config) => {
       const req: Call = { search: new URL(request.url).search, headers: carried(request.headers) };
       if (request.method === "OPTIONS") return new Response(null, { status: 204, headers: CORS });
       if (request.method === "GET") {
-        const tools = (await this.tools(req)).map((t) => t.name);
+        // A tool list that cannot be built (a site that is down, or not WordPress) is reported
+        // on this page rather than thrown, which Cloudflare would turn into a bare error 1101.
+        let tools: string[] = [];
+        let error: string | undefined;
+        try {
+          tools = (await this.tools(req)).map((t) => t.name);
+        } catch (e) {
+          error = e instanceof Error ? e.message : String(e);
+        }
         return json({
           name: cfg.name,
           version: cfg.version,
           endpoint: "POST JSON-RPC here",
           tools,
+          ...(error ? { error } : {}),
           ...(this.#unreachable.length ? { unreachable: this.#unreachable } : {}),
           ...(cfg.status ? { status: await cfg.status(this.#ctx(req)) } : {}),
         });
