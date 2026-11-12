@@ -201,7 +201,18 @@ const readBody = (req) =>
   });
 
 createServer(async (req, res) => {
-  const { pathname: full, searchParams } = new URL(req.url, "http://x");
+  const { pathname: requested, searchParams } = new URL(req.url, "http://x");
+  // "/wpcom" plays a free WordPress.com site: nothing at its own /wp-json, only a Link header
+  // pointing at the API root, which lives elsewhere and answers at /wp/v2/sites/<host>/...
+  if (requested.startsWith("/wpcom/wp-json")) {
+    const root = `http://${req.headers.host}/blog/wp-json/?rest_route=/sites/wpcom.mock`;
+    res.writeHead(404, {
+      "content-type": "text/html",
+      link: `<${root}>; rel="https://api.w.org/"`,
+    });
+    return res.end("<h1>Not found</h1>");
+  }
+  const full = requested.replace(/^\/wp\/v2\/sites\/wpcom\.mock/, "/blog/wp-json/wp/v2");
   const tecSite = !full.startsWith("/blog"); // the "/blog" site has no Events Calendar
   const path = full.replace(/^\/blog/, "");
   const wc = path.startsWith("/wp-json/wc/v3");
