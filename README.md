@@ -138,8 +138,11 @@ built, byte for byte.
 `mcp-toolkit` and `mcp-wp` set `"preview_urls": false`. Without it, every upload from a pull
 request would get a live URL running unmerged code against production resources.
 
-It needs two repository secrets: `CLOUDFLARE_API_TOKEN` (Workers Editor on these workers, plus
-Connectivity Directory Bind for `mcp-fetch`'s tunnel) and `CLOUDFLARE_ACCOUNT_ID`. The Worker name in the dashboard must equal `name` in that folder's
+It needs two repository secrets: `CLOUDFLARE_API_TOKEN` (Workers Scripts: Edit on the **whole
+account**, plus Connectivity Directory Bind for `mcp-fetch`'s tunnel) and `CLOUDFLARE_ACCOUNT_ID`.
+The token has to cover the account rather than a list of Workers: `plan` asks Cloudflare whether
+each worker exists, and a token scoped to particular Workers answers 403 for one it has never
+heard of — which is every new worker on its first run — so the plan fails and nothing ships. The Worker name in the dashboard must equal `name` in that folder's
 `wrangler.json`. Bindings live in `wrangler.json`; secrets stay in the dashboard (`keep_vars`
 keeps plain variables too, so `WP_SITES` survives a deploy).
 
@@ -160,7 +163,9 @@ keeps plain variables too, so `WP_SITES` survives a deploy).
    a worker really answers to, e.g. `"prefix": ["shop_", "stock_"]`. Declare it wrong and the
    fallback cannot save you: the call goes to the worker you named and stops there.
 
-4. `npm run check`, commit, push to `main`; the deploy workflow picks the new folder up.
+4. `npm run check`, commit, push to `main`; the deploy workflow picks the new folder up. If
+   `plan` fails with a 403 for the new worker, the Cloudflare token is scoped to particular
+   Workers; widen it to the account (see **Deploying**) and run the workflow again.
 
 ## Getting past blocks
 
