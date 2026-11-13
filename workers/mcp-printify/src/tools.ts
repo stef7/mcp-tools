@@ -29,19 +29,36 @@ const MAX_CHARS = 60_000;
 /**
  * What stays off unless the variable says otherwise, written as rules rather than a list of
  * paths so that an endpoint Printify adds later lands on the safe side: every DELETE, every
- * write under /webhooks, and the three ways an order starts costing money.
+ * write under /webhooks, every write to an order (placing, producing, cancelling, refunding,
+ * reprinting, readdressing), unpublishing a product and archiving an upload. The one order
+ * endpoint left open is the shipping calculator, which is a POST that changes nothing.
  */
 export const blocked = (op: Pick<Operation, "method" | "path">): string | null => {
   if (op.method === "GET") return null;
-  if (/\/webhooks(\.json|\/|$)/.test(op.path)) return "changes webhooks";
+  const p = op.path;
+  if (/\/webhooks(\.json|\/|$)/.test(p)) return "changes webhooks";
   if (op.method === "DELETE")
-    return op.path.endsWith("/connection.json")
+    return p.endsWith("/connection.json")
       ? "disconnects (deletes) a shop"
-      : /\/products\/[^/]+\.json$/.test(op.path)
+      : /\/products\/[^/]+\.json$/.test(p)
         ? "deletes a product"
         : "deletes something";
-  if (/\/orders(\/express)?\.json$/.test(op.path)) return "creates an order";
-  if (op.path.endsWith("/send_to_production.json")) return "sends an order to production";
+  if (/\/orders(\.json|\/)/.test(p) && !p.endsWith("/orders/shipping.json"))
+    return /\/orders(\/express)?\.json$/.test(p)
+      ? "creates an order"
+      : p.endsWith("/send_to_production.json")
+        ? "sends an order to production"
+        : p.endsWith("/cancel.json")
+          ? "cancels an order or one of its line items"
+          : p.endsWith("/support-requests/refund")
+            ? "requests a refund"
+            : p.endsWith("/support-requests/reprint")
+              ? "requests a reprint"
+              : /address[-_]change/.test(p)
+                ? "changes an order's delivery address"
+                : "changes an order";
+  if (p.endsWith("/unpublish.json")) return "unpublishes a product";
+  if (/\/uploads\/[^/]+\/archive\.json$/.test(p)) return "archives an uploaded image";
   return null;
 };
 
@@ -279,7 +296,8 @@ export const printifyTools = (load: () => Loaded = loadSpec): Tools => ({
       "anything is sent. GET runs freely. Any other method changes the account: it needs " +
       "confirm: true, set only once the user has agreed to this exact request, and the result " +
       "restates the method, path and body sent. Creating orders, sending them to production, " +
-      `deleting a product or shop, and changing webhooks are refused unless ${ALLOW} is ` +
+      "cancelling, refunding, reprinting or readdressing them, deleting or unpublishing a " +
+      `product, deleting a shop, archiving an upload and changing webhooks are refused unless ${ALLOW} is ` +
       "enabled on the worker. Prices are in cents. Lists can be huge (the blueprint catalogue " +
       "is over a thousand items): use find and fields.",
     input: {
@@ -386,8 +404,8 @@ export const report = async (c: Ctx, load: () => Loaded = loadSpec) => {
     spec: "problem" in ix ? `FAILED. ${ix.problem}` : `${ix.ops.length} operations. ${ix.origin}`,
     token: c.env.PRINTIFY_TOKEN?.trim() ? "PRINTIFY_TOKEN is set." : NO_TOKEN,
     destructive: allowed(c.env)
-      ? `ALLOWED: ${ALLOW} is "true". Orders, deletions and webhook changes run once confirmed.`
-      : `Blocked: ${ALLOW} is not "true". No orders, deletions or webhook changes.`,
+      ? `ALLOWED: ${ALLOW} is "true". Order writes, deletions, unpublishing, archiving and webhook changes run once confirmed.`
+      : `Blocked: ${ALLOW} is not "true". No order writes, deletions, unpublishing, archiving or webhook changes.`,
   };
   if ("problem" in ix || !c.env.PRINTIFY_TOKEN?.trim()) return out;
   try {

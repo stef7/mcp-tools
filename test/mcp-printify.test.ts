@@ -374,6 +374,14 @@ describe("what is blocked", () => {
     ["POST", `/v1/shops/${SHOP}/webhooks.json`, { topic: "order:created", url: "https://x.au/h" }],
     ["PUT", `/v1/shops/${SHOP}/webhooks/w1.json`, { url: "https://x.au/h" }],
     ["DELETE", `/v1/shops/${SHOP}/webhooks/w1.json`],
+    ["POST", `/v1/shops/${SHOP}/orders/abc/cancel.json`],
+    ["POST", `/v1/shops/${SHOP}/orders/abc/line_items/li1/cancel.json`],
+    ["POST", `/v1/shops/${SHOP}/orders/abc/support-requests/refund`],
+    ["POST", `/v1/shops/${SHOP}/orders/abc/support-requests/reprint`],
+    ["POST", `/v1/shops/${SHOP}/orders/abc/support-requests/address-change`],
+    ["POST", `/v1/shops/${SHOP}/orders/abc/address_change.json`],
+    ["POST", `/v1/shops/${SHOP}/products/prod1/unpublish.json`],
+    ["POST", "/v1/uploads/img1/archive.json"],
   ];
 
   it("refuses each, confirmed or not, naming the variable, and sends nothing", async () => {
@@ -411,7 +419,21 @@ describe("what is blocked", () => {
     expect(out["response"]).toEqual({ id: "new-order" });
   });
 
-  it("covers every non-GET operation in the spec that deletes, orders or touches webhooks", () => {
+  /** The writes that need only confirm: making and publishing products, uploads, and one
+   *  POST that changes nothing (the shipping calculator). */
+  const OPEN = [
+    "POST /v1/shops/{shop_id}/orders/shipping.json",
+    "POST /v1/shops/{shop_id}/products.json",
+    "POST /v1/shops/{shop_id}/products/{product_id}/personalization.json",
+    "POST /v1/shops/{shop_id}/products/{product_id}/personalization_previews.json",
+    "POST /v1/shops/{shop_id}/products/{product_id}/publish.json",
+    "POST /v1/shops/{shop_id}/products/{product_id}/publishing_failed.json",
+    "POST /v1/shops/{shop_id}/products/{product_id}/publishing_succeeded.json",
+    "POST /v1/uploads/images.json",
+    "PUT /v1/shops/{shop_id}/products/{product_id}.json",
+  ];
+
+  it("is exactly this set of the spec's operations, and leaves exactly these writes open", () => {
     const ix = loadSpec();
     if ("problem" in ix) throw new Error(ix.problem);
     const off = ix.ops.filter((o) => blocked(o)).map((o) => `${o.method} ${o.path}`);
@@ -421,11 +443,21 @@ describe("what is blocked", () => {
       "DELETE /v1/shops/{shop_id}/webhooks/{webhook_id}.json",
       "POST /v1/shops/{shop_id}/orders.json",
       "POST /v1/shops/{shop_id}/orders/express.json",
+      "POST /v1/shops/{shop_id}/orders/{order_id}/address_change.json",
+      "POST /v1/shops/{shop_id}/orders/{order_id}/cancel.json",
+      "POST /v1/shops/{shop_id}/orders/{order_id}/line_items/{line_item_id}/cancel.json",
       "POST /v1/shops/{shop_id}/orders/{order_id}/send_to_production.json",
+      "POST /v1/shops/{shop_id}/orders/{order_id}/support-requests/address-change",
+      "POST /v1/shops/{shop_id}/orders/{order_id}/support-requests/refund",
+      "POST /v1/shops/{shop_id}/orders/{order_id}/support-requests/reprint",
+      "POST /v1/shops/{shop_id}/products/{product_id}/unpublish.json",
       "POST /v1/shops/{shop_id}/webhooks.json",
       "POST /v1/shops/{shop_id}/webhooks/{webhook_id}/simulate",
+      "POST /v1/uploads/{image_id}/archive.json",
       "PUT /v1/shops/{shop_id}/webhooks/{webhook_id}.json",
     ]);
+    const open = ix.ops.filter((o) => o.method !== "GET" && !blocked(o));
+    expect(open.map((o) => `${o.method} ${o.path}`).sort()).toEqual(OPEN);
     // Every DELETE is on that list: there is no way to delete that only needs confirm.
     expect(ix.ops.filter((o) => o.method === "DELETE").every((o) => blocked(o))).toBe(true);
   });

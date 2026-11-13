@@ -491,10 +491,11 @@ What may be sent:
 - `GET` runs freely.
 - Anything else needs `confirm: true` in the call, and the result restates the method, path and
   body that went out. Without it the call is refused and shows the request it would have made.
-- Creating an order (standard or Express), sending one to production, deleting a product,
-  disconnecting a shop and any write to webhooks are refused unless the variable
-  `PRINTIFY_ALLOW_DESTRUCTIVE` is exactly `true`. It is unset by default; leave it that way
-  unless you mean it. With it on, those calls still need `confirm: true`.
+- Refused unless the variable `PRINTIFY_ALLOW_DESTRUCTIVE` is exactly `true`: every write to an
+  order (creating one, standard or Express; sending it to production; cancelling it or a line
+  item; refund and reprint requests; address changes), deleting or unpublishing a product,
+  disconnecting a shop, archiving an upload, and any write to webhooks. It is unset by default;
+  leave it that way unless you mean it. With it on, those calls still need `confirm: true`.
 
 A `429` from Printify is waited out (for as long as `Retry-After` asks, up to ten seconds, three
 times) and then reported with how long to wait. Lists are cut to a readable size: pass `find` to

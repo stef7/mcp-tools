@@ -13,9 +13,10 @@
  * as for every worker here. Like mcp-helios it is not bound into mcp-toolkit: it acts on one
  * person's shops, so it gets its own URL and its own Access policy.
  *
- * GET runs freely. Anything else needs `confirm: true` and restates what it sent. Creating an
- * order, sending one to production, deleting a product or shop and changing webhooks are refused
- * unless PRINTIFY_ALLOW_DESTRUCTIVE is "true" (see tools.ts and secrets.d.ts).
+ * GET runs freely. Anything else needs `confirm: true` and restates what it sent. Every write to
+ * an order (creating, sending to production, cancelling, refunds, reprints, address changes),
+ * deleting or unpublishing a product, deleting a shop, archiving an upload and changing webhooks
+ * are refused unless PRINTIFY_ALLOW_DESTRUCTIVE is "true" (see tools.ts and secrets.d.ts).
  */
 import cfg from "../wrangler.json";
 import { version } from "../package.json";
@@ -42,8 +43,9 @@ export default mcpWorker({
       "(id, price in cents) and print_areas placing the image; PUT to change title, " +
       "description or price; POST .../publish.json to publish it to the shop's sales channel. " +
       "Every call but GET needs confirm: true, given only after the user has agreed to that " +
-      "exact request. Never guess an ID: read it first. Creating orders, sending them to " +
-      `production, deleting products or shops and changing webhooks are off unless ${ALLOW} ` +
+      "exact request. Never guess an ID: read it first. Creating, producing, cancelling, " +
+      "refunding, reprinting or readdressing orders, deleting or unpublishing products, " +
+      `deleting shops, archiving uploads and changing webhooks are off unless ${ALLOW} ` +
       "is enabled on the worker; say so rather than looking for another way.",
   }),
 });

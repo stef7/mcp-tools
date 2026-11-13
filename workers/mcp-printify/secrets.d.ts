@@ -7,8 +7,9 @@ interface Env {
    */
   PRINTIFY_TOKEN?: string;
   /**
-   * Only the exact string "true" lifts the block on creating orders or sending them to
-   * production, deleting a product or disconnecting a shop, and changing webhooks. A plain
+   * Only the exact string "true" lifts the block on every write to an order (creating, sending
+   * to production, cancelling, refunds, reprints, address changes), deleting or unpublishing a
+   * product, disconnecting a shop, archiving an upload and changing webhooks. A plain
    * variable, so you can see at a glance that it is off. Leave it unset.
    */
   PRINTIFY_ALLOW_DESTRUCTIVE?: string;
