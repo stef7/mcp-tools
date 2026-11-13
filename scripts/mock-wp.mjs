@@ -166,6 +166,31 @@ const wcIndex = {
       ],
     },
     "/wc/v3/reports/sales": { endpoints: [{ methods: ["GET"], args: {} }] },
+    "/wc/v3/settings/(?P<group_id>[\\w-]+)": { endpoints: [{ methods: ["GET"], args: {} }] },
+    "/wc/v3/settings/(?P<group_id>[\\w-]+)/(?P<id>[\\w-]+)": {
+      endpoints: [
+        { methods: ["GET"], args: {} },
+        {
+          methods: ["POST", "PUT", "PATCH"],
+          args: { value: { description: "Setting value.", type: "mixed", required: false } },
+        },
+        // Not something WooCommerce offers for a setting; here so the delete tool has a route.
+        { methods: ["DELETE"], args: { force: { type: "boolean" } } },
+      ],
+    },
+  },
+};
+
+// One settings group, as WC_REST_Setting_Options_Controller returns it.
+const settings = {
+  email: {
+    woocommerce_email_footer_text: {
+      id: "woocommerce_email_footer_text",
+      label: "Footer text",
+      type: "textarea",
+      default: "{site_title}",
+      value: "{site_title}<br />{store_address}",
+    },
   },
 };
 
@@ -234,6 +259,25 @@ createServer(async (req, res) => {
   }
   if (tecSite && path === "/wp-json/wc/v3/reports/sales") {
     return send(res, 200, [{ total_sales: "24.00", period: searchParams.get("period") }]);
+  }
+
+  // WooCommerce settings: a group lists its settings; one setting can be read and set.
+  const setting = tecSite && path.match(/^\/wp-json\/wc\/v3\/settings\/([\w-]+)(?:\/([\w-]+))?$/);
+  if (setting) {
+    const group = settings[setting[1]];
+    if (!group)
+      return send(res, 404, {
+        code: "rest_setting_setting_group_invalid",
+        message: "Invalid setting group.",
+      });
+    if (!setting[2]) return send(res, 200, Object.values(group));
+    const one = group[setting[2]];
+    if (!one)
+      return send(res, 404, { code: "rest_setting_setting_invalid", message: "Invalid setting." });
+    if (req.method === "DELETE")
+      return send(res, 200, { ...one, deleted: true, force: searchParams.get("force") });
+    if (req.method !== "GET") one.value = (await readBody(req)).value;
+    return send(res, 200, { ...one, _links: { self: [] } });
   }
 
   // WooCommerce: products (full CRUD), orders (read), order notes (list + create)

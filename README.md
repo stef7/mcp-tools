@@ -385,11 +385,15 @@ those three types, because writing them through `wp/v2` silently drops the dates
 Sites running **WooCommerce** are detected the same way (`wc/v3`) and get `search_wc_*`,
 `get_wc_*`, `create_wc_*`, `update_wc_*` and `delete_wc_*` tools for products, variations,
 product categories, tags and reviews, orders, order notes, refunds, customers and coupons, plus
-`get_wc_endpoint` to read any other route (reports, settings, shipping, system status). Their
+`get_wc_endpoint` to read any other route (reports, settings, shipping, system status), and
+`update_wc_endpoint` and `delete_wc_endpoint` to write to any route the site's index says takes
+it: a setting, a shipping zone, a tax rate. Most of those have no trash or history, so a write
+reads the record first and returns it beside the result. Their
 arguments are read from the site's own `wc/v3` index, so a field an extension adds shows up
 without a code change here, and a method a route does not offer gets no tool. The `wp/v2` write
 tools stand aside for products, as they do for events. Generic mode has `search_wc`, `get_wc`,
-`create_wc`, `update_wc`, `delete_wc` and `get_wc_endpoint`, each taking a `url`.
+`create_wc`, `update_wc`, `delete_wc`, `get_wc_endpoint`, `update_wc_endpoint` and
+`delete_wc_endpoint`, each taking a `url`.
 
 Two differences from `wp/v2`:
 
