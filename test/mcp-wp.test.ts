@@ -420,6 +420,49 @@ describe("WooCommerce", () => {
     expect(sales).toContain('"period": "month"');
   });
 
+  const FOOTER = "settings/email/woocommerce_email_footer_text";
+
+  it("writes any route the index says is writable, handing back what it replaced", async () => {
+    const n = await names(site());
+    expect(n).toContain("wp_update_wc_endpoint");
+    expect(n).toContain("wp_delete_wc_endpoint");
+    const args = { path: FOOTER, body: { value: "ABN 1" } };
+    expect(await call("wp_update_wc_endpoint", args, site())).toContain("user_confirmed");
+    const out = await call("wp_update_wc_endpoint", { ...args, user_confirmed: true }, site());
+    expect(out).toContain(`Wrote ${FOOTER}`);
+    const [before, after] = out.split("after:");
+    expect(before).toContain('"value": "{site_title}<br />{store_address}"');
+    expect(after).toContain('"value": "ABN 1"');
+    expect(out).not.toContain("_links");
+    const read = await call("wp_get_wc_endpoint", { path: "settings/email" }, site());
+    expect(read).toContain('"value": "ABN 1"');
+  });
+
+  it("refuses a write the site's index does not offer, and says what the route does take", async () => {
+    const go = (a: object) => call("wp_update_wc_endpoint", { ...a, user_confirmed: true }, site());
+    expect(await go({ path: "reports/sales", body: { x: 1 } })).toContain("does not take writes");
+    expect(await go({ path: "nope/1", body: { x: 1 } })).toContain("No wc/v3 route matches");
+    expect(await go({ path: FOOTER, body: {} })).toContain("Nothing to send");
+    for (const path of ["../wp/v2/users/1", "%2e%2e/wp/v2/users", "settings/email?x=1", ""])
+      expect(await go({ path, body: { x: 1 } })).toContain("Missing or invalid path");
+  });
+
+  it("deletes through the same check, passing force only when asked", async () => {
+    const go = (a: object) => call("wp_delete_wc_endpoint", { ...a, user_confirmed: true }, site());
+    expect(await go({ path: "reports/sales" })).toContain("does not take DELETE");
+    expect(await go({ path: FOOTER })).toContain('"force": null');
+    expect(await go({ path: FOOTER, force: true })).toContain('"force": "true"');
+  });
+
+  it("writes from generic mode too, given a url", async () => {
+    const out = await call(
+      "wp_update_wc_endpoint",
+      { url: base, path: FOOTER, body: { value: "ABN 2" }, user_confirmed: true },
+      "",
+    );
+    expect(out).toContain('"value": "ABN 2"');
+  });
+
   it("will not let a path climb out of wc/v3 with the login attached", async () => {
     for (const path of ["../wp/v2/users", "%2e%2e/wp/v2/users", "orders?x=1"])
       expect(await call("wp_get_wc_endpoint", { path }, site())).toContain("Invalid path");

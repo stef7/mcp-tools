@@ -38,7 +38,9 @@ export const WC_TYPES = ["product", "product_variation", "shop_order", "shop_cou
 
 /**
  * The resources that get tools of their own. Everything else wc/v3 offers — reports, settings,
- * shipping zones, system status — is reachable read-only through `get_wc_endpoint`. A `{name}` in
+ * shipping zones, tax rates, system status — is reachable through `get_wc_endpoint`, and written
+ * through `update_wc_endpoint` and `delete_wc_endpoint` where the site's index says it can be.
+ * A `{name}` in
  * a path is an ID the tool asks for; `{id}` is added for the single-item route.
  */
 const RESOURCES = {
@@ -298,13 +300,8 @@ const endpoint = async (base: string, creds: Creds, path?: string, query: Args =
     );
     return `wc/v3 routes on ${new URL(base).hostname}:\n\n${lines.join("\n")}\n`;
   }
-  const route = path
-    .trim()
-    .replace(/^\/+/, "")
-    .replace(/^wc\/v3\/?/, "");
-  // Letters, digits, dashes, underscores and slashes only: no dots, encoded or not, and no query,
-  // so a path cannot climb out of wc/v3 into some other namespace with this login attached.
-  if (!/^[\w\-/]*$/.test(route))
+  const route = routeOf(path);
+  if (route === null)
     return `Invalid path "${path}". Use a wc/v3 route such as "reports/sales" or "system_status".`;
   const { out } = await send(`${root(base)}/${route}${queryOf(query)}`, creds);
   const text = JSON.stringify(
@@ -314,6 +311,118 @@ const endpoint = async (base: string, creds: Creds, path?: string, query: Args =
   );
   return text.length > 100_000 ? text.slice(0, 100_000) + "\n\n[Truncated]" : text;
 };
+
+/**
+ * A caller's path, checked. Letters, digits, dashes, underscores and slashes only: no dots,
+ * encoded or not, and no query, so a path cannot climb out of wc/v3 into some other namespace
+ * with this login attached.
+ */
+const routeOf = (path: string) => {
+  const route = path
+    .trim()
+    .replace(/^\/+/, "")
+    .replace(/^wc\/v3\/?/, "")
+    .replace(/\/+$/, "");
+  return /^[\w\-/]*$/.test(route) ? route : null;
+};
+
+/** The index entry a concrete path falls under: "settings/email/x" -> "settings/{group_id}/{id}". */
+const patternFor = (index: WcIndex, route: string) =>
+  Object.keys(index).find((p) => new RegExp(`^${p.replace(/\{\w+\}/g, "[\\w-]+")}$`).test(route));
+
+const json = (v: unknown, max: number) => {
+  const text = JSON.stringify(
+    v && typeof v === "object" && !Array.isArray(v) ? withoutLinks(v as Args) : v,
+    null,
+    2,
+  );
+  return text.length > max ? text.slice(0, max) + "\n[Truncated]" : text;
+};
+
+/**
+ * Write to any wc/v3 route the site's own index says takes that method: a setting, a shipping
+ * zone, a tax rate, a payment gateway. The per-resource tools are friendlier for the records
+ * they cover; this is for the rest, so a route WooCommerce or an extension adds needs no code
+ * here.
+ *
+ * Most of these have no trash and no history, so when the path is one the index also lets us
+ * read, it is read first and handed back beside the result: the reply is the only record of
+ * what was replaced.
+ */
+const write = async (
+  base: string,
+  creds: Creds,
+  method: "POST" | "DELETE",
+  path: unknown,
+  body: Args = {},
+  query: Args = {},
+) => {
+  const route = typeof path === "string" && path.trim() ? routeOf(path) : null;
+  if (!route)
+    return (
+      `Missing or invalid path${typeof path === "string" ? ` "${path}"` : ""}. Use a wc/v3 ` +
+      'route such as "settings/email/woocommerce_email_footer_text" or "shipping/zones".'
+    );
+  const index = await wcIndex(base, creds);
+  const pattern = patternFor(index, route);
+  if (!pattern)
+    return `No wc/v3 route matches "${route}". Call get_wc_endpoint with no path to list them.`;
+  const methods = index[pattern]!;
+  if (!methods[method])
+    return (
+      `${pattern} does not take ${method === "POST" ? "writes" : "DELETE"} on this site; ` +
+      `it offers ${Object.keys(methods).join(", ") || "nothing"}.`
+    );
+  if (method === "POST" && !Object.keys(body).length)
+    return "Nothing to send: no body was supplied.";
+
+  const url = `${root(base)}/${route}`;
+  // A collection's GET is a list, not the thing being replaced, so only an item route is read.
+  const item = pattern.endsWith("}") && methods.GET;
+  const before = item ? await send(url, creds).then((r) => r.out) : undefined;
+  const { out } = await send(
+    `${url}${queryOf(query)}`,
+    creds,
+    method,
+    method === "POST" ? body : undefined,
+  );
+  return (
+    `${method === "POST" ? "Wrote" : "Deleted"} ${route} on ${new URL(base).hostname}.\n` +
+    (before === undefined ? "" : `\nbefore:\n${json(before, 20_000)}\n`) +
+    `\n${method === "POST" ? "after" : "response"}:\n${json(out, 20_000)}\n`
+  );
+};
+
+const WRITE_PROPS = {
+  path: {
+    type: "string",
+    description:
+      'A wc/v3 route, e.g. "settings/email/woocommerce_email_footer_text", "shipping/zones", ' +
+      '"shipping/zones/1/methods", "taxes", "payment_gateways/cod". get_wc_endpoint with no ' +
+      "path lists every route and the methods it takes.",
+  },
+  body: {
+    type: "object",
+    description:
+      'The fields to send, e.g. {"value": "…"} for a setting or {"name": "Australia"} for a ' +
+      "shipping zone. On a collection this creates a record; on a single record it changes only " +
+      "the fields sent.",
+  },
+} as const satisfies Record<string, JSONSchema>;
+const WRITE_ABOUT =
+  "For products, orders, customers and coupons use their own tools; this is for everything " +
+  "else. Read the route first with get_wc_endpoint. Most of these have no trash or history, so " +
+  "the reply includes what was there before; keep it if the change may need undoing.";
+const DELETE_PROPS = {
+  path: {
+    type: "string",
+    description: 'The wc/v3 route of one record, e.g. "shipping/zones/2" or "taxes/7".',
+  },
+  force: {
+    type: "boolean",
+    description: "Delete permanently. Most of these routes refuse without it. Cannot be undone.",
+  },
+} as const satisfies Record<string, JSONSchema>;
 
 const ENDPOINT_PROPS = {
   path: {
@@ -348,6 +457,21 @@ export const wcTools = async (s: Schema, creds: Creds | null): Promise<Tools> =>
   // and will say what went wrong when asked for the route list.
   const index = await wcIndex(s.base, auth).catch(() => null);
   if (!index) return tools;
+
+  tools["update_wc_endpoint"] = {
+    description: `Write to any other WooCommerce REST route on ${host}. ${WRITE_ABOUT}`,
+    confirm: true,
+    input: { type: "object", required: ["path", "body"], properties: WRITE_PROPS },
+    run: (a: Args) => write(s.base, auth, "POST", a["path"], a["body"] as Args | undefined),
+  };
+  tools["delete_wc_endpoint"] = {
+    description: `Delete one record on any other WooCommerce REST route on ${host}. ${WRITE_ABOUT}`,
+    confirm: true,
+    annotations: { destructiveHint: true },
+    input: { type: "object", required: ["path"], properties: DELETE_PROPS },
+    run: (a: Args) =>
+      write(s.base, auth, "DELETE", a["path"], {}, a["force"] === true ? { force: true } : {}),
+  };
 
   for (const key of KEYS) {
     const res = RESOURCES[key];
@@ -493,6 +617,46 @@ export const wcGenericTools: Tools = {
       const login = await credsFor(base, c);
       if (!usable(login)) return login?.problem ?? needsLogin(base, await c.email());
       return endpoint(base, login, a.path, a.query);
+    },
+  },
+
+  update_wc_endpoint: {
+    description: `Write to any other WooCommerce REST route. ${WRITE_ABOUT}`,
+    confirm: true,
+    input: {
+      type: "object",
+      required: ["url", "path", "body"],
+      properties: { url: COMMON.url, ...WRITE_PROPS },
+    },
+    async run(a: Args & { url: string }, c) {
+      const base = siteUrl(a.url);
+      const login = await credsFor(base, c);
+      if (!usable(login)) return login?.problem ?? needsLogin(base, await c.email());
+      return write(base, login, "POST", a["path"], a["body"] as Args | undefined);
+    },
+  },
+
+  delete_wc_endpoint: {
+    description: `Delete one record on any other WooCommerce REST route. ${WRITE_ABOUT}`,
+    confirm: true,
+    annotations: { destructiveHint: true },
+    input: {
+      type: "object",
+      required: ["url", "path"],
+      properties: { url: COMMON.url, ...DELETE_PROPS },
+    },
+    async run(a: Args & { url: string }, c) {
+      const base = siteUrl(a.url);
+      const login = await credsFor(base, c);
+      if (!usable(login)) return login?.problem ?? needsLogin(base, await c.email());
+      return write(
+        base,
+        login,
+        "DELETE",
+        a["path"],
+        {},
+        a["force"] === true ? { force: true } : {},
+      );
     },
   },
 
