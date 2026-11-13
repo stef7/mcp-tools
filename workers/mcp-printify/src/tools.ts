@@ -299,7 +299,7 @@ export const printifyTools = (load: () => Loaded = loadSpec): Tools => ({
       "cancelling, refunding, reprinting or readdressing them, deleting or unpublishing a " +
       `product, deleting a shop, archiving an upload and changing webhooks are refused unless ${ALLOW} is ` +
       "enabled on the worker. Prices are in cents. Lists can be huge (the blueprint catalogue " +
-      "is over a thousand items): use find and fields.",
+      "is some three thousand items): use find and fields.",
     input: {
       type: "object",
       required: ["method", "path"],

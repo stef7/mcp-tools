@@ -43,7 +43,8 @@ export const NO_TOKEN =
 /** What a status code usually means here, said once so every tool words it the same way. */
 const hint = (status: number) =>
   status === 401
-    ? " Printify did not accept PRINTIFY_TOKEN: it is wrong, expired or revoked."
+    ? " Printify did not accept PRINTIFY_TOKEN for this: the token is wrong, expired or " +
+      "revoked, or the shop is not one of this account's (Printify answers 401 for that too)."
     : status === 403
       ? " The token lacks the scope for this, or the shop belongs to another account."
       : status === 404
@@ -107,7 +108,7 @@ export const send = async (
             `). Nothing was changed by this request. Wait ` +
             (wait > 0 ? `${wait} seconds` : "a minute") +
             " before trying again, and make fewer calls: Printify allows 600 requests a " +
-            "minute overall, 100 a minute on the catalogue, and 200 publishes per 30 minutes.",
+            "minute overall and 100 a minute on the catalogue.",
         };
       await sleep(wait * 1000);
       waited += wait;

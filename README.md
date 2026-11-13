@@ -500,7 +500,7 @@ What may be sent:
 A `429` from Printify is waited out (for as long as `Retry-After` asks, up to ten seconds, three
 times) and then reported with how long to wait. Lists are cut to a readable size: pass `find` to
 keep the items containing some text and `fields` to keep only some keys, which is how one
-blueprint is found by name in a catalogue of more than a thousand.
+blueprint is found by name in a catalogue of some three thousand.
 
 To set it up:
 
