@@ -21,6 +21,7 @@ workers/mcp-data-gov-au/     data.gov.au over CKAN, including raw SQL
 workers/mcp-ghost/           Ghost publications, with member sign-in for paid posts
 workers/mcp-apify/           what Apify is costing you, by service and by Actor
 workers/mcp-helios/          Helios Voting: read, verify and run elections. Its own door, not in the toolkit
+workers/mcp-printify/        Printify: search its API, call it, upload artwork. Its own door too
 scripts/mock-wp.mjs          fake WordPress for local testing
 scripts/mock-ghost.mjs       fake Ghost, including the magic-link sign-in
 scripts/cf-tunnel-relay.mjs  runs on the Mac at the far end of the tunnel
@@ -30,6 +31,9 @@ scripts/build-cf-tunnel-relay-app.sh
                              builds that app into ~/Applications and opens it
 scripts/mock-proxy.mjs       fake Apify Proxy, for the proxy tests, re-signing HTTPS as Apify does
 scripts/mock-helios.mjs      fake Helios, for the election lifecycle tests
+scripts/mock-printify.mjs    fake Printify: catalogue, uploads, products, orders, rate limits
+scripts/vendor-printify-spec.mjs
+                             trims Printify's OpenAPI document into workers/mcp-printify/src/spec.json
 scripts/apify-tls-probe.mjs  checks HTTPS through the real Unblocker the way the Worker does it
 scripts/apify-trust-anchor.py
                              rebuilds core/apify-ca.ts from certificates Unblocker presented
@@ -471,10 +475,71 @@ link to.
 Times on Helios are UTC. The tools take ISO 8601 with an offset (`2026-11-14T17:00+11:00`) and
 convert; a value without an offset is taken as UTC.
 
+## Selling on Printify
+
+`mcp-printify` puts one Printify account behind three tools instead of one per endpoint:
+
+- `printify_search` finds operations in Printify's API description by keyword and returns each
+  one's method, path, summary, parameters and request-body schema, with an example.
+- `printify_call` runs one operation by method and path. Path parameters, query and body are
+  checked against the API description before anything is sent.
+- `printify_upload_image` adds artwork to the media library from a public URL.
+
+The API description is Printify's own OpenAPI document. `scripts/vendor-printify-spec.mjs` trims
+it to operations, parameters and request bodies and writes `workers/mcp-printify/src/spec.json`,
+which ships in the bundle; nothing fetches it at runtime. Re-run the script when Printify changes
+its API, read the diff and commit it.
+
+What may be sent:
+
+- `GET` runs freely.
+- Anything else needs `confirm: true` in the call, and the result restates the method, path and
+  body that went out. Without it the call is refused and shows the request it would have made.
+- Refused unless the variable `PRINTIFY_ALLOW_DESTRUCTIVE` is exactly `true`: every write to an
+  order (creating one, standard or Express; sending it to production; cancelling it or a line
+  item; refund and reprint requests; address changes), deleting or unpublishing a product,
+  disconnecting a shop, archiving an upload, and any write to webhooks. It is unset by default;
+  leave it that way unless you mean it. With it on, those calls still need `confirm: true`.
+
+A `429` from Printify is waited out (for as long as `Retry-After` asks, up to ten seconds, three
+times) and then reported with how long to wait. Lists are cut to a readable size: pass `find` to
+keep the items containing some text and `fields` to keep only some keys, which is how one
+blueprint is found by name in a catalogue of some three thousand.
+
+To set it up:
+
+1. **Create the token.** In Printify, open the account menu -> **Connections** -> **Personal
+   access tokens** -> **Generate**. Name it, and choose custom scopes: reading shops, the
+   catalogue, print providers, products, uploads and orders, plus writing products and uploads.
+   Leave out writing orders and webhooks and managing shops, and Printify itself will refuse what
+   this worker already blocks. Copy the token when it is shown; Printify shows it once, and it
+   expires after a year.
+2. **Store it as a secret**, once the worker exists on Cloudflare (its first deploy is the merge
+   to `main`):
+
+   ```sh
+   cd workers/mcp-printify
+   npx wrangler secret put PRINTIFY_TOKEN      # paste the token when asked
+   ```
+
+   The token goes to Printify as a Bearer header and nowhere else: no tool result, error or log
+   line carries it.
+
+3. **Put Cloudflare Access in front of it**, as under **Auth** below, on the `mcp-printify`
+   worker: an Access policy listing who may use it, and Managed OAuth turned on. Like
+   `mcp-helios` it is not bound into `mcp-toolkit`, because it acts on one person's shops.
+4. **Add the connector in Claude.** Settings -> Connectors -> **Add custom connector**, and
+   paste the worker's URL, `https://mcp-printify.<your-subdomain>.workers.dev/`. The sign-in that
+   opens is the Access page.
+
+Opening that URL in a browser shows whether the API description loaded, whether the token is
+set, whether Printify accepts it, and whether destructive calls are on.
+
 ## Auth (Cloudflare Access)
 
-Access runs before the Worker, so unauthenticated hits cost nothing. Only `mcp-toolkit` needs it,
-since it is the only worker with a URL:
+Access runs before the Worker, so unauthenticated hits cost nothing. `mcp-toolkit` needs it, and so
+do the workers that have a URL of their own rather than a binding in the toolkit (`mcp-helios`,
+`mcp-printify`); repeat steps 2 to 4 for each:
 
 1. Zero Trust -> Integrations -> Identity providers -> add **One-time PIN** (email code, no
    account needed).

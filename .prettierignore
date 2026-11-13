@@ -3,3 +3,4 @@ worker-configuration.d.ts
 .wrangler
 bundles
 core/vendor
+workers/mcp-printify/src/spec.json
