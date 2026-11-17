@@ -551,17 +551,27 @@ within them events only: no tasks, no contacts, and no inviting attendees.
 | `nc_get_event`                                                 | one event in full                                    |
 | `nc_create_event` `nc_update_event` `nc_delete_event`          | add, change, delete; one occurrence or a series      |
 
-The connector URL names the Nextcloud, and the login travels in a header, so nothing is stored
-on the worker:
+The connector URL says which Nextcloud, or the worker's `NC_URL` variable does when the URL names
+none, and the login travels in a header:
 
 | Part                                | Means                                                                                    |
 | ----------------------------------- | ---------------------------------------------------------------------------------------- |
 | `mcp-nc…/https://cloud.example.com` | which Nextcloud, in the path (a folder install works: `…/https://example.com/nextcloud`) |
 | `mcp-nc…/?nc=cloud.example.com`     | the same, as a parameter                                                                 |
+| `mcp-nc…/`                          | the worker's own Nextcloud: the `NC_URL` variable                                        |
 | `&tz=Australia/Melbourne`           | what `2026-11-20T10:00` means, and the zone times are shown in                           |
 | `&private=hidden`                   | leave private events out altogether, instead of showing bare busy blocks                 |
 | `&private_calendars=Health,Family`  | more calendar-name words to treat as private                                             |
-| `X-Auth-Token: login:app password`  | the login, as a connector header                                                         |
+| `X-Auth-Token: login:app password`  | the whole login, as a connector header; nothing is stored on the worker                  |
+| `X-API-Key: login`                  | the login name alone; the worker adds the app password from its `NC_PASSWORD` secret     |
+
+Both header names are ones Claude lets any connector send. `X-Auth-Token` wins when both arrive.
+
+`NC_PASSWORD` is sent to `NC_URL` and to no other host. A connector URL can name any address, so
+a stored password that followed it would be handed to whoever wrote the URL; a connector that
+names a different Nextcloud has to bring that Nextcloud's login in `X-Auth-Token`. With the
+password on the worker, Cloudflare Access is all that stands between a login name and the
+calendar, so keep the Access policy to the people who should have it.
 
 Set `tz`. Without it a time with no offset is refused rather than guessed at, and listings come
 back in UTC.
@@ -608,14 +618,24 @@ To set it up:
 1. **Create an app password.** In Nextcloud: your avatar -> **Personal settings** -> **Security**
    -> **Devices & sessions** -> name it and **Create new app password**. Keep the login name it
    shows with it.
-2. **Put Cloudflare Access in front of the worker**, as under **Auth** below, once it exists on
-   Cloudflare (its first deploy is the merge to `main`).
-3. **Add the connector in Claude** with the URL above and, under its advanced settings, the
-   header `X-Auth-Token` set to `login:app password`.
+2. **Optionally, keep the address and the password on the worker**, once it exists on Cloudflare
+   (its first deploy is the merge to `main`). `NC_URL` is a plain variable, set in the dashboard
+   under Settings -> Variables and Secrets (`keep_vars` keeps it across deploys); the password
+   is a secret:
+
+   ```sh
+   cd workers/mcp-nc
+   npx wrangler secret put NC_PASSWORD         # paste the app password when asked
+   ```
+
+3. **Put Cloudflare Access in front of the worker**, as under **Auth** below.
+4. **Add the connector in Claude**, and under its request headers set either `X-Auth-Token` to
+   `login:app password`, or, with step 2 done, `X-API-Key` to the login name alone. The URL is
+   then just `https://mcp-nc…/?tz=Australia/Melbourne`.
 
 `nc_status`, or opening the connector URL in a browser, says which Nextcloud it is for, whether
-the login was accepted and which calendars it found. A browser sends no `X-Auth-Token`, so there
-it stops at "not sent".
+the login was accepted and which calendars it found. A browser sends neither header, so there it
+stops at "No login header was sent".
 
 The tests run against `scripts/mock-nextcloud.mjs`. To run them against a real CalDAV server
 instead, serve one under `/remote.php/dav/` that accepts the login in `test/global-setup.ts`

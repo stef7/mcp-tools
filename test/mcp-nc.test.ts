@@ -9,7 +9,7 @@
  * a login following a redirect.
  */
 import { createExecutionContext, env } from "cloudflare:test";
-import { beforeAll, describe, expect, inject, it } from "vitest";
+import { afterEach, beforeAll, describe, expect, inject, it } from "vitest";
 import Worker, { nextcloudInPath } from "../workers/mcp-nc/src/index";
 import { parse, serialise } from "../workers/mcp-nc/src/ical";
 import { isoIn, parseWhen, wallToInstant } from "../workers/mcp-nc/src/time";
@@ -125,7 +125,9 @@ describe("the connector", () => {
 
   it("says what is missing rather than failing obscurely", async () => {
     expect(await fails("nc_list_calendars", {}, { search: "" })).toContain("No Nextcloud address");
-    expect(await fails("nc_list_calendars", {}, { headers: {} })).toContain("No X-Auth-Token");
+    expect(await fails("nc_list_calendars", {}, { headers: {} })).toContain(
+      "No X-Auth-Token or X-API-Key",
+    );
     expect(
       await fails("nc_list_calendars", {}, { headers: { "x-auth-token": "nocolon" } }),
     ).toContain("unreadable");
@@ -137,7 +139,7 @@ describe("the connector", () => {
     ).toContain("never in the Nextcloud address");
     const status = await ok("nc_status", {}, { headers: {} });
     expect(status["ok"]).toBe(false);
-    expect(status["login"]).toContain("not sent");
+    expect(status["login"]).toContain("No login header was sent");
   });
 
   it("explains a refused login without repeating the password", async () => {
@@ -150,6 +152,69 @@ describe("the connector", () => {
     expect(said).toContain("HTTP 401");
     expect(said).toContain("app password");
     expect(said).not.toContain(wrong);
+  });
+});
+
+describe("a Nextcloud and a password kept on the worker", () => {
+  const vars = env as unknown as Record<string, unknown>;
+  const bare = `?tz=${TZ}`;
+  const byName = { search: bare, headers: { "x-api-key": USER } };
+  afterEach(() => {
+    delete vars["NC_URL"];
+    delete vars["NC_PASSWORD"];
+  });
+
+  it("uses NC_URL when the connector URL names no Nextcloud", async () => {
+    expect(await fails("nc_list_calendars", {}, { search: bare })).toContain(
+      "No Nextcloud address",
+    );
+    vars["NC_URL"] = `${base}/remote.php/dav/`; // pasted from Nextcloud's settings, as people do
+    expect(JSON.stringify(await ok("nc_list_calendars", {}, { search: bare }))).toContain('"work"');
+    const status = await ok("nc_status", {}, { search: bare });
+    expect(status["nextcloud"]).toBe(`${base} (the worker's NC_URL)`);
+  });
+
+  it("signs in with a login name from X-API-Key and the password from NC_PASSWORD", async () => {
+    vars["NC_URL"] = base;
+    expect(await fails("nc_list_calendars", {}, byName)).toContain("no NC_PASSWORD secret");
+    vars["NC_PASSWORD"] = PASS;
+    expect(JSON.stringify(await ok("nc_list_calendars", {}, byName))).toContain('"work"');
+    const status = await ok("nc_status", {}, byName);
+    expect(status["login"]).toBe(
+      `X-API-Key: accepted, signed in as ${USER} with the worker's NC_PASSWORD`,
+    );
+    expect(JSON.stringify(status)).not.toContain(PASS);
+    expect(
+      await fails("nc_list_calendars", {}, { search: bare, headers: { "x-api-key": LOGIN } }),
+    ).toContain("login name only");
+  });
+
+  it("lets a whole login in X-Auth-Token win over the stored one", async () => {
+    vars["NC_URL"] = base;
+    vars["NC_PASSWORD"] = "not-the-password";
+    const both = { search: bare, headers: { "x-api-key": "someone-else", "x-auth-token": LOGIN } };
+    expect((await ok("nc_status", {}, both))["login"]).toBe(
+      `X-Auth-Token: accepted, signed in as ${USER}`,
+    );
+  });
+
+  it("never sends the stored password to a Nextcloud other than NC_URL", async () => {
+    vars["NC_URL"] = "https://cloud.example.com";
+    vars["NC_PASSWORD"] = PASS;
+    const count = async () =>
+      real ? 0 : ((await (await fetch(`${base}/__mock/requests`)).json()) as unknown[]).length;
+    const before = await count();
+    // The connector URL points somewhere else: here, at the test server.
+    const said = await fails(
+      "nc_list_calendars",
+      {},
+      { search: search(), headers: { "x-api-key": USER } },
+    );
+    expect(said).toContain("sent only to its own Nextcloud");
+    expect(said).not.toContain(PASS);
+    expect(await count()).toBe(before);
+    // That other Nextcloud is still usable by someone who brings its login themselves.
+    expect(JSON.stringify(await ok("nc_list_calendars"))).toContain('"work"');
   });
 });
 

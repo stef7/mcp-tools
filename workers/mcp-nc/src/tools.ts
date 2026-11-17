@@ -19,6 +19,7 @@ import {
   discover,
   eventByUid,
   eventsBetween,
+  homeBase,
   listCalendars,
   putNew,
   putOver,
@@ -563,27 +564,34 @@ const anything = (fields: object) =>
 /** Whether this connector can reach its Nextcloud, in words. Never throws, never names a secret. */
 export const report = async (c: Ctx) => {
   let base: string | null;
+  let own: string | null;
   try {
-    base = baseOf(c.params);
+    base = baseOf(c);
+    own = homeBase(c.env);
   } catch (e) {
     return { ok: false, problem: e instanceof Error ? e.message : String(e) };
   }
   const zone = zoneParam(c.params);
   const about = {
-    nextcloud: base ?? "not set: add /https://<your nextcloud> or ?nc=<host> to the connector URL",
+    nextcloud: base
+      ? `${base} (${c.params.get("nc") ? "named by the connector URL" : "the worker's NC_URL"})`
+      : "not set: add /https://<your nextcloud> or ?nc=<host> to the connector URL, or set NC_URL",
     timezone: zone
       ? validZone(zone)
         ? zone
         : `"${zone}" is not an IANA time zone name`
       : "not set: add ?tz=Australia/Melbourne so times without an offset mean local time",
+    stored_password: c.env.NC_PASSWORD?.trim()
+      ? `NC_PASSWORD is set, for X-API-Key logins to ${own ?? "NC_URL, which is not set"}`
+      : "NC_PASSWORD is not set, so the whole login must come in X-Auth-Token",
   };
-  if (!("x-auth-token" in c.headers))
+  if (!("x-auth-token" in c.headers) && !("x-api-key" in c.headers))
     return {
       ok: false,
       ...about,
       login:
-        "X-Auth-Token: not sent. A browser never sends it; the connector does. Set it there " +
-        'to "login:app password".',
+        "No login header was sent. A browser never sends one; the connector does. Set " +
+        'X-Auth-Token there to "login:app password", or X-API-Key to the login name alone.',
     };
   try {
     const conn = connOf(c);
@@ -592,7 +600,9 @@ export const report = async (c: Ctx) => {
     return {
       ok: true,
       ...about,
-      login: `X-Auth-Token: accepted, signed in as ${conn.user}`,
+      login:
+        `${conn.via}: accepted, signed in as ${conn.user}` +
+        (conn.via === "X-API-Key" ? " with the worker's NC_PASSWORD" : ""),
       principal,
       calendars: calendars.map(
         (cal) => `${cal.id} ("${cal.name}")${cal.can_write ? "" : " read-only"}`,

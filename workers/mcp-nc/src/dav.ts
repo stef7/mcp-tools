@@ -26,28 +26,33 @@ const XMLNS =
 
 // ─── Which Nextcloud, and whose login ──────────────────────────────────────────────────────────
 
-export type Conn = { base: string; user: string; pass: string };
+export type Conn = {
+  base: string;
+  user: string;
+  pass: string;
+  /** Which header the login came by, for nc_status. */
+  via: "X-Auth-Token" | "X-API-Key";
+};
 
 const SETUP =
   "Name the Nextcloud in the connector URL, as a path (https://mcp-nc…/https://cloud.example.com) " +
-  "or as ?nc=cloud.example.com, and send the login in the X-Auth-Token header as " +
-  '"login:app password" (Nextcloud -> Personal settings -> Security -> Devices & sessions -> ' +
-  "Create new app password).";
+  "or as ?nc=cloud.example.com, or set NC_URL on the worker. Send the login in the X-Auth-Token " +
+  'header as "login:app password" (Nextcloud -> Personal settings -> Security -> Devices & ' +
+  "sessions -> Create new app password), or send just the login name in X-API-Key and keep the " +
+  "app password in the worker's NC_PASSWORD secret.";
 
 const LOCAL = new Set(["localhost", "127.0.0.1", "[::1]"]);
 
-/** `?nc=` -> the address Nextcloud is installed at, with no trailing slash. Null when unset. */
-export const baseOf = (params: URLSearchParams): string | null => {
-  const raw = params.get("nc")?.trim();
-  if (!raw) return null;
+/** An address as someone typed it -> where Nextcloud is installed, with no trailing slash. */
+const normalise = (raw: string, where: string) => {
   let url: URL;
   try {
     url = new URL(/^https?:\/\//i.test(raw) ? raw : `https://${raw}`);
   } catch {
-    throw new Error(`"${raw}" is not an address. ${SETUP}`);
+    throw new Error(`${where}: "${raw}" is not an address. ${SETUP}`);
   }
   if (url.username || url.password)
-    throw new Error("Put the login in the X-Auth-Token header, never in the Nextcloud address.");
+    throw new Error("Put the login in a header, never in the Nextcloud address.");
   if (url.protocol !== "https:" && !LOCAL.has(url.hostname))
     throw new Error("The Nextcloud address must be https: the login travels with every request.");
   // Someone pasting the CalDAV address from Nextcloud's settings means the install it is under.
@@ -55,25 +60,75 @@ export const baseOf = (params: URLSearchParams): string | null => {
   return url.origin + path.replace(/\/+$/, "");
 };
 
+type Where = Pick<Ctx, "params" | "env">;
+
+/** The worker's own Nextcloud: the NC_URL variable. Null when unset. */
+export const homeBase = (env: Env) => {
+  const raw = env.NC_URL?.trim();
+  return raw ? normalise(raw, "NC_URL") : null;
+};
+
+/**
+ * Which Nextcloud this request is for: the one the connector URL names (`?nc=`, which is also
+ * where a path ends up), else the worker's NC_URL. Null when neither is set.
+ */
+export const baseOf = (c: Where): string | null => {
+  const raw = c.params.get("nc")?.trim();
+  return raw ? normalise(raw, "The connector URL") : homeBase(c.env);
+};
+
 /** The display zone the connector asked for with `?tz=`, if any. */
 export const zoneParam = (params: URLSearchParams) => params.get("tz")?.trim() || undefined;
 
-/** `X-Auth-Token: login:app password`. A login name cannot contain a colon; a password can. */
-const loginOf = (headers: Record<string, string>) => {
-  const value = headers["x-auth-token"]?.trim();
-  if (!value) return null;
-  const at = value.indexOf(":");
-  if (at <= 0 || at === value.length - 1) return undefined;
-  return { user: value.slice(0, at).trim(), pass: value.slice(at + 1).trim() };
-};
-
-export const connOf = (c: Pick<Ctx, "params" | "headers">): Conn => {
-  const base = baseOf(c.params);
-  if (!base) throw new Error(`No Nextcloud address on this connector. ${SETUP}`);
-  const login = loginOf(c.headers);
-  if (login === null) throw new Error(`No X-Auth-Token header reached this worker. ${SETUP}`);
-  if (!login) throw new Error('X-Auth-Token is unreadable: it should be "login:app password".');
-  return { base, ...login };
+/**
+ * Who is signing in. Either the whole login arrives with the request:
+ *
+ *   X-Auth-Token: login:app password      a login name cannot contain a colon; a password can
+ *
+ * or only the name does, and the worker supplies the password it keeps:
+ *
+ *   X-API-Key: login                      + the NC_PASSWORD secret
+ *
+ * Both names are ones Claude lets any connector send. X-Auth-Token wins when both are there.
+ *
+ * The stored password goes to the worker's own NC_URL and nowhere else. A connector URL can name
+ * any host, so sending NC_PASSWORD wherever the URL points would hand it to whoever asked; a
+ * request for another Nextcloud has to bring its own X-Auth-Token.
+ */
+export const connOf = (c: Pick<Ctx, "params" | "headers" | "env">): Conn => {
+  const base = baseOf(c);
+  if (!base)
+    throw new Error(`No Nextcloud address: none on the connector, and no NC_URL. ${SETUP}`);
+  const token = c.headers["x-auth-token"]?.trim();
+  if (token) {
+    const at = token.indexOf(":");
+    if (at <= 0 || at === token.length - 1)
+      throw new Error('X-Auth-Token is unreadable: it should be "login:app password".');
+    return {
+      base,
+      user: token.slice(0, at).trim(),
+      pass: token.slice(at + 1).trim(),
+      via: "X-Auth-Token",
+    };
+  }
+  const user = c.headers["x-api-key"]?.trim();
+  if (!user) throw new Error(`No X-Auth-Token or X-API-Key header reached this worker. ${SETUP}`);
+  if (user.includes(":"))
+    throw new Error(
+      "X-API-Key carries the login name only. A whole login:password belongs in X-Auth-Token.",
+    );
+  const pass = c.env.NC_PASSWORD?.trim();
+  if (!pass)
+    throw new Error(
+      "X-API-Key names a login, but the worker has no NC_PASSWORD secret to go with it. Set " +
+        "one (npx wrangler secret put NC_PASSWORD), or send the whole login in X-Auth-Token.",
+    );
+  if (base !== homeBase(c.env))
+    throw new Error(
+      "The worker's stored password is sent only to its own Nextcloud (NC_URL), and this " +
+        "connector names a different one. Send that Nextcloud's login in X-Auth-Token.",
+    );
+  return { base, user, pass, via: "X-API-Key" };
 };
 
 // ─── XML, as much of it as WebDAV uses ─────────────────────────────────────────────────────────
