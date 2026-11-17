@@ -11,6 +11,9 @@
 import { createExecutionContext, env } from "cloudflare:test";
 import { afterEach, beforeAll, describe, expect, inject, it } from "vitest";
 import Worker, { nextcloudInPath } from "../workers/mcp-nc/src/index";
+import { unseal } from "../workers/mcp-nc/src/dav";
+// @ts-expect-error a plain script, with no types of its own
+import { seal } from "../scripts/seal-nextcloud.mjs";
 import { parse, serialise } from "../workers/mcp-nc/src/ical";
 import { isoIn, parseWhen, wallToInstant } from "../workers/mcp-nc/src/time";
 
@@ -124,9 +127,12 @@ describe("the connector", () => {
   });
 
   it("says what is missing rather than failing obscurely", async () => {
-    expect(await fails("nc_list_calendars", {}, { search: "" })).toContain("No Nextcloud address");
+    expect(await fails("nc_list_calendars", {}, { search: "" })).toContain("missing the address");
+    expect(await fails("nc_list_calendars", {}, { search: "", headers: {} })).toContain(
+      "No login reached this worker",
+    );
     expect(await fails("nc_list_calendars", {}, { headers: {} })).toContain(
-      "No X-Auth-Token or X-Account-Id",
+      "missing the login name (X-Account-Id) and the app password (X-App-Key)",
     );
     expect(
       await fails("nc_list_calendars", {}, { headers: { "x-auth-token": "nocolon" } }),
@@ -155,159 +161,198 @@ describe("the connector", () => {
   });
 });
 
-describe("a Nextcloud and a password kept on the worker", () => {
+describe("a login sealed on the worker and opened by a key in the connector", () => {
   const vars = env as unknown as Record<string, unknown>;
   const bare = `?tz=${TZ}`;
-  const byName = { search: bare, headers: { "x-account-id": USER } };
+  const host = new URL(base).host;
+  let sealed: string;
+  let key: string;
+  const withKey = (k = key) => ({ search: bare, headers: { "x-secret-key": k } });
+  const count = async () =>
+    real ? 0 : ((await (await fetch(`${base}/__mock/requests`)).json()) as unknown[]).length;
+
+  beforeAll(async () => {
+    ({ sealed, key } = await seal({ url: `${base}/remote.php/dav/`, login: USER, password: PASS }));
+  });
   afterEach(() => {
-    delete vars["NC_URL"];
-    delete vars["NC_URL_SHA256"];
-    delete vars["NC_PASSWORD"];
+    delete vars["NC_SEALED"];
   });
 
-  it("uses NC_URL when the connector URL names no Nextcloud", async () => {
-    expect(await fails("nc_list_calendars", {}, { search: bare })).toContain(
-      "No Nextcloud address",
+  it("makes a seal that gives nothing away on its own", async () => {
+    expect(sealed).toMatch(/^v1\.[\w-]+\.[\w-]+$/);
+    expect(key).toMatch(/^[\w-]{43}$/);
+    for (const secret of [host, USER, PASS, btoa(PASS), btoa(USER)])
+      expect(sealed + key).not.toContain(secret);
+    // A new key and a new seal every time, even for the same answers.
+    const again = await seal({ url: base, login: USER, password: PASS });
+    expect(again.key).not.toBe(key);
+    expect(again.sealed).not.toBe(sealed);
+    expect(await unseal(sealed, key)).toEqual({
+      url: `${base}/remote.php/dav/`,
+      login: USER,
+      password: PASS,
+    });
+  });
+
+  it("signs in with nothing but the key, and names neither the address nor the login", async () => {
+    vars["NC_SEALED"] = sealed;
+    expect(JSON.stringify(await ok("nc_list_calendars", {}, withKey()))).toContain('"work"');
+    const status = await ok("nc_status", {}, withKey());
+    expect(status).toMatchObject({
+      ok: true,
+      nextcloud: "sealed in NC_SEALED (not shown)",
+      login: "X-Secret-Key: opened NC_SEALED, and Nextcloud accepted the login inside it",
+    });
+    const said = JSON.stringify(status);
+    for (const secret of [host, USER, PASS, key, sealed]) expect(said).not.toContain(secret);
+    const init = await new Worker(createExecutionContext(), env).fetch(
+      new Request("https://mcp-nc.example/", {
+        method: "POST",
+        headers: { "x-secret-key": key },
+        body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "initialize", params: {} }),
+      }),
     );
-    vars["NC_URL"] = `${base}/remote.php/dav/`; // pasted from Nextcloud's settings, as people do
-    expect(JSON.stringify(await ok("nc_list_calendars", {}, { search: bare }))).toContain('"work"');
-    const status = await ok("nc_status", {}, { search: bare });
-    expect(status["nextcloud"]).toBe("the worker's NC_URL (set, not shown)");
+    expect(JSON.stringify(await init.json())).not.toContain(host);
   });
 
-  it("keeps an address from NC_URL to itself, in status, errors and the connector's description", async () => {
-    const host = new URL(base).host;
-    vars["NC_URL"] = base;
-    const wrong = { search: bare, headers: { "x-auth-token": `${USER}:wrong-password` } };
-    expect(JSON.stringify(await ok("nc_status", {}, wrong))).not.toContain(host);
-    expect(await fails("nc_list_calendars", {}, wrong)).not.toContain(host);
-    const init = async (url: string) => {
-      const res = await new Worker(createExecutionContext(), env).fetch(
-        new Request(url, {
-          method: "POST",
-          body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "initialize", params: {} }),
-        }),
-      );
-      return JSON.stringify(await res.json());
-    };
-    expect(await init("https://mcp-nc.example/")).not.toContain(host);
-    // Named in the connector URL, it is the caller's own and is shown back.
-    expect(await init(`https://mcp-nc.example/${base}`)).toContain(host);
-    // Hiding the address must not reach into event data that happens to mention the host.
+  it("opens for the right key only, and sends nothing to anyone otherwise", async () => {
+    vars["NC_SEALED"] = sealed;
+    const before = await count();
+    const other = (await seal({ url: base, login: USER, password: PASS })).key;
+    for (const wrong of [other, key.slice(0, -2) + "AA", "short", "not base64 !!"]) {
+      const said = await fails("nc_list_calendars", {}, withKey(wrong));
+      expect(said).toContain("X-Secret-Key does not open NC_SEALED");
+      for (const secret of [host, USER, PASS]) expect(said).not.toContain(secret);
+    }
+    // A seal that was tampered with fails the same way: it is authenticated, not just scrambled.
+    const [v, iv, data] = sealed.split(".") as [string, string, string];
+    vars["NC_SEALED"] =
+      `${v}.${iv}.${data.slice(0, -4)}${data.slice(-4) === "AAAA" ? "BBBB" : "AAAA"}`;
+    expect(await fails("nc_list_calendars", {}, withKey())).toContain("does not open NC_SEALED");
+    vars["NC_SEALED"] = "something else entirely";
+    expect(await fails("nc_list_calendars", {}, withKey())).toContain(
+      "not a seal this worker made",
+    );
+    delete vars["NC_SEALED"];
+    expect(await fails("nc_list_calendars", {}, withKey())).toContain("no NC_SEALED secret");
+    expect(await count()).toBe(before);
+  });
+
+  it("cannot be pointed at another host: the address is inside the seal", async () => {
+    const mine = await seal({
+      url: "https://nothing-listens.invalid",
+      login: USER,
+      password: PASS,
+    });
+    vars["NC_SEALED"] = mine.sealed;
+    const before = await count();
+    const said = await fails("nc_list_calendars", {}, withKey(mine.key));
+    expect(said).toContain("Could not reach Nextcloud");
+    expect(said).not.toContain("nothing-listens");
+    expect(said).not.toContain(PASS);
+    expect(await count()).toBe(before);
+  });
+
+  it("never mixes the seal with part of a login sent in the request", async () => {
+    vars["NC_SEALED"] = sealed;
+    const before = await count();
+    // Each of these would otherwise send a sealed password to an address the request chose, or
+    // sign a sealed address in as someone the request chose.
+    const partial: Opts[] = [
+      { search: search(), headers: { "x-secret-key": key } },
+      { search: bare, headers: { "x-secret-key": key, "x-tenant": base } },
+      { search: bare, headers: { "x-secret-key": key, "x-account-id": USER } },
+      { search: bare, headers: { "x-secret-key": key, "x-app-key": PASS } },
+      { search: bare, headers: { "x-secret-key": key, "x-tenant": base, "x-account-id": USER } },
+    ];
+    for (const o of partial) {
+      const said = await fails("nc_list_calendars", {}, o);
+      expect(said).toContain("never mixed");
+      for (const secret of [host, PASS]) expect(said).not.toContain(secret);
+    }
+    expect(await count()).toBe(before);
+  });
+
+  it("takes all three in headers of their own, and then leaves the seal shut", async () => {
+    const all = { "x-tenant": base, "x-account-id": USER, "x-app-key": PASS };
+    const o = { search: bare, headers: all };
+    expect(JSON.stringify(await ok("nc_list_calendars", {}, o))).toContain('"work"');
+    const status = await ok("nc_status", {}, o);
+    expect(status).toMatchObject({
+      ok: true,
+      nextcloud: "the connector's X-Tenant header (sent, not shown)",
+      login: "X-Account-Id and X-App-Key: accepted (login not shown)",
+    });
+    for (const secret of [host, USER, PASS]) expect(JSON.stringify(status)).not.toContain(secret);
+    // A complete login in the request is used as it stands, even beside a key and a seal for
+    // somewhere else, which stays shut.
+    vars["NC_SEALED"] = (
+      await seal({ url: "https://nothing-listens.invalid", login: "x", password: "y" })
+    ).sealed;
+    const both = { search: bare, headers: { ...all, "x-secret-key": key } };
+    expect((await ok("nc_status", {}, both))["ok"]).toBe(true);
+    // The pieces can come from either place a request has for them.
+    const mixed = { search: search(), headers: { "x-account-id": USER, "x-app-key": PASS } };
+    expect((await ok("nc_status", {}, mixed))["login"]).toBe(
+      `X-Account-Id and X-App-Key: accepted, signed in as ${USER}`,
+    );
+    const viaTenant = { search: bare, headers: { "x-tenant": base, "x-auth-token": LOGIN } };
+    expect((await ok("nc_status", {}, viaTenant))["login"]).toBe(
+      "X-Auth-Token: accepted (login not shown)",
+    );
+  });
+
+  it("says which piece is missing when a login sent in the request is incomplete", async () => {
+    const said = async (headers: Record<string, string>) =>
+      fails("nc_list_calendars", {}, { search: bare, headers });
+    expect(await said({ "x-tenant": base, "x-account-id": USER })).toContain(
+      "missing the app password (X-App-Key)",
+    );
+    expect(await said({ "x-tenant": base, "x-app-key": PASS })).toContain(
+      "missing the login name (X-Account-Id)",
+    );
+    expect(await said({ "x-account-id": USER, "x-app-key": PASS })).toContain(
+      "missing the address",
+    );
+    expect(await said({ "x-tenant": "http://cloud.example.com", "x-auth-token": LOGIN })).toContain(
+      "must be https",
+    );
+    const wrong = await said({ "x-tenant": base, "x-account-id": USER, "x-app-key": "nope" });
+    expect(wrong).toContain("HTTP 401");
+    expect(wrong).not.toContain(host);
+  });
+
+  it("keeps a sealed address out of errors without touching event data that mentions it", async () => {
+    const bad = await seal({ url: base, login: USER, password: "wrong-password" });
+    vars["NC_SEALED"] = bad.sealed;
+    const said = await fails("nc_list_calendars", {}, withKey(bad.key));
+    expect(said).toContain("HTTP 401");
+    expect(said).not.toContain(host);
+    vars["NC_SEALED"] = sealed;
     await plant("work", "mentions-host", [
       "DTSTART:20261215T010000Z",
       "DTEND:20261215T020000Z",
       "SUMMARY:Host check",
       `URL:http://${host}/apps/calendar`,
     ]);
-    const mine = { search: bare, headers: { "x-auth-token": LOGIN } };
-    const seen = await ok("nc_get_event", { calendar: "work", uid: "mentions-host" }, mine);
+    const seen = await ok("nc_get_event", { calendar: "work", uid: "mentions-host" }, withKey());
     expect(seen["url"]).toBe(`http://${host}/apps/calendar`);
     await ok(
       "nc_update_event",
       { calendar: "work", uid: "mentions-host", location: "x", ...yes },
-      mine,
+      withKey(),
     );
     expect(await stored("work", "mentions-host")).toContain(`URL:http://${host}/apps/calendar`);
-    vars["NC_URL"] = "https://nothing-listens.invalid";
-    expect(await fails("nc_list_calendars", {}, wrong)).not.toContain("nothing-listens");
   });
 
-  it("signs in with a login name from X-Account-Id and the password from NC_PASSWORD", async () => {
-    vars["NC_URL"] = base;
-    expect(await fails("nc_list_calendars", {}, byName)).toContain("no NC_PASSWORD secret");
-    vars["NC_PASSWORD"] = PASS;
-    expect(JSON.stringify(await ok("nc_list_calendars", {}, byName))).toContain('"work"');
-    const status = await ok("nc_status", {}, byName);
-    expect(status["login"]).toBe(
-      `X-Account-Id: accepted, signed in as ${USER} with the worker's NC_PASSWORD`,
-    );
-    expect(JSON.stringify(status)).not.toContain(PASS);
-    expect(
-      await fails("nc_list_calendars", {}, { search: bare, headers: { "x-account-id": LOGIN } }),
-    ).toContain("login name only");
-  });
-
-  it("lets a whole login in X-Auth-Token win over the stored one", async () => {
-    vars["NC_URL"] = base;
-    vars["NC_PASSWORD"] = "not-the-password";
-    const both = {
-      search: bare,
-      headers: { "x-account-id": "someone-else", "x-auth-token": LOGIN },
-    };
-    expect((await ok("nc_status", {}, both))["login"]).toBe(
-      `X-Auth-Token: accepted, signed in as ${USER}`,
-    );
-  });
-
-  it("never sends the stored password to a Nextcloud other than NC_URL", async () => {
-    vars["NC_URL"] = "https://cloud.example.com";
-    vars["NC_PASSWORD"] = PASS;
-    const count = async () =>
-      real ? 0 : ((await (await fetch(`${base}/__mock/requests`)).json()) as unknown[]).length;
-    const before = await count();
-    // The connector URL points somewhere else: here, at the test server.
-    const said = await fails(
-      "nc_list_calendars",
-      {},
-      { search: search(), headers: { "x-account-id": USER } },
-    );
-    expect(said).toContain("only to a Nextcloud it vouches for");
-    expect(said).not.toContain(PASS);
-    expect(await count()).toBe(before);
-    // That other Nextcloud is still usable by someone who brings its login themselves.
-    expect(JSON.stringify(await ok("nc_list_calendars"))).toContain('"work"');
-  });
-
-  it("takes the address from an X-Tenant header, and never repeats it", async () => {
-    const host = new URL(base).host;
-    const o = { search: bare, headers: { "x-tenant": base, "x-auth-token": LOGIN } };
-    expect(JSON.stringify(await ok("nc_list_calendars", {}, o))).toContain('"work"');
-    const status = await ok("nc_status", {}, o);
-    expect(status["nextcloud"]).toBe("the connector's X-Tenant header (sent, not shown)");
-    expect(JSON.stringify(status)).not.toContain(host);
-    const wrong = { ...o, headers: { ...o.headers, "x-auth-token": `${USER}:nope` } };
-    expect(await fails("nc_list_calendars", {}, wrong)).not.toContain(host);
-    // The header wins over NC_URL, and the connector URL wins over the header.
-    vars["NC_URL"] = "https://nothing-listens.invalid";
-    expect((await ok("nc_status", {}, o))["ok"]).toBe(true);
-    const dead = {
-      search: bare,
-      headers: { "x-tenant": "https://nothing-listens.invalid", "x-auth-token": LOGIN },
-    };
-    expect((await ok("nc_status", {}, dead))["ok"]).toBe(false);
-    expect((await ok("nc_status", {}, { ...dead, search: search() }))["ok"]).toBe(true);
-    expect(
-      await fails(
-        "nc_list_calendars",
-        {},
-        { ...o, headers: { ...o.headers, "x-tenant": "http://cloud.example.com" } },
-      ),
-    ).toContain("must be https");
-  });
-
-  it("sends the stored password to a header's address only when its fingerprint matches", async () => {
-    vars["NC_PASSWORD"] = PASS;
-    const o = { search: bare, headers: { "x-tenant": `${base}/`, "x-account-id": USER } };
-    const count = async () =>
-      real ? 0 : ((await (await fetch(`${base}/__mock/requests`)).json()) as unknown[]).length;
-    const before = await count();
-    // No NC_URL and no fingerprint: the worker vouches for nowhere.
-    expect(await fails("nc_list_calendars", {}, o)).toContain("Nothing was sent");
-    const sha = async (text: string) =>
-      [...new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(text)))]
-        .map((b) => b.toString(16).padStart(2, "0"))
-        .join("");
-    vars["NC_URL_SHA256"] = await sha("https://somewhere-else.example");
-    expect(await fails("nc_list_calendars", {}, o)).toContain("Nothing was sent");
-    expect(await count()).toBe(before);
-    // The fingerprint of the address as normalised (no trailing slash), in either case.
-    vars["NC_URL_SHA256"] = (await sha(base)).toUpperCase();
-    expect(JSON.stringify(await ok("nc_list_calendars", {}, o))).toContain('"work"');
-    const status = await ok("nc_status", {}, o);
-    expect(status["login"]).toContain("with the worker's NC_PASSWORD");
-    expect(JSON.stringify(status)).not.toContain(new URL(base).host);
-    expect(JSON.stringify(status)).not.toContain(PASS);
+  it("still takes a whole login with the request, storing nothing", async () => {
+    const status = await ok("nc_status");
+    expect(status).toMatchObject({
+      ok: true,
+      nextcloud: `${base} (named by the connector URL)`,
+      sealed_login: "NC_SEALED is not set",
+    });
+    expect(status["login"]).toBe(`X-Auth-Token: accepted, signed in as ${USER}`);
   });
 });
 

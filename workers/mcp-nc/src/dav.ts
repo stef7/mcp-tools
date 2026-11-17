@@ -31,32 +31,35 @@ export type Conn = {
   user: string;
   pass: string;
   /**
-   * True when the address came from a header or the worker's NC_URL rather than the connector
-   * URL. It is then kept where it was put: no result, error or status line repeats it.
+   * True unless the address was in the connector URL, which is in plain sight anyway. An address
+   * that came from a header or out of NC_SEALED was put somewhere unseen, and stays there: no
+   * result, error or status line repeats it, or the login name that goes with it.
    */
-  own: boolean;
+  hidden: boolean;
   /** Which header the login came by, for nc_status. */
-  via: "X-Auth-Token" | "X-Account-Id";
+  how: "X-Secret-Key" | "X-Auth-Token" | "X-Account-Id and X-App-Key";
 };
 
 const SETUP =
-  "Name the Nextcloud in the connector URL (https://mcp-nc…/https://cloud.example.com or " +
-  "?nc=cloud.example.com), in the connector's X-Tenant header, or in NC_URL on the worker. Send " +
-  'the login in the X-Auth-Token header as "login:app password" (Nextcloud -> Personal ' +
-  "settings -> Security -> Devices & sessions -> Create new app password), or send just the " +
-  "login name in X-Account-Id and keep the app password in the worker's NC_PASSWORD secret.";
+  "Either send the whole login with the request: the address in the connector URL " +
+  "(https://mcp-nc…/https://cloud.example.com) or an X-Tenant header, and the login in " +
+  "X-Account-Id with the app password in X-App-Key (or both together in X-Auth-Token as " +
+  '"login:app password"). Or seal all three with scripts/seal-nextcloud.mjs, store what it ' +
+  "prints as the worker's NC_SEALED secret, and send only the key it prints, in X-Secret-Key.";
 
 const LOCAL = new Set(["localhost", "127.0.0.1", "[::1]"]);
 
 /** An address as someone typed it -> where Nextcloud is installed, with no trailing slash. */
-const normalise = (raw: string, where: string) => {
+const normalise = (raw: string, shown: boolean) => {
   let url: URL;
   try {
     url = new URL(/^https?:\/\//i.test(raw) ? raw : `https://${raw}`);
   } catch {
-    // What NC_URL holds is not repeated, even when it is wrong.
+    // An address that was put somewhere unseen is not repeated, even when it is wrong.
     throw new Error(
-      `${where}${where === "The connector URL" ? `: "${raw}"` : ""} is not an address. ${SETUP}`,
+      shown
+        ? `The connector URL names "${raw}", which is not an address. ${SETUP}`
+        : "The Nextcloud address (in X-Tenant, or sealed in NC_SEALED) is not an address.",
     );
   }
   if (url.username || url.password)
@@ -68,113 +71,129 @@ const normalise = (raw: string, where: string) => {
   return url.origin + path.replace(/\/+$/, "");
 };
 
-type Where = Pick<Ctx, "params" | "env" | "headers">;
-
-/** The worker's own Nextcloud: the NC_URL variable. Null when unset. */
-export const homeBase = (env: Env) => {
-  const raw = env.NC_URL?.trim();
-  return raw ? normalise(raw, "NC_URL") : null;
-};
-
-/**
- * Which Nextcloud this request is for, and who said so. In order: the connector URL (`?nc=`,
- * which is also where a path ends up), the connector's X-Tenant header, the worker's NC_URL.
- * Null when none is set.
- *
- * Only an address in the connector URL is `shown`. A URL is in plain sight wherever the connector
- * is listed; a header value or a worker variable is not, so whoever put the address there gets
- * it kept there: no result, error or status line repeats it.
- */
-export const baseOf = (
-  c: Where,
-): { base: string; from: "the connector URL" | "X-Tenant" | "NC_URL"; shown: boolean } | null => {
-  const url = c.params.get("nc")?.trim();
-  if (url)
-    return { base: normalise(url, "The connector URL"), from: "the connector URL", shown: true };
-  const header = c.headers["x-tenant"]?.trim();
-  // Like NC_URL, what the header holds is not repeated even when it is wrong.
-  if (header) return { base: normalise(header, "X-Tenant"), from: "X-Tenant", shown: false };
-  const home = homeBase(c.env);
-  return home ? { base: home, from: "NC_URL", shown: false } : null;
-};
-
-const hex = async (text: string) =>
-  [...new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(text)))]
-    .map((b) => b.toString(16).padStart(2, "0"))
-    .join("");
-
-/**
- * Whether the worker's stored password may be sent to this address. A request can name any
- * host, so NC_PASSWORD goes only to an address the worker itself vouches for: its NC_URL, or one
- * whose SHA-256 is its NC_URL_SHA256. The second lets the address live in the connector's
- * X-Tenant header alone: the worker then holds a password and a fingerprint, the connector an
- * address and a login name, and neither holds enough to sign in.
- */
-const vouchedFor = async (base: string, env: Env) => {
-  if (base === homeBase(env)) return true;
-  const pin = env.NC_URL_SHA256?.trim().toLowerCase();
-  return !!pin && pin === (await hex(base));
+/** The Nextcloud the connector URL names (`?nc=`, which is also where a path ends up), if any. */
+export const namedBase = (params: URLSearchParams): string | null => {
+  const raw = params.get("nc")?.trim();
+  return raw ? normalise(raw, true) : null;
 };
 
 /** The display zone the connector asked for with `?tz=`, if any. */
 export const zoneParam = (params: URLSearchParams) => params.get("tz")?.trim() || undefined;
 
+// ─── The sealed login ──────────────────────────────────────────────────────────────────────────
+
 /**
- * Who is signing in. Either the whole login arrives with the request:
+ * NC_SEALED holds the Nextcloud address, login name and app password, encrypted. The key is not
+ * on the worker: it arrives with each request in the connector's X-Secret-Key header, opens the seal
+ * for that request, and is kept nowhere. So what Cloudflare stores is unreadable without what
+ * the connector stores, and what the connector stores is a key to something it does not have.
  *
- *   X-Auth-Token: login:app password      a login name cannot contain a colon; a password can
+ * It is encryption, not hashing: a hash cannot be turned back into the password that has to be
+ * sent to Nextcloud. AES-256-GCM, which also authenticates, so a wrong key or an altered seal
+ * fails outright rather than yielding rubbish to sign in with. Because the address is inside
+ * the seal, no request can point the password at another host.
  *
- * or only the name does, and the worker supplies the password it keeps:
+ *   NC_SEALED   v1.<iv, base64url>.<ciphertext, base64url>     made by scripts/seal-nextcloud.mjs
+ *   X-Secret-Key     the 32-byte key, base64url                     printed once by the same script
+ */
+const AAD = new TextEncoder().encode("mcp-nc sealed login v1");
+const NO_OPEN =
+  "X-Secret-Key does not open NC_SEALED: the key is wrong, or the seal was made with another key. " +
+  "Nothing was sent to Nextcloud. Run scripts/seal-nextcloud.mjs again and replace both.";
+
+const bytes = (b64url: string) => {
+  const b64 = b64url.replace(/-/g, "+").replace(/_/g, "/");
+  return Uint8Array.from(atob(b64), (ch) => ch.charCodeAt(0));
+};
+
+export const unseal = async (sealed: string, key: string) => {
+  const [version, iv, data, ...rest] = sealed.trim().split(".");
+  if (version !== "v1" || !iv || !data || rest.length)
+    throw new Error("NC_SEALED is not a seal this worker made. Run scripts/seal-nextcloud.mjs.");
+  let text: string;
+  try {
+    const raw = bytes(key.trim());
+    if (raw.length !== 32) throw new Error("wrong length");
+    const k = await crypto.subtle.importKey("raw", raw, "AES-GCM", false, ["decrypt"]);
+    const plain = await crypto.subtle.decrypt(
+      { name: "AES-GCM", iv: bytes(iv), additionalData: AAD },
+      k,
+      bytes(data),
+    );
+    text = new TextDecoder().decode(plain);
+  } catch {
+    // One message for every way this fails, so an error says nothing about the key or the seal.
+    throw new Error(NO_OPEN);
+  }
+  const { url, login, password } = JSON.parse(text) as Record<string, unknown>;
+  if (typeof url !== "string" || typeof login !== "string" || typeof password !== "string")
+    throw new Error("NC_SEALED opened, but does not hold an address, login and password.");
+  return { url, login, password };
+};
+
+/**
+ * Who is signing in, and where. Either all of it arrives with the request:
  *
- *   X-Account-Id: login                   + the NC_PASSWORD secret
+ *   address    the connector URL (/https://host or ?nc=), else an X-Tenant header
+ *   login      X-Account-Id, with the app password in X-App-Key
+ *              (or both in one header: X-Auth-Token: login:app password)
  *
- * Both names are ones Claude lets any connector send. X-Auth-Token wins when both are there.
+ * or none of it does, and the worker's own sealed copy is used instead:
  *
- * The stored password goes to the worker's own NC_URL and nowhere else. A connector URL can name
- * any host, so sending NC_PASSWORD wherever the URL points would hand it to whoever asked; a
- * request for another Nextcloud has to bring its own X-Auth-Token.
+ *   X-Secret-Key: key      opens NC_SEALED, which holds address, login and password
+ *
+ * A complete set sent with the request is used as it stands, and the seal is left shut. The two
+ * are never mixed: an address from the request with a password from the seal would send that
+ * password wherever the request pointed, so a request that brings the key and only part of a
+ * login is refused. Every header name here is one Claude lets a connector send.
  */
 export const connOf = async (c: Pick<Ctx, "params" | "headers" | "env">): Promise<Conn> => {
-  const where = baseOf(c);
-  if (!where)
-    throw new Error(
-      `No Nextcloud address: none in the connector URL, no X-Tenant header, no NC_URL. ${SETUP}`,
-    );
-  const { base } = where;
-  const own = !where.shown;
-  const token = c.headers["x-auth-token"]?.trim();
+  const header = (name: string) => c.headers[name]?.trim() || undefined;
+  const named = namedBase(c.params);
+  const tenant = header("x-tenant");
+  const token = header("x-auth-token");
+  const id = header("x-account-id");
+  const appKey = header("x-app-key");
+  const key = header("x-secret-key");
+
+  const base = named ?? (tenant ? normalise(tenant, false) : null);
+  let login: Pick<Conn, "user" | "pass" | "how"> | null = null;
   if (token) {
     const at = token.indexOf(":");
     if (at <= 0 || at === token.length - 1)
       throw new Error('X-Auth-Token is unreadable: it should be "login:app password".');
-    return {
-      base,
-      own,
+    login = {
       user: token.slice(0, at).trim(),
       pass: token.slice(at + 1).trim(),
-      via: "X-Auth-Token",
+      how: "X-Auth-Token",
     };
+  } else if (id && appKey) login = { user: id, pass: appKey, how: "X-Account-Id and X-App-Key" };
+
+  if (base && login) return { base, ...login, hidden: !named };
+
+  const some = !!(named || tenant || token || id || appKey);
+  const missing = [
+    !base && "the address (in the connector URL, or X-Tenant)",
+    !login && !id && !token && "the login name (X-Account-Id)",
+    !login && !appKey && !token && "the app password (X-App-Key)",
+  ].filter(Boolean);
+  if (key) {
+    if (some)
+      throw new Error(
+        "This request brings X-Secret-Key and also part of a login of its own, but not " +
+          `${missing.join(" or ")}. The two are never mixed, so nothing was sent. Send all ` +
+          "three with the request, or X-Secret-Key alone.",
+      );
+    const sealed = c.env.NC_SEALED?.trim();
+    if (!sealed)
+      throw new Error(
+        `X-Secret-Key was sent, but the worker has no NC_SEALED secret to open. ${SETUP}`,
+      );
+    const { url, login: user, password } = await unseal(sealed, key);
+    return { base: normalise(url, false), user, pass: password, hidden: true, how: "X-Secret-Key" };
   }
-  const user = c.headers["x-account-id"]?.trim();
-  if (!user)
-    throw new Error(`No X-Auth-Token or X-Account-Id header reached this worker. ${SETUP}`);
-  if (user.includes(":"))
-    throw new Error(
-      "X-Account-Id carries the login name only. A whole login:password belongs in X-Auth-Token.",
-    );
-  const pass = c.env.NC_PASSWORD?.trim();
-  if (!pass)
-    throw new Error(
-      "X-Account-Id names a login, but the worker has no NC_PASSWORD secret to go with it. Set " +
-        "one (npx wrangler secret put NC_PASSWORD), or send the whole login in X-Auth-Token.",
-    );
-  if (!(await vouchedFor(base, c.env)))
-    throw new Error(
-      "The worker's stored password is sent only to a Nextcloud it vouches for (its NC_URL, or " +
-        "an address matching NC_URL_SHA256), and this request names a different one. Nothing " +
-        "was sent. Send that Nextcloud's login in X-Auth-Token, or set NC_URL_SHA256.",
-    );
-  return { base, own, user, pass, via: "X-Account-Id" };
+  if (!some) throw new Error(`No login reached this worker. ${SETUP}`);
+  throw new Error(`This request is missing ${missing.join(" and ")}. ${SETUP}`);
 };
 
 // ─── XML, as much of it as WebDAV uses ─────────────────────────────────────────────────────────
@@ -267,15 +286,15 @@ export type Answer = {
 };
 
 /**
- * Takes the password, and an address that is the worker's own secret, out of an error message.
+ * Takes the password, and an address that was not in plain sight, out of an error message.
  * Never applied to a response body: see Answer.
  */
 const scrub = (text: string, conn: Conn) => {
   let out = conn.pass ? text.replaceAll(conn.pass, "[password]") : text;
-  if (conn.own) {
+  if (conn.hidden) {
     const url = new URL(conn.base);
     for (const part of [conn.base, url.origin, url.host, url.hostname])
-      out = out.replaceAll(part, "[NC_URL]");
+      out = out.replaceAll(part, "[address]");
   }
   return out;
 };

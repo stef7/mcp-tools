@@ -1,23 +1,25 @@
 /**
  * mcp-nc — Nextcloud calendars -> MCP, over CalDAV.
  *
- *  POST /https://cloud.example.com        the Nextcloud in the path (see nextcloudInPath)
- *  POST /?nc=cloud.example.com            the same, as a query parameter
+ * Which Nextcloud and whose login reach the worker one of two ways (see dav.ts):
+ *
+ *  with the request                       the address in the URL (/https://cloud.example.com or
+ *                                         ?nc=) or an X-Tenant header; the login in X-Account-Id
+ *                                         and X-App-Key, or both in X-Auth-Token. Nothing is
+ *                                         stored on the worker.
+ *  X-Secret-Key: key                      nothing else is sent. The key opens the worker's
+ *                                         NC_SEALED secret, which holds the address, login name
+ *                                         and app password, encrypted. Neither side alone holds
+ *                                         anything usable.
+ *
  *  …?tz=Australia/Melbourne               what a time without an offset means, and how times
  *                                         are shown
  *
- *  X-Tenant: https://cloud.example.com    the same, as a connector header, where it is not on show
- *  NC_URL (a variable or secret)          the Nextcloud to use when neither names one
- *
- * The login arrives in a connector header, one of two ways. X-Auth-Token carries the whole of it
- * as `login:app password` (Nextcloud -> Personal settings -> Security -> Create new app
- * password), and then nothing is stored here. Or X-Account-Id carries the login name alone and
- * the worker supplies the app password from its NC_PASSWORD secret, which it sends only to an
- * address it vouches for (NC_URL, or one matching NC_URL_SHA256), whatever a request names. Either way the login goes to that Nextcloud as
- * Basic auth and nowhere else, and appears in no tool result, error or log. Who may reach the
- * worker at all is Cloudflare Access's business, as for every worker here. Like mcp-helios and
- * mcp-printify it is not bound into mcp-toolkit: it acts on one person's account, so it gets its
- * own URL and its own Access policy.
+ * Either way the login goes to that Nextcloud as Basic auth and nowhere else, and appears in no
+ * tool result, error or log; a sealed address and login name are not repeated either. Who may
+ * reach the worker at all is Cloudflare Access's business, as for every worker here. Like
+ * mcp-helios and mcp-printify it is not bound into mcp-toolkit: it acts on one person's account,
+ * so it gets its own URL and its own Access policy.
  *
  * Calendars only, and within them events only: no tasks, no contacts, no inviting attendees.
  * Nothing is erased: the worker sends no DELETE, a removed event moves to a Bin calendar, and
@@ -28,7 +30,7 @@
 import cfg from "../wrangler.json";
 import { version } from "../package.json";
 import { mcpWorker } from "../../../core/mcp";
-import { baseOf, zoneParam } from "./dav";
+import { namedBase, zoneParam } from "./dav";
 import { ncTools, report } from "./tools";
 
 const Worker = mcpWorker({
@@ -40,10 +42,8 @@ const Worker = mcpWorker({
   info(c) {
     let base: string | null = null;
     try {
-      // Only an address the connector URL itself names is repeated to the client. One that
-      // comes from a header or NC_URL is kept where it was put.
-      const where = baseOf(c);
-      base = where?.shown ? where.base : null;
+      // Only an address the connector URL itself names is repeated to the client.
+      base = namedBase(c.params);
     } catch {
       // A bad address is reported by nc_status and the GET page; initialize must still answer.
     }
