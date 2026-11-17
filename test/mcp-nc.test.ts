@@ -126,7 +126,7 @@ describe("the connector", () => {
   it("says what is missing rather than failing obscurely", async () => {
     expect(await fails("nc_list_calendars", {}, { search: "" })).toContain("No Nextcloud address");
     expect(await fails("nc_list_calendars", {}, { headers: {} })).toContain(
-      "No X-Auth-Token or X-API-Key",
+      "No X-Auth-Token or X-Account-Id",
     );
     expect(
       await fails("nc_list_calendars", {}, { headers: { "x-auth-token": "nocolon" } }),
@@ -158,9 +158,10 @@ describe("the connector", () => {
 describe("a Nextcloud and a password kept on the worker", () => {
   const vars = env as unknown as Record<string, unknown>;
   const bare = `?tz=${TZ}`;
-  const byName = { search: bare, headers: { "x-api-key": USER } };
+  const byName = { search: bare, headers: { "x-account-id": USER } };
   afterEach(() => {
     delete vars["NC_URL"];
+    delete vars["NC_URL_SHA256"];
     delete vars["NC_PASSWORD"];
   });
 
@@ -212,25 +213,28 @@ describe("a Nextcloud and a password kept on the worker", () => {
     expect(await fails("nc_list_calendars", {}, wrong)).not.toContain("nothing-listens");
   });
 
-  it("signs in with a login name from X-API-Key and the password from NC_PASSWORD", async () => {
+  it("signs in with a login name from X-Account-Id and the password from NC_PASSWORD", async () => {
     vars["NC_URL"] = base;
     expect(await fails("nc_list_calendars", {}, byName)).toContain("no NC_PASSWORD secret");
     vars["NC_PASSWORD"] = PASS;
     expect(JSON.stringify(await ok("nc_list_calendars", {}, byName))).toContain('"work"');
     const status = await ok("nc_status", {}, byName);
     expect(status["login"]).toBe(
-      `X-API-Key: accepted, signed in as ${USER} with the worker's NC_PASSWORD`,
+      `X-Account-Id: accepted, signed in as ${USER} with the worker's NC_PASSWORD`,
     );
     expect(JSON.stringify(status)).not.toContain(PASS);
     expect(
-      await fails("nc_list_calendars", {}, { search: bare, headers: { "x-api-key": LOGIN } }),
+      await fails("nc_list_calendars", {}, { search: bare, headers: { "x-account-id": LOGIN } }),
     ).toContain("login name only");
   });
 
   it("lets a whole login in X-Auth-Token win over the stored one", async () => {
     vars["NC_URL"] = base;
     vars["NC_PASSWORD"] = "not-the-password";
-    const both = { search: bare, headers: { "x-api-key": "someone-else", "x-auth-token": LOGIN } };
+    const both = {
+      search: bare,
+      headers: { "x-account-id": "someone-else", "x-auth-token": LOGIN },
+    };
     expect((await ok("nc_status", {}, both))["login"]).toBe(
       `X-Auth-Token: accepted, signed in as ${USER}`,
     );
@@ -246,13 +250,64 @@ describe("a Nextcloud and a password kept on the worker", () => {
     const said = await fails(
       "nc_list_calendars",
       {},
-      { search: search(), headers: { "x-api-key": USER } },
+      { search: search(), headers: { "x-account-id": USER } },
     );
-    expect(said).toContain("sent only to its own Nextcloud");
+    expect(said).toContain("only to a Nextcloud it vouches for");
     expect(said).not.toContain(PASS);
     expect(await count()).toBe(before);
     // That other Nextcloud is still usable by someone who brings its login themselves.
     expect(JSON.stringify(await ok("nc_list_calendars"))).toContain('"work"');
+  });
+
+  it("takes the address from an X-Tenant header, and never repeats it", async () => {
+    const host = new URL(base).host;
+    const o = { search: bare, headers: { "x-tenant": base, "x-auth-token": LOGIN } };
+    expect(JSON.stringify(await ok("nc_list_calendars", {}, o))).toContain('"work"');
+    const status = await ok("nc_status", {}, o);
+    expect(status["nextcloud"]).toBe("the connector's X-Tenant header (sent, not shown)");
+    expect(JSON.stringify(status)).not.toContain(host);
+    const wrong = { ...o, headers: { ...o.headers, "x-auth-token": `${USER}:nope` } };
+    expect(await fails("nc_list_calendars", {}, wrong)).not.toContain(host);
+    // The header wins over NC_URL, and the connector URL wins over the header.
+    vars["NC_URL"] = "https://nothing-listens.invalid";
+    expect((await ok("nc_status", {}, o))["ok"]).toBe(true);
+    const dead = {
+      search: bare,
+      headers: { "x-tenant": "https://nothing-listens.invalid", "x-auth-token": LOGIN },
+    };
+    expect((await ok("nc_status", {}, dead))["ok"]).toBe(false);
+    expect((await ok("nc_status", {}, { ...dead, search: search() }))["ok"]).toBe(true);
+    expect(
+      await fails(
+        "nc_list_calendars",
+        {},
+        { ...o, headers: { ...o.headers, "x-tenant": "http://cloud.example.com" } },
+      ),
+    ).toContain("must be https");
+  });
+
+  it("sends the stored password to a header's address only when its fingerprint matches", async () => {
+    vars["NC_PASSWORD"] = PASS;
+    const o = { search: bare, headers: { "x-tenant": `${base}/`, "x-account-id": USER } };
+    const count = async () =>
+      real ? 0 : ((await (await fetch(`${base}/__mock/requests`)).json()) as unknown[]).length;
+    const before = await count();
+    // No NC_URL and no fingerprint: the worker vouches for nowhere.
+    expect(await fails("nc_list_calendars", {}, o)).toContain("Nothing was sent");
+    const sha = async (text: string) =>
+      [...new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(text)))]
+        .map((b) => b.toString(16).padStart(2, "0"))
+        .join("");
+    vars["NC_URL_SHA256"] = await sha("https://somewhere-else.example");
+    expect(await fails("nc_list_calendars", {}, o)).toContain("Nothing was sent");
+    expect(await count()).toBe(before);
+    // The fingerprint of the address as normalised (no trailing slash), in either case.
+    vars["NC_URL_SHA256"] = (await sha(base)).toUpperCase();
+    expect(JSON.stringify(await ok("nc_list_calendars", {}, o))).toContain('"work"');
+    const status = await ok("nc_status", {}, o);
+    expect(status["login"]).toContain("with the worker's NC_PASSWORD");
+    expect(JSON.stringify(status)).not.toContain(new URL(base).host);
+    expect(JSON.stringify(status)).not.toContain(PASS);
   });
 });
 

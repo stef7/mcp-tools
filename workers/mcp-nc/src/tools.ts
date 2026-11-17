@@ -593,41 +593,49 @@ const anything = (fields: object) =>
 
 /** Whether this connector can reach its Nextcloud, in words. Never throws, never names a secret. */
 export const report = async (c: Ctx) => {
-  let base: string | null;
+  let where: ReturnType<typeof baseOf>;
   let own: string | null;
   try {
-    base = baseOf(c);
+    where = baseOf(c);
     own = homeBase(c.env);
   } catch (e) {
     return { ok: false, problem: e instanceof Error ? e.message : String(e) };
   }
   const zone = zoneParam(c.params);
   const about = {
-    // An address from NC_URL is the worker's to keep, so it is named and not shown.
-    nextcloud: base
-      ? c.params.get("nc")
-        ? `${base} (named by the connector URL)`
-        : "the worker's NC_URL (set, not shown)"
-      : "not set: add /https://<your nextcloud> or ?nc=<host> to the connector URL, or set NC_URL",
+    // Only an address in the connector URL is shown; one from a header or NC_URL is named.
+    nextcloud: where
+      ? where.shown
+        ? `${where.base} (named by the connector URL)`
+        : where.from === "NC_URL"
+          ? "the worker's NC_URL (set, not shown)"
+          : "the connector's X-Tenant header (sent, not shown)"
+      : "not set: put it in the connector URL (/https://<host> or ?nc=<host>), in an X-Tenant " +
+        "header, or in NC_URL on the worker",
     timezone: zone
       ? validZone(zone)
         ? zone
         : `"${zone}" is not an IANA time zone name`
       : "not set: add ?tz=Australia/Melbourne so times without an offset mean local time",
     stored_password: c.env.NC_PASSWORD?.trim()
-      ? `NC_PASSWORD is set, for X-API-Key logins to NC_URL${own ? "" : ", which is not set"}`
+      ? "NC_PASSWORD is set, for X-Account-Id logins to " +
+        (own || c.env.NC_URL_SHA256?.trim()
+          ? [own && "NC_URL", c.env.NC_URL_SHA256?.trim() && "the address NC_URL_SHA256 matches"]
+              .filter(Boolean)
+              .join(" or ")
+          : "nowhere yet: neither NC_URL nor NC_URL_SHA256 is set")
       : "NC_PASSWORD is not set, so the whole login must come in X-Auth-Token",
   };
-  if (!("x-auth-token" in c.headers) && !("x-api-key" in c.headers))
+  if (!("x-auth-token" in c.headers) && !("x-account-id" in c.headers))
     return {
       ok: false,
       ...about,
       login:
         "No login header was sent. A browser never sends one; the connector does. Set " +
-        'X-Auth-Token there to "login:app password", or X-API-Key to the login name alone.',
+        'X-Auth-Token there to "login:app password", or X-Account-Id to the login name alone.',
     };
   try {
-    const conn = connOf(c);
+    const conn = await connOf(c);
     const { principal } = await discover(conn);
     const calendars = (await calendarsOf(conn, c)).shown;
     return {
@@ -635,7 +643,7 @@ export const report = async (c: Ctx) => {
       ...about,
       login:
         `${conn.via}: accepted, signed in as ${conn.user}` +
-        (conn.via === "X-API-Key" ? " with the worker's NC_PASSWORD" : ""),
+        (conn.via === "X-Account-Id" ? " with the worker's NC_PASSWORD" : ""),
       principal,
       calendars: calendars.map(
         (cal) => `${cal.id} ("${cal.name}")${cal.can_write ? "" : " read-only"}`,
@@ -685,7 +693,7 @@ export const ncTools = (): Tools => ({
       "The calendars of the signed-in Nextcloud user: id, name, colour, whether it can be " +
       "written to, and whether it is a subscription or shared by someone else.",
     run: async (_, c) => {
-      const { shown } = await calendarsOf(connOf(c), c);
+      const { shown } = await calendarsOf(await connOf(c), c);
       return shown.map(({ href: _href, components: _components, ...rest }) => ({
         ...rest,
         ...(isBin(rest as Calendar)
@@ -709,7 +717,7 @@ export const ncTools = (): Tools => ({
     },
     run: async (a, c) => {
       if (!a.name.trim()) throw new Error("name cannot be empty.");
-      const conn = connOf(c);
+      const conn = await connOf(c);
       const id = await createCalendar(conn, { ...a, name: a.name.trim() });
       return { created: { id, name: a.name.trim() } };
     },
@@ -729,7 +737,7 @@ export const ncTools = (): Tools => ({
       },
     },
     run: async ({ calendar, ...fields }, c) => {
-      const conn = connOf(c);
+      const conn = await connOf(c);
       const cal = await calendarFor(conn, c, calendar, false);
       if (!anything(fields)) throw new Error("Nothing to change: give name, color or description.");
       if (fields.name !== undefined && !fields.name.trim())
@@ -764,7 +772,7 @@ export const ncTools = (): Tools => ({
       },
     },
     run: async (a, c) => {
-      const conn = connOf(c);
+      const conn = await connOf(c);
       const wanted = zoneFor(a.timezone, c);
       const zone = wanted ?? "UTC";
       const from = a.from ? toMs(parseWhen(a.from, "from"), zone) : Date.now();
@@ -860,7 +868,7 @@ export const ncTools = (): Tools => ({
       },
     },
     run: async (a, c) => {
-      const conn = connOf(c);
+      const conn = await connOf(c);
       const cal = await calendarFor(conn, c, a.calendar, false);
       const zone = zoneFor(a.timezone, c);
       const { stored, events, master } = await open(conn, cal, a.uid);
@@ -897,7 +905,7 @@ export const ncTools = (): Tools => ({
       },
     },
     run: async ({ calendar, start, end, timezone, ...fields }, c) => {
-      const conn = connOf(c);
+      const conn = await connOf(c);
       const cal = await calendarFor(conn, c, calendar, true);
       const zone = zoneFor(timezone, c);
       const uid = crypto.randomUUID();
@@ -954,7 +962,7 @@ export const ncTools = (): Tools => ({
       { calendar, uid, occurrence, start, end, timezone, notify_attendees, ...fields },
       c,
     ) => {
-      const conn = connOf(c);
+      const conn = await connOf(c);
       const cal = await calendarFor(conn, c, calendar, true);
       const asked = zoneFor(timezone, c);
       const o = await open(conn, cal, uid);
@@ -1016,7 +1024,7 @@ export const ncTools = (): Tools => ({
       },
     },
     run: async (a, c) => {
-      const conn = connOf(c);
+      const conn = await connOf(c);
       const cal = await calendarFor(conn, c, a.calendar, true);
       const zone = zoneFor(undefined, c);
       const o = await open(conn, cal, a.uid);
@@ -1078,7 +1086,7 @@ export const ncTools = (): Tools => ({
       },
     },
     run: async (a, c) => {
-      const conn = connOf(c);
+      const conn = await connOf(c);
       const from = await calendarFor(conn, c, a.calendar, true);
       const to = await calendarFor(conn, c, a.to, true);
       if (from.id === to.id) throw new Error(`The event is already in "${to.name}".`);

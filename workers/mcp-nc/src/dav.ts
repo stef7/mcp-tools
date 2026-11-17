@@ -31,20 +31,20 @@ export type Conn = {
   user: string;
   pass: string;
   /**
-   * True when the address came from the worker's NC_URL rather than the connector URL. It is
-   * then the worker's to keep: no result, error or status line repeats it.
+   * True when the address came from a header or the worker's NC_URL rather than the connector
+   * URL. It is then kept where it was put: no result, error or status line repeats it.
    */
   own: boolean;
   /** Which header the login came by, for nc_status. */
-  via: "X-Auth-Token" | "X-API-Key";
+  via: "X-Auth-Token" | "X-Account-Id";
 };
 
 const SETUP =
-  "Name the Nextcloud in the connector URL, as a path (https://mcp-nc…/https://cloud.example.com) " +
-  "or as ?nc=cloud.example.com, or set NC_URL on the worker. Send the login in the X-Auth-Token " +
-  'header as "login:app password" (Nextcloud -> Personal settings -> Security -> Devices & ' +
-  "sessions -> Create new app password), or send just the login name in X-API-Key and keep the " +
-  "app password in the worker's NC_PASSWORD secret.";
+  "Name the Nextcloud in the connector URL (https://mcp-nc…/https://cloud.example.com or " +
+  "?nc=cloud.example.com), in the connector's X-Tenant header, or in NC_URL on the worker. Send " +
+  'the login in the X-Auth-Token header as "login:app password" (Nextcloud -> Personal ' +
+  "settings -> Security -> Devices & sessions -> Create new app password), or send just the " +
+  "login name in X-Account-Id and keep the app password in the worker's NC_PASSWORD secret.";
 
 const LOCAL = new Set(["localhost", "127.0.0.1", "[::1]"]);
 
@@ -56,7 +56,7 @@ const normalise = (raw: string, where: string) => {
   } catch {
     // What NC_URL holds is not repeated, even when it is wrong.
     throw new Error(
-      `${where}${where === "NC_URL" ? "" : `: "${raw}"`} is not an address. ${SETUP}`,
+      `${where}${where === "The connector URL" ? `: "${raw}"` : ""} is not an address. ${SETUP}`,
     );
   }
   if (url.username || url.password)
@@ -68,7 +68,7 @@ const normalise = (raw: string, where: string) => {
   return url.origin + path.replace(/\/+$/, "");
 };
 
-type Where = Pick<Ctx, "params" | "env">;
+type Where = Pick<Ctx, "params" | "env" | "headers">;
 
 /** The worker's own Nextcloud: the NC_URL variable. Null when unset. */
 export const homeBase = (env: Env) => {
@@ -77,12 +77,43 @@ export const homeBase = (env: Env) => {
 };
 
 /**
- * Which Nextcloud this request is for: the one the connector URL names (`?nc=`, which is also
- * where a path ends up), else the worker's NC_URL. Null when neither is set.
+ * Which Nextcloud this request is for, and who said so. In order: the connector URL (`?nc=`,
+ * which is also where a path ends up), the connector's X-Tenant header, the worker's NC_URL.
+ * Null when none is set.
+ *
+ * Only an address in the connector URL is `shown`. A URL is in plain sight wherever the connector
+ * is listed; a header value or a worker variable is not, so whoever put the address there gets
+ * it kept there: no result, error or status line repeats it.
  */
-export const baseOf = (c: Where): string | null => {
-  const raw = c.params.get("nc")?.trim();
-  return raw ? normalise(raw, "The connector URL") : homeBase(c.env);
+export const baseOf = (
+  c: Where,
+): { base: string; from: "the connector URL" | "X-Tenant" | "NC_URL"; shown: boolean } | null => {
+  const url = c.params.get("nc")?.trim();
+  if (url)
+    return { base: normalise(url, "The connector URL"), from: "the connector URL", shown: true };
+  const header = c.headers["x-tenant"]?.trim();
+  // Like NC_URL, what the header holds is not repeated even when it is wrong.
+  if (header) return { base: normalise(header, "X-Tenant"), from: "X-Tenant", shown: false };
+  const home = homeBase(c.env);
+  return home ? { base: home, from: "NC_URL", shown: false } : null;
+};
+
+const hex = async (text: string) =>
+  [...new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(text)))]
+    .map((b) => b.toString(16).padStart(2, "0"))
+    .join("");
+
+/**
+ * Whether the worker's stored password may be sent to this address. A request can name any
+ * host, so NC_PASSWORD goes only to an address the worker itself vouches for: its NC_URL, or one
+ * whose SHA-256 is its NC_URL_SHA256. The second lets the address live in the connector's
+ * X-Tenant header alone: the worker then holds a password and a fingerprint, the connector an
+ * address and a login name, and neither holds enough to sign in.
+ */
+const vouchedFor = async (base: string, env: Env) => {
+  if (base === homeBase(env)) return true;
+  const pin = env.NC_URL_SHA256?.trim().toLowerCase();
+  return !!pin && pin === (await hex(base));
 };
 
 /** The display zone the connector asked for with `?tz=`, if any. */
@@ -95,7 +126,7 @@ export const zoneParam = (params: URLSearchParams) => params.get("tz")?.trim() |
  *
  * or only the name does, and the worker supplies the password it keeps:
  *
- *   X-API-Key: login                      + the NC_PASSWORD secret
+ *   X-Account-Id: login                   + the NC_PASSWORD secret
  *
  * Both names are ones Claude lets any connector send. X-Auth-Token wins when both are there.
  *
@@ -103,11 +134,14 @@ export const zoneParam = (params: URLSearchParams) => params.get("tz")?.trim() |
  * any host, so sending NC_PASSWORD wherever the URL points would hand it to whoever asked; a
  * request for another Nextcloud has to bring its own X-Auth-Token.
  */
-export const connOf = (c: Pick<Ctx, "params" | "headers" | "env">): Conn => {
-  const base = baseOf(c);
-  if (!base)
-    throw new Error(`No Nextcloud address: none on the connector, and no NC_URL. ${SETUP}`);
-  const own = !c.params.get("nc")?.trim();
+export const connOf = async (c: Pick<Ctx, "params" | "headers" | "env">): Promise<Conn> => {
+  const where = baseOf(c);
+  if (!where)
+    throw new Error(
+      `No Nextcloud address: none in the connector URL, no X-Tenant header, no NC_URL. ${SETUP}`,
+    );
+  const { base } = where;
+  const own = !where.shown;
   const token = c.headers["x-auth-token"]?.trim();
   if (token) {
     const at = token.indexOf(":");
@@ -121,24 +155,26 @@ export const connOf = (c: Pick<Ctx, "params" | "headers" | "env">): Conn => {
       via: "X-Auth-Token",
     };
   }
-  const user = c.headers["x-api-key"]?.trim();
-  if (!user) throw new Error(`No X-Auth-Token or X-API-Key header reached this worker. ${SETUP}`);
+  const user = c.headers["x-account-id"]?.trim();
+  if (!user)
+    throw new Error(`No X-Auth-Token or X-Account-Id header reached this worker. ${SETUP}`);
   if (user.includes(":"))
     throw new Error(
-      "X-API-Key carries the login name only. A whole login:password belongs in X-Auth-Token.",
+      "X-Account-Id carries the login name only. A whole login:password belongs in X-Auth-Token.",
     );
   const pass = c.env.NC_PASSWORD?.trim();
   if (!pass)
     throw new Error(
-      "X-API-Key names a login, but the worker has no NC_PASSWORD secret to go with it. Set " +
+      "X-Account-Id names a login, but the worker has no NC_PASSWORD secret to go with it. Set " +
         "one (npx wrangler secret put NC_PASSWORD), or send the whole login in X-Auth-Token.",
     );
-  if (base !== homeBase(c.env))
+  if (!(await vouchedFor(base, c.env)))
     throw new Error(
-      "The worker's stored password is sent only to its own Nextcloud (NC_URL), and this " +
-        "connector names a different one. Send that Nextcloud's login in X-Auth-Token.",
+      "The worker's stored password is sent only to a Nextcloud it vouches for (its NC_URL, or " +
+        "an address matching NC_URL_SHA256), and this request names a different one. Nothing " +
+        "was sent. Send that Nextcloud's login in X-Auth-Token, or set NC_URL_SHA256.",
     );
-  return { base, own, user, pass, via: "X-API-Key" };
+  return { base, own, user, pass, via: "X-Account-Id" };
 };
 
 // ─── XML, as much of it as WebDAV uses ─────────────────────────────────────────────────────────
