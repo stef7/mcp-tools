@@ -22,7 +22,16 @@ const MOCKS = [
     ready: "/helios/elections/params",
   },
   { name: "printify", script: "scripts/mock-printify.mjs", port: 8795, ready: "/__mock/requests" },
+  {
+    name: "nextcloud",
+    script: "scripts/mock-nextcloud.mjs",
+    port: 8794,
+    ready: "/__mock/requests",
+  },
 ] as const;
+
+/** The one login the fake Nextcloud accepts: what a connector would send in X-Auth-Token. */
+const NC_LOGIN = "stef:app-pass-12345";
 
 /** The one token the fake Printify accepts, handed to the tests as the worker's secret. */
 const PRINTIFY_TOKEN = "printify-test-token-9f3b";
@@ -64,6 +73,7 @@ export default async function setup(project: TestProject) {
     proxy: ["groups-UNBLOCKER:secret"],
     helios: [HELIOS_SESSION],
     printify: [PRINTIFY_TOKEN],
+    nextcloud: [NC_LOGIN],
   } as Record<string, string[]>;
   const children = MOCKS.map((m) =>
     spawn("node", [m.script, String(m.port), ...(args[m.name] ?? [])], { stdio: "ignore" }),
@@ -80,6 +90,12 @@ export default async function setup(project: TestProject) {
   project.provide("heliosSession", HELIOS_SESSION);
   project.provide("printifyBase", `http://localhost:${MOCKS[4].port}`);
   project.provide("printifyToken", PRINTIFY_TOKEN);
+  // NC_TEST_BASE points the mcp-nc tests at a real CalDAV server that accepts NC_LOGIN and
+  // serves it under /remote.php/dav/ (sabre/dav does, and it is the engine inside Nextcloud).
+  // The tests that need the mock's request log or its misbehaving calendars are then skipped.
+  project.provide("ncBase", process.env["NC_TEST_BASE"] ?? `http://localhost:${MOCKS[5].port}`);
+  project.provide("ncReal", !!process.env["NC_TEST_BASE"]);
+  project.provide("ncLogin", NC_LOGIN);
   // The sandbox has no file system, so certificates come in as text.
   const fixtures = new URL("./fixtures/", import.meta.url);
   const read = (name: string) => readFileSync(new URL(name, fixtures), "utf8");
@@ -102,6 +118,9 @@ declare module "vitest" {
     heliosSession: string;
     printifyBase: string;
     printifyToken: string;
+    ncBase: string;
+    ncReal: boolean;
+    ncLogin: string;
     mockCa: string;
     apifyLeaves: string[];
   }

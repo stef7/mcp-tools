@@ -22,6 +22,7 @@ workers/mcp-ghost/           Ghost publications, with member sign-in for paid po
 workers/mcp-apify/           what Apify is costing you, by service and by Actor
 workers/mcp-helios/          Helios Voting: read, verify and run elections. Its own door, not in the toolkit
 workers/mcp-printify/        Printify: search its API, call it, upload artwork. Its own door too
+workers/mcp-nc/              Nextcloud calendars over CalDAV, read and write. Its own door too
 scripts/mock-wp.mjs          fake WordPress for local testing
 scripts/mock-ghost.mjs       fake Ghost, including the magic-link sign-in
 scripts/cf-tunnel-relay.mjs  runs on the Mac at the far end of the tunnel
@@ -32,6 +33,7 @@ scripts/build-cf-tunnel-relay-app.sh
 scripts/mock-proxy.mjs       fake Apify Proxy, for the proxy tests, re-signing HTTPS as Apify does
 scripts/mock-helios.mjs      fake Helios, for the election lifecycle tests
 scripts/mock-printify.mjs    fake Printify: catalogue, uploads, products, orders, rate limits
+scripts/mock-nextcloud.mjs   fake Nextcloud: CalDAV discovery, calendars, events, recurrence
 scripts/vendor-printify-spec.mjs
                              trims Printify's OpenAPI document into workers/mcp-printify/src/spec.json
 scripts/apify-tls-probe.mjs  checks HTTPS through the real Unblocker the way the Worker does it
@@ -535,11 +537,95 @@ To set it up:
 Opening that URL in a browser shows whether the API description loaded, whether the token is
 set, whether Printify accepts it, and whether destructive calls are on.
 
+## Nextcloud calendars
+
+`mcp-nc` reads and edits the calendars of one Nextcloud account over CalDAV. Calendars only, and
+within them events only: no tasks, no contacts, and no inviting attendees.
+
+| Tool                                                           | Does                                                 |
+| -------------------------------------------------------------- | ---------------------------------------------------- |
+| `nc_status`                                                    | whether the connector reaches Nextcloud, and why not |
+| `nc_list_calendars`                                            | id, name, colour, writable, shared or subscribed     |
+| `nc_create_calendar` `nc_update_calendar` `nc_delete_calendar` | add, rename or recolour, delete (name repeated)      |
+| `nc_list_events`                                               | a span of time, one calendar or all, with search     |
+| `nc_get_event`                                                 | one event in full                                    |
+| `nc_create_event` `nc_update_event` `nc_delete_event`          | add, change, delete; one occurrence or a series      |
+
+The connector URL names the Nextcloud, and the login travels in a header, so nothing is stored
+on the worker:
+
+| Part                                | Means                                                                                    |
+| ----------------------------------- | ---------------------------------------------------------------------------------------- |
+| `mcp-nc…/https://cloud.example.com` | which Nextcloud, in the path (a folder install works: `…/https://example.com/nextcloud`) |
+| `mcp-nc…/?nc=cloud.example.com`     | the same, as a parameter                                                                 |
+| `&tz=Australia/Melbourne`           | what `2026-11-20T10:00` means, and the zone times are shown in                           |
+| `&private=busy`                     | show private events as bare busy blocks instead of nothing                               |
+| `&private_calendars=Health,Family`  | more calendar-name words to treat as private                                             |
+| `X-Auth-Token: login:app password`  | the login, as a connector header                                                         |
+
+Set `tz`. Without it a time with no offset is refused rather than guessed at, and listings come
+back in UTC.
+
+What may be written:
+
+- Reading runs freely. Every `create_`, `update_` and `delete_` needs `user_confirmed`.
+- An event is changed inside the object as stored and saved with `If-Match`, so a change made
+  elsewhere since it was read is a refusal, not an overwrite. Whatever the worker was not asked
+  about (attendees, alarms, another client's `X-` properties) goes back as it came.
+- An event with attendees also needs `notify_attendees: true`, because Nextcloud may email them.
+- A repeating event is changed or deleted as a whole series unless `occurrence` names one
+  occurrence; the server is asked whether the series really has that occurrence first.
+- Deleting a calendar needs its name repeated. Nextcloud keeps deleted calendars and events in
+  the Calendar app's trash bin.
+
+### Keeping things private
+
+Two things never reach the model, and cannot be changed through it:
+
+- **An event marked private or confidential.** That is `CLASS:PRIVATE` or `CLASS:CONFIDENTIAL`,
+  which is what the Calendar app's **When shared show** setting writes ("When shared hide this
+  event" or "When shared show only busy"). `private: true` on `nc_create_event` or
+  `nc_update_event` sets it too, and is one-way: once private, an event is unmarked in Nextcloud,
+  not here.
+- **Every event in a private calendar**: one whose name contains `Dating` (`PRIVATE_WORDS` in
+  `workers/mcp-nc/src/tools.ts`) or a word from `?private_calendars=`. Case does not matter.
+
+By default they do not exist as far as any tool can tell. A private calendar is not listed and
+cannot be named; a private event is in no listing, and its uid answers exactly as a missing one
+does. With `?private=busy`, a listing of all calendars also carries each one as a busy block: its
+start and end, and nothing else, not even which calendar. A search never returns one either way,
+since a block that appears for one word and not another would give its text away.
+
+The filtering happens in the worker, before a result is built. Nothing private is in what Claude
+receives, so it is in no conversation and no log of one. On Cloudflare's side the worker writes
+no log lines of its own and has `observability` off, so no request to it (which would carry the
+Nextcloud address in its URL) is recorded in Workers Logs. What this cannot do is hide anything
+from Nextcloud itself, or stop the model seeing a title it was given to create an event with.
+
+To set it up:
+
+1. **Create an app password.** In Nextcloud: your avatar -> **Personal settings** -> **Security**
+   -> **Devices & sessions** -> name it and **Create new app password**. Keep the login name it
+   shows with it.
+2. **Put Cloudflare Access in front of the worker**, as under **Auth** below, once it exists on
+   Cloudflare (its first deploy is the merge to `main`).
+3. **Add the connector in Claude** with the URL above and, under its advanced settings, the
+   header `X-Auth-Token` set to `login:app password`.
+
+`nc_status`, or opening the connector URL in a browser, says which Nextcloud it is for, whether
+the login was accepted and which calendars it found. A browser sends no `X-Auth-Token`, so there
+it stops at "not sent".
+
+The tests run against `scripts/mock-nextcloud.mjs`. To run them against a real CalDAV server
+instead, serve one under `/remote.php/dav/` that accepts the login in `test/global-setup.ts`
+(sabre/dav, the engine inside Nextcloud, does with a dozen lines of PHP) and set
+`NC_TEST_BASE=http://127.0.0.1:<port>`; the handful that need the mock's request log are skipped.
+
 ## Auth (Cloudflare Access)
 
 Access runs before the Worker, so unauthenticated hits cost nothing. `mcp-toolkit` needs it, and so
 do the workers that have a URL of their own rather than a binding in the toolkit (`mcp-helios`,
-`mcp-printify`); repeat steps 2 to 4 for each:
+`mcp-printify`, `mcp-nc`); repeat steps 2 to 4 for each:
 
 1. Zero Trust -> Integrations -> Identity providers -> add **One-time PIN** (email code, no
    account needed).
