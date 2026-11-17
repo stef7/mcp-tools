@@ -103,7 +103,9 @@ const api = async (path) => {
       if (res.status === 404) return null;
       // Anything else going wrong is a failure: guessing "changed" would hide a broken token.
       if (res.status !== 429 && res.status < 500) {
-        throw new Error(`Cloudflare answered HTTP ${res.status} for ${path}`);
+        throw Object.assign(new Error(`Cloudflare answered HTTP ${res.status} for ${path}`), {
+          status: res.status,
+        });
       }
       await res.body?.cancel();
       why = `HTTP ${res.status}`;
@@ -118,7 +120,20 @@ const api = async (path) => {
 
 /** Whether the worker exists, and the tag of the one version serving all its traffic, if any. */
 const live = async (name) => {
-  const listed = await api(`/workers/scripts/${name}/deployments`);
+  let listed;
+  try {
+    listed = await api(`/workers/scripts/${name}/deployments`);
+  } catch (e) {
+    // A token scoped to particular Workers answers 403, not 404, for one it has never heard
+    // of — which is every new worker on its first run. Say so, rather than "HTTP 403".
+    if (e.status === 403)
+      throw new Error(
+        `Cloudflare would not say whether ${name} exists (HTTP 403). CLOUDFLARE_API_TOKEN is ` +
+          `probably scoped to particular Workers and ${name} is not among them; give the token ` +
+          "Workers Scripts: Edit on the whole account, then run the workflow again.",
+      );
+    throw e;
+  }
   if (!listed) return { exists: false, tag: null };
   // The first deployment listed is the one serving traffic. A split between versions (a gradual
   // deployment) has no single fingerprint, so it counts as changed.
