@@ -30,6 +30,11 @@ export type Conn = {
   base: string;
   user: string;
   pass: string;
+  /**
+   * True when the address came from the worker's NC_URL rather than the connector URL. It is
+   * then the worker's to keep: no result, error or status line repeats it.
+   */
+  own: boolean;
   /** Which header the login came by, for nc_status. */
   via: "X-Auth-Token" | "X-API-Key";
 };
@@ -49,7 +54,10 @@ const normalise = (raw: string, where: string) => {
   try {
     url = new URL(/^https?:\/\//i.test(raw) ? raw : `https://${raw}`);
   } catch {
-    throw new Error(`${where}: "${raw}" is not an address. ${SETUP}`);
+    // What NC_URL holds is not repeated, even when it is wrong.
+    throw new Error(
+      `${where}${where === "NC_URL" ? "" : `: "${raw}"`} is not an address. ${SETUP}`,
+    );
   }
   if (url.username || url.password)
     throw new Error("Put the login in a header, never in the Nextcloud address.");
@@ -99,6 +107,7 @@ export const connOf = (c: Pick<Ctx, "params" | "headers" | "env">): Conn => {
   const base = baseOf(c);
   if (!base)
     throw new Error(`No Nextcloud address: none on the connector, and no NC_URL. ${SETUP}`);
+  const own = !c.params.get("nc")?.trim();
   const token = c.headers["x-auth-token"]?.trim();
   if (token) {
     const at = token.indexOf(":");
@@ -106,6 +115,7 @@ export const connOf = (c: Pick<Ctx, "params" | "headers" | "env">): Conn => {
       throw new Error('X-Auth-Token is unreadable: it should be "login:app password".');
     return {
       base,
+      own,
       user: token.slice(0, at).trim(),
       pass: token.slice(at + 1).trim(),
       via: "X-Auth-Token",
@@ -128,7 +138,7 @@ export const connOf = (c: Pick<Ctx, "params" | "headers" | "env">): Conn => {
       "The worker's stored password is sent only to its own Nextcloud (NC_URL), and this " +
         "connector names a different one. Send that Nextcloud's login in X-Auth-Token.",
     );
-  return { base, user, pass, via: "X-API-Key" };
+  return { base, own, user, pass, via: "X-API-Key" };
 };
 
 // ─── XML, as much of it as WebDAV uses ─────────────────────────────────────────────────────────
@@ -208,10 +218,31 @@ export const descend = (n: Node | undefined, ns: string, name: string): Node | u
 
 // ─── Requests ──────────────────────────────────────────────────────────────────────────────────
 
-export type Answer = { status: number; text: string; etag: string | null };
+export type Answer = {
+  status: number;
+  /**
+   * The body exactly as it came. It is event data, which gets edited and saved back, so nothing
+   * is ever replaced inside it; only an error message built from it is scrubbed.
+   */
+  text: string;
+  etag: string | null;
+  /** Scrubs a message about this answer before it is thrown. */
+  hide(message: string): string;
+};
 
-const scrub = (text: string, conn: Conn) =>
-  conn.pass ? text.replaceAll(conn.pass, "[password]") : text;
+/**
+ * Takes the password, and an address that is the worker's own secret, out of an error message.
+ * Never applied to a response body: see Answer.
+ */
+const scrub = (text: string, conn: Conn) => {
+  let out = conn.pass ? text.replaceAll(conn.pass, "[password]") : text;
+  if (conn.own) {
+    const url = new URL(conn.base);
+    for (const part of [conn.base, url.origin, url.host, url.hostname])
+      out = out.replaceAll(part, "[NC_URL]");
+  }
+  return out;
+};
 
 const basic = (conn: Conn) => {
   const bytes = new TextEncoder().encode(`${conn.user}:${conn.pass}`);
@@ -226,7 +257,9 @@ const basic = (conn: Conn) => {
 export const resolve = (conn: Conn, href: string) => {
   const url = new URL(href, conn.base + "/");
   if (url.origin !== new URL(conn.base).origin)
-    throw new Error(`Nextcloud pointed at another host (${url.origin}); not following it.`);
+    throw new Error(
+      scrub(`Nextcloud pointed at another host (${url.origin}); not following it.`, conn),
+    );
   return url.href;
 };
 
@@ -271,7 +304,12 @@ export const dav = async (
     );
   }
   const text = await res.text().catch(() => "");
-  return { status: res.status, text: scrub(text, conn), etag: res.headers.get("etag") };
+  return {
+    status: res.status,
+    text,
+    etag: res.headers.get("etag"),
+    hide: (message) => scrub(message, conn),
+  };
 };
 
 const hint = (status: number) =>
@@ -304,7 +342,10 @@ export const expect = (a: Answer, ok: number[], doing: string) => {
   }
   if (!said && a.text && !/<html/i.test(a.text)) said = a.text.trim().slice(0, 500);
   throw new Error(
-    `${doing}: Nextcloud answered HTTP ${a.status}.${hint(a.status)}${said ? ` It said: ${said}` : ""}`,
+    a.hide(
+      `${doing}: Nextcloud answered HTTP ${a.status}.${hint(a.status)}` +
+        (said ? ` It said: ${said}` : ""),
+    ),
   );
 };
 
@@ -361,8 +402,11 @@ export const discover = async (conn: Conn) => {
   )?.text.trim();
   if (!principal)
     throw new Error(
-      `${conn.base} answered, but not as a Nextcloud that knows who is signed in. Check the ` +
-        "address on the connector.",
+      scrub(
+        `${conn.base} answered, but not as a Nextcloud that knows who is signed in. Check ` +
+          "the address.",
+        conn,
+      ),
     );
   const who = await propfind(conn, principal, "0", "<c:calendar-home-set/>", "Finding calendars");
   const home = child(child(who[0]?.props, NS.C, "calendar-home-set"), NS.D, "href")?.text.trim();

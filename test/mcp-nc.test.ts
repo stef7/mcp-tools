@@ -171,7 +171,45 @@ describe("a Nextcloud and a password kept on the worker", () => {
     vars["NC_URL"] = `${base}/remote.php/dav/`; // pasted from Nextcloud's settings, as people do
     expect(JSON.stringify(await ok("nc_list_calendars", {}, { search: bare }))).toContain('"work"');
     const status = await ok("nc_status", {}, { search: bare });
-    expect(status["nextcloud"]).toBe(`${base} (the worker's NC_URL)`);
+    expect(status["nextcloud"]).toBe("the worker's NC_URL (set, not shown)");
+  });
+
+  it("keeps an address from NC_URL to itself, in status, errors and the connector's description", async () => {
+    const host = new URL(base).host;
+    vars["NC_URL"] = base;
+    const wrong = { search: bare, headers: { "x-auth-token": `${USER}:wrong-password` } };
+    expect(JSON.stringify(await ok("nc_status", {}, wrong))).not.toContain(host);
+    expect(await fails("nc_list_calendars", {}, wrong)).not.toContain(host);
+    const init = async (url: string) => {
+      const res = await new Worker(createExecutionContext(), env).fetch(
+        new Request(url, {
+          method: "POST",
+          body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "initialize", params: {} }),
+        }),
+      );
+      return JSON.stringify(await res.json());
+    };
+    expect(await init("https://mcp-nc.example/")).not.toContain(host);
+    // Named in the connector URL, it is the caller's own and is shown back.
+    expect(await init(`https://mcp-nc.example/${base}`)).toContain(host);
+    // Hiding the address must not reach into event data that happens to mention the host.
+    await plant("work", "mentions-host", [
+      "DTSTART:20261215T010000Z",
+      "DTEND:20261215T020000Z",
+      "SUMMARY:Host check",
+      `URL:http://${host}/apps/calendar`,
+    ]);
+    const mine = { search: bare, headers: { "x-auth-token": LOGIN } };
+    const seen = await ok("nc_get_event", { calendar: "work", uid: "mentions-host" }, mine);
+    expect(seen["url"]).toBe(`http://${host}/apps/calendar`);
+    await ok(
+      "nc_update_event",
+      { calendar: "work", uid: "mentions-host", location: "x", ...yes },
+      mine,
+    );
+    expect(await stored("work", "mentions-host")).toContain(`URL:http://${host}/apps/calendar`);
+    vars["NC_URL"] = "https://nothing-listens.invalid";
+    expect(await fails("nc_list_calendars", {}, wrong)).not.toContain("nothing-listens");
   });
 
   it("signs in with a login name from X-API-Key and the password from NC_PASSWORD", async () => {

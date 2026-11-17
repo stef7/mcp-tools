@@ -603,8 +603,11 @@ export const report = async (c: Ctx) => {
   }
   const zone = zoneParam(c.params);
   const about = {
+    // An address from NC_URL is the worker's to keep, so it is named and not shown.
     nextcloud: base
-      ? `${base} (${c.params.get("nc") ? "named by the connector URL" : "the worker's NC_URL"})`
+      ? c.params.get("nc")
+        ? `${base} (named by the connector URL)`
+        : "the worker's NC_URL (set, not shown)"
       : "not set: add /https://<your nextcloud> or ?nc=<host> to the connector URL, or set NC_URL",
     timezone: zone
       ? validZone(zone)
@@ -612,7 +615,7 @@ export const report = async (c: Ctx) => {
         : `"${zone}" is not an IANA time zone name`
       : "not set: add ?tz=Australia/Melbourne so times without an offset mean local time",
     stored_password: c.env.NC_PASSWORD?.trim()
-      ? `NC_PASSWORD is set, for X-API-Key logins to ${own ?? "NC_URL, which is not set"}`
+      ? `NC_PASSWORD is set, for X-API-Key logins to NC_URL${own ? "" : ", which is not set"}`
       : "NC_PASSWORD is not set, so the whole login must come in X-Auth-Token",
   };
   if (!("x-auth-token" in c.headers) && !("x-api-key" in c.headers))

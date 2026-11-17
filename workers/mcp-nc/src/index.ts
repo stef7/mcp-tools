@@ -39,7 +39,9 @@ const Worker = mcpWorker({
   info(c) {
     let base: string | null = null;
     try {
-      base = baseOf(c);
+      // Only an address the connector URL itself names is repeated to the client. One that
+      // comes from NC_URL is the worker's to keep.
+      base = c.params.get("nc")?.trim() ? baseOf(c) : null;
     } catch {
       // A bad address is reported by nc_status and the GET page; initialize must still answer.
     }

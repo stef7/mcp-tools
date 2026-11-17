@@ -568,6 +568,11 @@ none, and the login travels in a header:
 
 Both header names are ones Claude lets any connector send. `X-Auth-Token` wins when both arrive.
 
+An address that comes from `NC_URL` is kept to the worker: `nc_status`, the GET page, error
+messages and the connector's description say that it is set and never what it is, so it can be a
+secret (`npx wrangler secret put NC_URL`) rather than a plain variable. An address named in the
+connector URL is the caller's own and is shown back.
+
 `NC_PASSWORD` is sent to `NC_URL` and to no other host. A connector URL can name any address, so
 a stored password that followed it would be handed to whoever wrote the URL; a connector that
 names a different Nextcloud has to bring that Nextcloud's login in `X-Auth-Token`. With the

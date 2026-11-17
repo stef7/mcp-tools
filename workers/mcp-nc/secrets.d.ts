@@ -2,8 +2,10 @@
 interface Env {
   /**
    * The Nextcloud to use when the connector URL names none: https://cloud.example.com, or with a
-   * folder, https://example.com/nextcloud. A plain variable, so you can read it back. A
-   * connector URL that names one (`/https://…` or `?nc=`) still wins for that connector.
+   * folder, https://example.com/nextcloud. A plain variable, or a secret if the address itself
+   * should not be readable (`npx wrangler secret put NC_URL`): no result, error or status line
+   * repeats it. A connector URL that names one (`/https://…` or `?nc=`) still wins for that
+   * connector.
    */
   NC_URL?: string;
   /**
