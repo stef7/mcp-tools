@@ -358,16 +358,45 @@ type RawType = {
 };
 type RawTax = { name: string; rest_base?: string; hierarchical?: boolean };
 
+/**
+ * Where a site's REST API lives when it is not at `<site>/wp-json`, read from the
+ * `Link: <...>; rel="https://api.w.org/"` header that WordPress sends even on a 404. Free
+ * WordPress.com sites answer 404 at their own /wp-json and point here instead, at
+ * `https://public-api.wordpress.com/wp-json/?rest_route=/sites/<host>`, whose wp/v2 routes are
+ * served at `/wp/v2/sites/<host>/...`. Null when the header names no root, or names one that is
+ * just `<site>/wp-json` again.
+ */
+export const apiFromLink = (link: string | null, base: string) => {
+  const href = link?.match(/<([^>]+)>\s*;\s*rel="https:\/\/api\.w\.org\/"/)?.[1];
+  if (!href) return null;
+  let root: URL;
+  try {
+    root = new URL(href, base);
+  } catch {
+    return null;
+  }
+  const route = root.searchParams.get("rest_route");
+  const site = route?.match(/^\/sites\/([^/]+)\/?$/)?.[1];
+  if (site) return { apiBase: `${root.origin}/wp/v2/sites/${site}`, root: root.href };
+  if (route !== null) return null; // some other ?rest_route= root: paths cannot be appended to it
+  const pretty = root.href.replace(/\/$/, "");
+  if (pretty === `${base}/wp-json`) return null;
+  return { apiBase: `${pretty}/wp/v2`, root: `${pretty}/` };
+};
+
 /** What a site has: its post types, its taxonomies, and which REST namespaces it exposes. */
 export const discoverSite = (base: string) =>
   memo<Schema>(`schema:${base}`, async () => {
-    const apiBase = `${base}/wp-json/wp/v2`;
+    let apiBase = `${base}/wp-json/wp/v2`;
     const get = (u: string) => fetch(u, { headers: { "User-Agent": UA } });
-    const [typesRes, taxRes, rootRes] = await Promise.all([
-      get(`${apiBase}/types`),
-      get(`${apiBase}/taxonomies`),
-      get(`${base}/wp-json/`),
-    ]);
+    const load = (api: string, root: string) =>
+      Promise.all([get(`${api}/types`), get(`${api}/taxonomies`), get(root)]);
+    let [typesRes, taxRes, rootRes] = await load(apiBase, `${base}/wp-json/`);
+    const moved = typesRes.ok ? null : apiFromLink(typesRes.headers.get("link"), base);
+    if (moved) {
+      apiBase = moved.apiBase;
+      [typesRes, taxRes, rootRes] = await load(apiBase, moved.root);
+    }
     if (!typesRes.ok) throw new Error(`Failed to fetch types from ${base}: ${typesRes.status}`);
     if (!taxRes.ok) throw new Error(`Failed to fetch taxonomies from ${base}: ${taxRes.status}`);
     const types: Record<string, RawType> = await typesRes.json();
