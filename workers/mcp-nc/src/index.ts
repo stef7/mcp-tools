@@ -67,8 +67,8 @@ const Worker = mcpWorker({
         "true, given only once the user has agreed to that exact change. Nothing is erased " +
         "here: nc_delete_event moves the event to the Bin calendar, which listings of all " +
         "calendars leave out, and nc_move_event brings it back; there is no deleting a " +
-        "calendar. A change is still a change, so it needs that agreement, once the user has " +
-        "agreed to that exact change. Read an event before changing it, send only the fields " +
+        "calendar. A calendar listed as private has no id: it cannot be opened or written " +
+        "to, so do not try, and do not guess at what is in it. Read an event before changing it, send only the fields " +
         "that differ, and never guess a uid. For a repeating event say which is meant: leave " +
         "`occurrence` out for the whole series, or pass the occurrence's value from " +
         "nc_list_events for that one alone. An event with attendees also needs " +
