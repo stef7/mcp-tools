@@ -593,36 +593,38 @@ const anything = (fields: object) =>
 /** Whether this connector can reach its Nextcloud, in words. Never throws, never names a secret. */
 export const report = async (c: Ctx) => {
   const zone = zoneParam(c.params);
-  const key = "x-secret-key" in c.headers;
-  const seal = !!c.env.NC_SEALED?.trim();
+  const sent = (name: string) => !!c.headers[name]?.trim();
+  const own = ["x-tenant", "x-auth-token", "x-account-id", "x-app-key"].some(sent);
   let named: string | null = null;
   try {
-    named = key ? null : namedBase(c.params);
+    named = namedBase(c.params);
   } catch (e) {
     return { ok: false, problem: e instanceof Error ? e.message : String(e) };
   }
   const about = {
-    mode: key
-      ? "sealed: X-Secret-Key opens the worker's NC_SEALED, which holds the address, login and password"
-      : "open: the address is in the connector URL and the login in X-Auth-Token",
-    nextcloud: key
-      ? "sealed (not shown)"
-      : (named ?? "not set: seal one into NC_SEALED, or add /https://<host> to the connector URL"),
-    sealed_login: seal ? "NC_SEALED is set" : "NC_SEALED is not set",
+    // Only an address in the connector URL is shown; one from a header or the seal is named.
+    nextcloud: named
+      ? `${named} (named by the connector URL)`
+      : sent("x-tenant")
+        ? "the connector's X-Tenant header (sent, not shown)"
+        : sent("x-secret-key")
+          ? "sealed in NC_SEALED (not shown)"
+          : "not set: put it in the connector URL or an X-Tenant header, or seal it",
+    sealed_login: c.env.NC_SEALED?.trim() ? "NC_SEALED is set" : "NC_SEALED is not set",
     timezone: zone
       ? validZone(zone)
         ? zone
         : `"${zone}" is not an IANA time zone name`
       : "not set: add ?tz=Australia/Melbourne so times without an offset mean local time",
   };
-  if (!key && !("x-auth-token" in c.headers))
+  if (!own && !sent("x-secret-key"))
     return {
       ok: false,
       ...about,
       login:
-        "No login header was sent. A browser never sends one; the connector does. Set X-Secret-Key " +
-        "there to the key scripts/seal-nextcloud.mjs printed, or X-Auth-Token to " +
-        '"login:app password".',
+        "No login header was sent. A browser never sends one; the connector does. Set " +
+        "X-Secret-Key there to the key scripts/seal-nextcloud.mjs printed, or send the login " +
+        "itself in X-Account-Id and X-App-Key.",
     };
   try {
     const conn = await connOf(c);
@@ -631,10 +633,15 @@ export const report = async (c: Ctx) => {
     return {
       ok: true,
       ...about,
-      // A sealed login is not named, and its principal address would name it.
-      ...(conn.sealed
-        ? { login: "X-Secret-Key: opened NC_SEALED, and Nextcloud accepted the login inside it" }
-        : { login: `X-Auth-Token: accepted, signed in as ${conn.user}`, principal }),
+      // A login that goes with an unseen address is not named, and its principal would name it.
+      ...(conn.hidden
+        ? {
+            login:
+              conn.how === "X-Secret-Key"
+                ? "X-Secret-Key: opened NC_SEALED, and Nextcloud accepted the login inside it"
+                : `${conn.how}: accepted (login not shown)`,
+          }
+        : { login: `${conn.how}: accepted, signed in as ${conn.user}`, principal }),
       calendars: calendars.map(
         (cal) => `${cal.id} ("${cal.name}")${cal.can_write ? "" : " read-only"}`,
       ),

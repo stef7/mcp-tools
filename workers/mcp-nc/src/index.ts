@@ -3,12 +3,14 @@
  *
  * Which Nextcloud and whose login reach the worker one of two ways (see dav.ts):
  *
- *  X-Secret-Key: key                           opens the worker's NC_SEALED secret, which holds the
- *                                         address, login name and app password, encrypted. The
- *                                         key is in the connector and nowhere on the worker, so
- *                                         neither side alone holds anything usable.
- *  /https://cloud.example.com  or ?nc=    with X-Auth-Token: login:app password. Everything
- *                                         arrives with the request and nothing is stored.
+ *  with the request                       the address in the URL (/https://cloud.example.com or
+ *                                         ?nc=) or an X-Tenant header; the login in X-Account-Id
+ *                                         and X-App-Key, or both in X-Auth-Token. Nothing is
+ *                                         stored on the worker.
+ *  X-Secret-Key: key                      nothing else is sent. The key opens the worker's
+ *                                         NC_SEALED secret, which holds the address, login name
+ *                                         and app password, encrypted. Neither side alone holds
+ *                                         anything usable.
  *
  *  …?tz=Australia/Melbourne               what a time without an offset means, and how times
  *                                         are shown
@@ -40,9 +42,8 @@ const Worker = mcpWorker({
   info(c) {
     let base: string | null = null;
     try {
-      // Only an address the connector URL itself names is repeated to the client, and not
-      // even that when a sealed login is in use, since the seal's address is the one that counts.
-      base = "x-secret-key" in c.headers ? null : namedBase(c.params);
+      // Only an address the connector URL itself names is repeated to the client.
+      base = namedBase(c.params);
     } catch {
       // A bad address is reported by nc_status and the GET page; initialize must still answer.
     }

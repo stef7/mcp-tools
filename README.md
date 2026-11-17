@@ -587,20 +587,34 @@ so someone who can deploy code to the worker (a push to `main`, or the Cloudflar
 capture the key from the next request. Splitting the secret protects each store at rest. It does
 not replace keeping those two accounts and the Access policy tight.
 
-**Open.** Everything arrives with the request and nothing is stored: the address in the
-connector URL and the whole login in a header. This is what the tests use.
+**With the request.** The alternative is to send all three with the request, in which case
+nothing is stored on the worker and the seal is left shut:
 
-| Part                                | Means                                                                                          |
-| ----------------------------------- | ---------------------------------------------------------------------------------------------- |
-| `X-Secret-Key: key`                 | sealed: opens `NC_SEALED`. Wins over everything below                                          |
-| `mcp-nc…/https://cloud.example.com` | open: which Nextcloud, in the path (a folder install works: `…/https://example.com/nextcloud`) |
-| `mcp-nc…/?nc=cloud.example.com`     | open: the same, as a parameter                                                                 |
-| `X-Auth-Token: login:app password`  | open: the whole login                                                                          |
-| `&tz=Australia/Melbourne`           | what `2026-11-20T10:00` means, and the zone times are shown in                                 |
-| `&private=hidden`                   | leave private events out altogether, instead of showing bare busy blocks                       |
-| `&private_calendars=Health,Family`  | more calendar-name words to treat as private                                                   |
+- the address in the connector URL, or in an `X-Tenant` header;
+- the login name in `X-Account-Id` and the app password in `X-App-Key`, or the two together in
+  `X-Auth-Token` as `login:app password`.
 
-Both header names are ones Claude's connector settings offer.
+The two ways are never mixed. An address from the request with a password from the seal would
+send that password wherever the request pointed, so a request that brings `X-Secret-Key` and only
+part of a login of its own is refused before anything is sent. A complete login in the request
+is used as it stands.
+
+| Part                                  | Means                                                                                |
+| ------------------------------------- | ------------------------------------------------------------------------------------ |
+| `X-Secret-Key: key`                   | opens `NC_SEALED`; sent alone                                                        |
+| `mcp-nc…/https://cloud.example.com`   | the address, in the path (a folder install works: `…/https://example.com/nextcloud`) |
+| `mcp-nc…/?nc=cloud.example.com`       | the address, as a parameter                                                          |
+| `X-Tenant: https://cloud.example.com` | the address, as a header, where it is not on show                                    |
+| `X-Account-Id: login`                 | the login name                                                                       |
+| `X-App-Key: app password`             | the app password                                                                     |
+| `X-Auth-Token: login:app password`    | login name and app password in one header                                            |
+| `&tz=Australia/Melbourne`             | what `2026-11-20T10:00` means, and the zone times are shown in                       |
+| `&private=hidden`                     | leave private events out altogether, instead of showing bare busy blocks             |
+| `&private_calendars=Health,Family`    | more calendar-name words to treat as private                                         |
+
+Every header name is one Claude's connector settings offer; a connector takes up to four. Only an
+address in the connector URL is shown back. One from `X-Tenant` or from the seal is never
+repeated, and neither is the login name that goes with it.
 
 Set `tz`. Without it a time with no offset is refused rather than guessed at, and listings come
 back in UTC.
@@ -668,6 +682,9 @@ To set it up:
 3. **Put Cloudflare Access in front of the worker**, as under **Auth** below.
 4. **Add the connector in Claude** with the URL `https://mcp-nc…/?tz=Australia/Melbourne` and
    one request header, `x-secret-key`, set to the key the script printed.
+
+To store nothing on the worker instead, skip step 2 and give the connector three headers:
+`x-tenant`, `x-account-id` and `x-app-key`.
 
 `nc_status`, or opening the connector URL in a browser, says which Nextcloud it is for, whether
 the login was accepted and which calendars it found. With a sealed login it says so without
