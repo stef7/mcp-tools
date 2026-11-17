@@ -22,6 +22,7 @@ workers/mcp-ghost/           Ghost publications, with member sign-in for paid po
 workers/mcp-apify/           what Apify is costing you, by service and by Actor
 workers/mcp-helios/          Helios Voting: read, verify and run elections. Its own door, not in the toolkit
 workers/mcp-printify/        Printify: search its API, call it, upload artwork. Its own door too
+workers/mcp-nc/              Nextcloud calendars over CalDAV, read and write. Its own door too
 scripts/mock-wp.mjs          fake WordPress for local testing
 scripts/mock-ghost.mjs       fake Ghost, including the magic-link sign-in
 scripts/cf-tunnel-relay.mjs  runs on the Mac at the far end of the tunnel
@@ -32,6 +33,7 @@ scripts/build-cf-tunnel-relay-app.sh
 scripts/mock-proxy.mjs       fake Apify Proxy, for the proxy tests, re-signing HTTPS as Apify does
 scripts/mock-helios.mjs      fake Helios, for the election lifecycle tests
 scripts/mock-printify.mjs    fake Printify: catalogue, uploads, products, orders, rate limits
+scripts/mock-nextcloud.mjs   fake Nextcloud: CalDAV discovery, calendars, events, recurrence
 scripts/vendor-printify-spec.mjs
                              trims Printify's OpenAPI document into workers/mcp-printify/src/spec.json
 scripts/apify-tls-probe.mjs  checks HTTPS through the real Unblocker the way the Worker does it
@@ -535,11 +537,132 @@ To set it up:
 Opening that URL in a browser shows whether the API description loaded, whether the token is
 set, whether Printify accepts it, and whether destructive calls are on.
 
+## Nextcloud calendars
+
+`mcp-nc` reads and edits the calendars of one Nextcloud account over CalDAV. Calendars only, and
+within them events only: no tasks, no contacts, and no inviting attendees.
+
+| Tool                                      | Does                                                                      |
+| ----------------------------------------- | ------------------------------------------------------------------------- |
+| `nc_status`                               | whether the connector reaches Nextcloud, and why not                      |
+| `nc_list_calendars`                       | id, name, colour, writable, shared or subscribed                          |
+| `nc_create_calendar` `nc_update_calendar` | add; rename, recolour or redescribe. No deleting one                      |
+| `nc_list_events`                          | a span of time, one calendar or all, with search                          |
+| `nc_get_event`                            | one event in full                                                         |
+| `nc_create_event` `nc_update_event`       | add, change; one occurrence or a series                                   |
+| `nc_delete_event` `nc_move_event`         | move to the Bin calendar; move between calendars, and back out of the Bin |
+
+The connector URL says which Nextcloud, or the worker's `NC_URL` variable does when the URL names
+none, and the login travels in a header:
+
+| Part                                | Means                                                                                    |
+| ----------------------------------- | ---------------------------------------------------------------------------------------- |
+| `mcp-nc…/https://cloud.example.com` | which Nextcloud, in the path (a folder install works: `…/https://example.com/nextcloud`) |
+| `mcp-nc…/?nc=cloud.example.com`     | the same, as a parameter                                                                 |
+| `mcp-nc…/`                          | the worker's own Nextcloud: the `NC_URL` variable                                        |
+| `&tz=Australia/Melbourne`           | what `2026-11-20T10:00` means, and the zone times are shown in                           |
+| `&private=hidden`                   | leave private events out altogether, instead of showing bare busy blocks                 |
+| `&private_calendars=Health,Family`  | more calendar-name words to treat as private                                             |
+| `X-Auth-Token: login:app password`  | the whole login, as a connector header; nothing is stored on the worker                  |
+| `X-API-Key: login`                  | the login name alone; the worker adds the app password from its `NC_PASSWORD` secret     |
+
+Both header names are ones Claude lets any connector send. `X-Auth-Token` wins when both arrive.
+
+An address that comes from `NC_URL` is kept to the worker: `nc_status`, the GET page, error
+messages and the connector's description say that it is set and never what it is, so it can be a
+secret (`npx wrangler secret put NC_URL`) rather than a plain variable. An address named in the
+connector URL is the caller's own and is shown back.
+
+`NC_PASSWORD` is sent to `NC_URL` and to no other host. A connector URL can name any address, so
+a stored password that followed it would be handed to whoever wrote the URL; a connector that
+names a different Nextcloud has to bring that Nextcloud's login in `X-Auth-Token`. With the
+password on the worker, Cloudflare Access is all that stands between a login name and the
+calendar, so keep the Access policy to the people who should have it.
+
+Set `tz`. Without it a time with no offset is refused rather than guessed at, and listings come
+back in UTC.
+
+What may be written:
+
+- Reading runs freely. Every `create_`, `update_` and `delete_` needs `user_confirmed`.
+- An event is changed inside the object as stored and saved with `If-Match`, so a change made
+  elsewhere since it was read is a refusal, not an overwrite. Whatever the worker was not asked
+  about (attendees, alarms, another client's `X-` properties) goes back as it came.
+- An event with attendees also needs `notify_attendees: true`, because Nextcloud may email them.
+- A repeating event is changed or binned as a whole series unless `occurrence` names one
+  occurrence; the server is asked whether the series really has that occurrence first.
+
+Nothing is erased. The worker sends no `DELETE` request for anything:
+
+- `nc_delete_event` moves the event, whole, to a calendar called **Bin**, which it makes the
+  first time one is needed. The event notes which calendar it came from (`binned_from`), and
+  `nc_move_event` puts it back. Listings of all calendars leave the Bin out, so a binned event
+  stops looking like an appointment; name the Bin to see what is in it. Emptying it is done in
+  Nextcloud.
+- Removing one occurrence of a series cannot be a move, so it is an edit: the series skips that
+  date (`EXDATE`), and `nc_get_event` lists it under `removed_occurrences`.
+- There is no tool that deletes a calendar. `nc_update_calendar` changes a calendar's name,
+  colour or description and nothing else: its events and its id stay as they are.
+
+### Keeping things private
+
+Two things never reach the model, and cannot be changed through it:
+
+- **An event marked private or confidential.** That is `CLASS:PRIVATE` or `CLASS:CONFIDENTIAL`,
+  which is what the Calendar app's **When shared show** setting writes ("When shared hide this
+  event" or "When shared show only busy"). `private: true` on `nc_create_event` or
+  `nc_update_event` sets it too, and is one-way: once private, an event is unmarked in Nextcloud,
+  not here.
+- **Every event in a private calendar**: one whose name contains `Dating` (`PRIVATE_WORDS` in
+  `workers/mcp-nc/src/tools.ts`) or a word from `?private_calendars=`. Case does not matter.
+
+A private calendar is not listed and cannot be named, and a private event's uid answers exactly
+as a missing one does. A listing of all calendars does carry each private event as a busy block:
+its start and end, and nothing else, not even which calendar, so nothing gets booked over the top
+of it. With `?private=hidden` even the blocks go, and private events do not exist as far as any
+tool can tell. A search never returns one either way, since a block that appears for one word and
+not another would give its text away.
+
+The filtering happens in the worker, before a result is built. Nothing private is in what Claude
+receives, so it is in no conversation and no log of one. On Cloudflare's side the worker writes
+no log lines of its own and has `observability` off, so no request to it (which would carry the
+Nextcloud address in its URL) is recorded in Workers Logs. What this cannot do is hide anything
+from Nextcloud itself, or stop the model seeing a title it was given to create an event with.
+
+To set it up:
+
+1. **Create an app password.** In Nextcloud: your avatar -> **Personal settings** -> **Security**
+   -> **Devices & sessions** -> name it and **Create new app password**. Keep the login name it
+   shows with it.
+2. **Optionally, keep the address and the password on the worker**, once it exists on Cloudflare
+   (its first deploy is the merge to `main`). `NC_URL` is a plain variable, set in the dashboard
+   under Settings -> Variables and Secrets (`keep_vars` keeps it across deploys); the password
+   is a secret:
+
+   ```sh
+   cd workers/mcp-nc
+   npx wrangler secret put NC_PASSWORD         # paste the app password when asked
+   ```
+
+3. **Put Cloudflare Access in front of the worker**, as under **Auth** below.
+4. **Add the connector in Claude**, and under its request headers set either `X-Auth-Token` to
+   `login:app password`, or, with step 2 done, `X-API-Key` to the login name alone. The URL is
+   then just `https://mcp-nc…/?tz=Australia/Melbourne`.
+
+`nc_status`, or opening the connector URL in a browser, says which Nextcloud it is for, whether
+the login was accepted and which calendars it found. A browser sends neither header, so there it
+stops at "No login header was sent".
+
+The tests run against `scripts/mock-nextcloud.mjs`. To run them against a real CalDAV server
+instead, serve one under `/remote.php/dav/` that accepts the login in `test/global-setup.ts`
+(sabre/dav, the engine inside Nextcloud, does with a dozen lines of PHP) and set
+`NC_TEST_BASE=http://127.0.0.1:<port>`; the handful that need the mock's request log are skipped.
+
 ## Auth (Cloudflare Access)
 
 Access runs before the Worker, so unauthenticated hits cost nothing. `mcp-toolkit` needs it, and so
 do the workers that have a URL of their own rather than a binding in the toolkit (`mcp-helios`,
-`mcp-printify`); repeat steps 2 to 4 for each:
+`mcp-printify`, `mcp-nc`); repeat steps 2 to 4 for each:
 
 1. Zero Trust -> Integrations -> Identity providers -> add **One-time PIN** (email code, no
    account needed).

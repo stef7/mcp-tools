@@ -277,12 +277,12 @@ describe("a whole election, as its administrator", () => {
       short_name: "gg-2026",
       name: "Governance Group 2026",
       private: true,
-      voting_ends_at: "2026-11-14T17:00:00+11:00",
+      voting_ends_at: "2036-11-14T17:00:00+11:00",
     });
     const uuid = created["uuid"] as string;
     expect(uuid).toMatch(/^[0-9a-f-]{36}$/);
     const e1 = await data("helios_get_election", { election: uuid });
-    expect(e1["voting_ends_at"]).toBe("2026-11-14 06:00:00"); // 5 pm Melbourne, as UTC
+    expect(e1["voting_ends_at"]).toBe("2036-11-14 06:00:00"); // 5 pm Melbourne, as UTC
 
     let st = await data("helios_election_status", { election: uuid });
     expect(st["phase"]).toBe("setup");
@@ -295,7 +295,7 @@ describe("a whole election, as its administrator", () => {
     });
     const e2 = await data("helios_get_election", { election: uuid });
     expect(e2["name"]).toBe("Governance Group 2026"); // untouched fields survive the resubmit
-    expect(e2["voting_ends_at"]).toBe("2026-11-14 06:00:00");
+    expect(e2["voting_ends_at"]).toBe("2036-11-14 06:00:00");
 
     await ok("helios_set_questions", {
       ...confirmed,
@@ -401,7 +401,7 @@ describe("a whole election, as its administrator", () => {
     await ok("helios_extend_voting", {
       ...confirmed,
       election: uuid,
-      voting_extended_until: "2026-11-15T17:00+11:00",
+      voting_extended_until: "2036-11-15T17:00+11:00",
     });
 
     expect(
