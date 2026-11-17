@@ -557,13 +557,13 @@ Which Nextcloud and whose login reach the worker one of two ways.
 
 **Sealed.** The address, login name and app password are encrypted together into one value,
 `NC_SEALED`, which is all the worker stores. The key is not on the worker: it sits in the Claude
-connector as an `X-Token` header, arrives with each request, opens the seal for that request and
+connector as an `X-Secret-Key` header, arrives with each request, opens the seal for that request and
 is kept nowhere.
 
 | Held by          | Holds                            | On its own                          |
 | ---------------- | -------------------------------- | ----------------------------------- |
 | Cloudflare       | `NC_SEALED`, the encrypted login | unreadable                          |
-| Claude connector | `X-Token`, the key               | a key to something it does not have |
+| Claude connector | `X-Secret-Key`, the key          | a key to something it does not have |
 
 It is encryption, not hashing: a hash cannot be turned back into the password that has to be
 sent to Nextcloud. The cipher is AES-256-GCM with a random 256-bit key, so there is no passphrase
@@ -579,7 +579,7 @@ node scripts/seal-nextcloud.mjs
 cd workers/mcp-nc && npx wrangler secret put NC_SEALED     # paste the seal
 ```
 
-Then put the key in the connector's request headers as `x-token`. Run the script again to rotate;
+Then put the key in the connector's request headers as `x-secret-key`. Run the script again to rotate;
 it makes a new key and a new seal, and both are replaced together.
 
 What this does not do: while a request is being served the worker necessarily holds both halves,
@@ -592,7 +592,7 @@ connector URL and the whole login in a header. This is what the tests use.
 
 | Part                                | Means                                                                                          |
 | ----------------------------------- | ---------------------------------------------------------------------------------------------- |
-| `X-Token: key`                      | sealed: opens `NC_SEALED`. Wins over everything below                                          |
+| `X-Secret-Key: key`                 | sealed: opens `NC_SEALED`. Wins over everything below                                          |
 | `mcp-nc…/https://cloud.example.com` | open: which Nextcloud, in the path (a folder install works: `…/https://example.com/nextcloud`) |
 | `mcp-nc…/?nc=cloud.example.com`     | open: the same, as a parameter                                                                 |
 | `X-Auth-Token: login:app password`  | open: the whole login                                                                          |
@@ -667,7 +667,7 @@ To set it up:
 
 3. **Put Cloudflare Access in front of the worker**, as under **Auth** below.
 4. **Add the connector in Claude** with the URL `https://mcp-nc…/?tz=Australia/Melbourne` and
-   one request header, `x-token`, set to the key the script printed.
+   one request header, `x-secret-key`, set to the key the script printed.
 
 `nc_status`, or opening the connector URL in a browser, says which Nextcloud it is for, whether
 the login was accepted and which calendars it found. With a sealed login it says so without

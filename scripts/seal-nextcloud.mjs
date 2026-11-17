@@ -6,7 +6,7 @@
  *
  *   NC_SEALED   the three answers, encrypted. Goes on the worker:
  *                 cd workers/mcp-nc && npx wrangler secret put NC_SEALED
- *   X-Token     the key. Goes in the Claude connector's request headers as `x-token`.
+ *   X-Secret-Key     the key. Goes in the Claude connector's request headers as `x-secret-key`.
  *
  * The key is 32 random bytes made here, and the encryption is AES-256-GCM, so there is no
  * passphrase to guess. Run it again to rotate: it makes a new key and a new seal, and both have
@@ -61,7 +61,7 @@ const main = async () => {
   if (!url || !login || !password) throw new Error("All three are needed. Nothing was sealed.");
   const { sealed, key } = await seal({ url, login, password });
   console.log(`\nNC_SEALED (worker secret: npx wrangler secret put NC_SEALED)\n${sealed}\n`);
-  console.log(`X-Token (Claude connector request header "x-token")\n${key}\n`);
+  console.log(`X-Secret-Key (Claude connector request header "x-secret-key")\n${key}\n`);
   console.error("Each is useless without the other. Neither is saved anywhere by this script.");
 };
 

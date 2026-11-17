@@ -40,7 +40,7 @@ export type Conn = {
 const SETUP =
   "Either seal the Nextcloud address, login and app password with scripts/seal-nextcloud.mjs, " +
   "store what it prints as the worker's NC_SEALED secret and send the key it prints in the " +
-  "connector's X-Token header; or name the Nextcloud in the connector URL " +
+  "connector's X-Secret-Key header; or name the Nextcloud in the connector URL " +
   "(https://mcp-nc…/https://cloud.example.com or ?nc=cloud.example.com) and send the login in " +
   'the X-Auth-Token header as "login:app password".';
 
@@ -81,7 +81,7 @@ export const zoneParam = (params: URLSearchParams) => params.get("tz")?.trim() |
 
 /**
  * NC_SEALED holds the Nextcloud address, login name and app password, encrypted. The key is not
- * on the worker: it arrives with each request in the connector's X-Token header, opens the seal
+ * on the worker: it arrives with each request in the connector's X-Secret-Key header, opens the seal
  * for that request, and is kept nowhere. So what Cloudflare stores is unreadable without what
  * the connector stores, and what the connector stores is a key to something it does not have.
  *
@@ -91,11 +91,11 @@ export const zoneParam = (params: URLSearchParams) => params.get("tz")?.trim() |
  * the seal, no request can point the password at another host.
  *
  *   NC_SEALED   v1.<iv, base64url>.<ciphertext, base64url>     made by scripts/seal-nextcloud.mjs
- *   X-Token     the 32-byte key, base64url                     printed once by the same script
+ *   X-Secret-Key     the 32-byte key, base64url                     printed once by the same script
  */
 const AAD = new TextEncoder().encode("mcp-nc sealed login v1");
 const NO_OPEN =
-  "X-Token does not open NC_SEALED: the key is wrong, or the seal was made with another key. " +
+  "X-Secret-Key does not open NC_SEALED: the key is wrong, or the seal was made with another key. " +
   "Nothing was sent to Nextcloud. Run scripts/seal-nextcloud.mjs again and replace both.";
 
 const bytes = (b64url: string) => {
@@ -131,24 +131,26 @@ export const unseal = async (sealed: string, key: string) => {
 /**
  * Who is signing in, and where. Two ways, and nothing between them:
  *
- *   X-Token: key                          opens NC_SEALED, which holds address, login, password
+ *   X-Secret-Key: key                          opens NC_SEALED, which holds address, login, password
  *   ?nc=host + X-Auth-Token: login:pass   everything arrives with the request; nothing is stored
  *
- * X-Token wins when both are there. Both header names are ones Claude lets a connector send.
+ * X-Secret-Key wins when both are there. Both header names are ones Claude lets a connector send.
  */
 export const connOf = async (c: Pick<Ctx, "params" | "headers" | "env">): Promise<Conn> => {
-  const key = c.headers["x-token"]?.trim();
+  const key = c.headers["x-secret-key"]?.trim();
   if (key) {
     const sealed = c.env.NC_SEALED?.trim();
     if (!sealed)
-      throw new Error(`X-Token was sent, but the worker has no NC_SEALED secret to open. ${SETUP}`);
+      throw new Error(
+        `X-Secret-Key was sent, but the worker has no NC_SEALED secret to open. ${SETUP}`,
+      );
     const { url, login, password } = await unseal(sealed, key);
     return { base: normalise(url, false), user: login, pass: password, sealed: true };
   }
   const base = namedBase(c.params);
   const token = c.headers["x-auth-token"]?.trim();
   if (!base && !token)
-    throw new Error(`No X-Token or X-Auth-Token header reached this worker. ${SETUP}`);
+    throw new Error(`No X-Secret-Key or X-Auth-Token header reached this worker. ${SETUP}`);
   if (!base) throw new Error(`No Nextcloud address in the connector URL. ${SETUP}`);
   if (!token) throw new Error(`No X-Auth-Token header reached this worker. ${SETUP}`);
   const at = token.indexOf(":");

@@ -593,7 +593,7 @@ const anything = (fields: object) =>
 /** Whether this connector can reach its Nextcloud, in words. Never throws, never names a secret. */
 export const report = async (c: Ctx) => {
   const zone = zoneParam(c.params);
-  const key = "x-token" in c.headers;
+  const key = "x-secret-key" in c.headers;
   const seal = !!c.env.NC_SEALED?.trim();
   let named: string | null = null;
   try {
@@ -603,7 +603,7 @@ export const report = async (c: Ctx) => {
   }
   const about = {
     mode: key
-      ? "sealed: X-Token opens the worker's NC_SEALED, which holds the address, login and password"
+      ? "sealed: X-Secret-Key opens the worker's NC_SEALED, which holds the address, login and password"
       : "open: the address is in the connector URL and the login in X-Auth-Token",
     nextcloud: key
       ? "sealed (not shown)"
@@ -620,7 +620,7 @@ export const report = async (c: Ctx) => {
       ok: false,
       ...about,
       login:
-        "No login header was sent. A browser never sends one; the connector does. Set X-Token " +
+        "No login header was sent. A browser never sends one; the connector does. Set X-Secret-Key " +
         "there to the key scripts/seal-nextcloud.mjs printed, or X-Auth-Token to " +
         '"login:app password".',
     };
@@ -633,7 +633,7 @@ export const report = async (c: Ctx) => {
       ...about,
       // A sealed login is not named, and its principal address would name it.
       ...(conn.sealed
-        ? { login: "X-Token: opened NC_SEALED, and Nextcloud accepted the login inside it" }
+        ? { login: "X-Secret-Key: opened NC_SEALED, and Nextcloud accepted the login inside it" }
         : { login: `X-Auth-Token: accepted, signed in as ${conn.user}`, principal }),
       calendars: calendars.map(
         (cal) => `${cal.id} ("${cal.name}")${cal.can_write ? "" : " read-only"}`,

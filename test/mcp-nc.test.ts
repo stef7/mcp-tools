@@ -129,7 +129,7 @@ describe("the connector", () => {
   it("says what is missing rather than failing obscurely", async () => {
     expect(await fails("nc_list_calendars", {}, { search: "" })).toContain("No Nextcloud address");
     expect(await fails("nc_list_calendars", {}, { search: "", headers: {} })).toContain(
-      "No X-Token or X-Auth-Token",
+      "No X-Secret-Key or X-Auth-Token",
     );
     expect(await fails("nc_list_calendars", {}, { headers: {} })).toContain(
       "No X-Auth-Token header",
@@ -167,7 +167,7 @@ describe("a login sealed on the worker and opened by a key in the connector", ()
   const host = new URL(base).host;
   let sealed: string;
   let key: string;
-  const withKey = (k = key) => ({ search: bare, headers: { "x-token": k } });
+  const withKey = (k = key) => ({ search: bare, headers: { "x-secret-key": k } });
   const count = async () =>
     real ? 0 : ((await (await fetch(`${base}/__mock/requests`)).json()) as unknown[]).length;
 
@@ -201,14 +201,14 @@ describe("a login sealed on the worker and opened by a key in the connector", ()
     expect(status).toMatchObject({
       ok: true,
       nextcloud: "sealed (not shown)",
-      login: "X-Token: opened NC_SEALED, and Nextcloud accepted the login inside it",
+      login: "X-Secret-Key: opened NC_SEALED, and Nextcloud accepted the login inside it",
     });
     const said = JSON.stringify(status);
     for (const secret of [host, USER, PASS, key, sealed]) expect(said).not.toContain(secret);
     const init = await new Worker(createExecutionContext(), env).fetch(
       new Request("https://mcp-nc.example/", {
         method: "POST",
-        headers: { "x-token": key },
+        headers: { "x-secret-key": key },
         body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "initialize", params: {} }),
       }),
     );
@@ -221,7 +221,7 @@ describe("a login sealed on the worker and opened by a key in the connector", ()
     const other = (await seal({ url: base, login: USER, password: PASS })).key;
     for (const wrong of [other, key.slice(0, -2) + "AA", "short", "not base64 !!"]) {
       const said = await fails("nc_list_calendars", {}, withKey(wrong));
-      expect(said).toContain("X-Token does not open NC_SEALED");
+      expect(said).toContain("X-Secret-Key does not open NC_SEALED");
       for (const secret of [host, USER, PASS]) expect(said).not.toContain(secret);
     }
     // A seal that was tampered with fails the same way: it is authenticated, not just scrambled.
@@ -250,7 +250,7 @@ describe("a login sealed on the worker and opened by a key in the connector", ()
     const said = await fails(
       "nc_list_calendars",
       {},
-      { search: search(), headers: { "x-token": mine.key } },
+      { search: search(), headers: { "x-secret-key": mine.key } },
     );
     expect(said).toContain("Could not reach Nextcloud");
     expect(said).not.toContain("nothing-listens");

@@ -3,7 +3,7 @@
  *
  * Which Nextcloud and whose login reach the worker one of two ways (see dav.ts):
  *
- *  X-Token: key                           opens the worker's NC_SEALED secret, which holds the
+ *  X-Secret-Key: key                           opens the worker's NC_SEALED secret, which holds the
  *                                         address, login name and app password, encrypted. The
  *                                         key is in the connector and nowhere on the worker, so
  *                                         neither side alone holds anything usable.
@@ -42,7 +42,7 @@ const Worker = mcpWorker({
     try {
       // Only an address the connector URL itself names is repeated to the client, and not
       // even that when a sealed login is in use, since the seal's address is the one that counts.
-      base = "x-token" in c.headers ? null : namedBase(c.params);
+      base = "x-secret-key" in c.headers ? null : namedBase(c.params);
     } catch {
       // A bad address is reported by nc_status and the GET page; initialize must still answer.
     }
