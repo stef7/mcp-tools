@@ -50,7 +50,8 @@ const Worker = mcpWorker({
           ? `The time zone in use is ${zone} unless a call names another. `
           : "No time zone is set on this connector, so pass `timezone` with any time that has " +
             "no offset, and ask the user for theirs rather than assuming one. ") +
-        "An all-day event's end is its last day. Tools named create_, update_ and delete_ " +
+        "An all-day event's end is its last day. An entry marked private is a busy block: " +
+        "its time is all that is known, and it cannot be read or changed here. Tools named create_, update_ and delete_ " +
         "change the calendar and need user_confirmed: true, given only once the user has " +
         "agreed to that exact change. Read an event before changing it, send only the fields " +
         "that differ, and never guess a uid. For a repeating event say which is meant: leave " +

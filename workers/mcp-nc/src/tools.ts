@@ -216,11 +216,12 @@ const describe = (ev: Comp, calendar: string, wanted: string | undefined, full: 
  *   every event in a private calendar          one whose name contains a word in PRIVATE_WORDS
  *                                              or in the connector's ?private_calendars=
  *
- * By default they do not exist as far as any tool can tell: a private calendar is not listed and
- * cannot be named, a private event is in no listing and its uid finds nothing. With ?private=busy
- * a listing of all calendars also carries each one as a bare busy block: when, and nothing else,
- * not even which calendar. The filtering happens here, before a result is built, so nothing
- * private reaches the model, the conversation or anything downstream of them.
+ * A private calendar is not listed and cannot be named, and a private event's uid finds
+ * nothing. What a listing of all calendars does carry is a bare busy block for each one: when,
+ * and nothing else, not even which calendar, so nothing is booked over the top of it. With
+ * ?private=hidden even that goes, and they do not exist as far as any tool can tell. The
+ * filtering happens here, before a result is built, so nothing private reaches the model, the
+ * conversation or anything downstream of them.
  */
 const PRIVATE_WORDS = ["dating"];
 
@@ -233,7 +234,7 @@ const privacyOf = (c: Ctx): Privacy => ({
       .map((w) => w.trim().toLowerCase())
       .filter(Boolean),
   ],
-  busy: c.params.get("private")?.trim().toLowerCase() === "busy",
+  busy: c.params.get("private")?.trim().toLowerCase() !== "hidden",
 });
 
 const privateName = (name: string, p: Privacy) =>
@@ -256,7 +257,7 @@ const calendarsOf = async (conn: Conn, c: Ctx) => {
   };
 };
 
-/** All that is ever said about a private event, and only when ?private=busy asks for it. */
+/** All that is ever said about a private event, and not even this with ?private=hidden. */
 const busyBlock = (ev: Comp, zone: string) => {
   const s = span(ev, zone);
   if (!s) return null;
@@ -787,7 +788,7 @@ export const ncTools = (): Tools => ({
         )
       )
         .flat()
-        // A private event is dropped unless busy blocks were asked for, and always when
+        // A private event is dropped when ?private=hidden says so, and always when
         // searching: a block that appears for one word and not another would leak its text.
         .filter(({ secret }) => !secret || (busy && !needle))
         .filter(

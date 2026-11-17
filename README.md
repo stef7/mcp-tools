@@ -559,7 +559,7 @@ on the worker:
 | `mcp-nc…/https://cloud.example.com` | which Nextcloud, in the path (a folder install works: `…/https://example.com/nextcloud`) |
 | `mcp-nc…/?nc=cloud.example.com`     | the same, as a parameter                                                                 |
 | `&tz=Australia/Melbourne`           | what `2026-11-20T10:00` means, and the zone times are shown in                           |
-| `&private=busy`                     | show private events as bare busy blocks instead of nothing                               |
+| `&private=hidden`                   | leave private events out altogether, instead of showing bare busy blocks                 |
 | `&private_calendars=Health,Family`  | more calendar-name words to treat as private                                             |
 | `X-Auth-Token: login:app password`  | the login, as a connector header                                                         |
 
@@ -590,11 +590,12 @@ Two things never reach the model, and cannot be changed through it:
 - **Every event in a private calendar**: one whose name contains `Dating` (`PRIVATE_WORDS` in
   `workers/mcp-nc/src/tools.ts`) or a word from `?private_calendars=`. Case does not matter.
 
-By default they do not exist as far as any tool can tell. A private calendar is not listed and
-cannot be named; a private event is in no listing, and its uid answers exactly as a missing one
-does. With `?private=busy`, a listing of all calendars also carries each one as a busy block: its
-start and end, and nothing else, not even which calendar. A search never returns one either way,
-since a block that appears for one word and not another would give its text away.
+A private calendar is not listed and cannot be named, and a private event's uid answers exactly
+as a missing one does. A listing of all calendars does carry each private event as a busy block:
+its start and end, and nothing else, not even which calendar, so nothing gets booked over the top
+of it. With `?private=hidden` even the blocks go, and private events do not exist as far as any
+tool can tell. A search never returns one either way, since a block that appears for one word and
+not another would give its text away.
 
 The filtering happens in the worker, before a result is built. Nothing private is in what Claude
 receives, so it is in no conversation and no log of one. On Cloudflare's side the worker writes

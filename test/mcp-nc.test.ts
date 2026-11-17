@@ -486,7 +486,7 @@ describe("repeating events", () => {
 });
 
 describe("what stays private", () => {
-  const busy = { search: search("&private=busy") };
+  const hidden = { search: search("&private=hidden") };
   let secret: string;
 
   it("hides an event once it is marked private, from listing, search and lookup alike", async () => {
@@ -526,8 +526,8 @@ describe("what stays private", () => {
     );
   });
 
-  it("shows a private event as a bare busy block only when the connector asks for that", async () => {
-    const events = await list({}, busy);
+  it("shows a private event as a bare busy block, and as nothing once the connector says hidden", async () => {
+    const events = await list();
     const block = events.find((e) => e["start"] === "2026-12-07T11:00:00+11:00");
     expect(block).toEqual({
       private: true,
@@ -537,8 +537,9 @@ describe("what stays private", () => {
       timezone: TZ,
     });
     // Searching never surfaces one, or the words that find it would give it away.
-    expect(await list({ query: "Specialist" }, busy)).toEqual([]);
-    expect(await list({ query: "Clinic" }, busy)).toEqual([]);
+    expect(await list({ query: "Specialist" })).toEqual([]);
+    expect(await list({ query: "Clinic" })).toEqual([]);
+    expect((await list({}, hidden)).some((e) => e["private"])).toBe(false);
   });
 
   it("keeps a calendar with Dating in its name out of sight entirely", async () => {
@@ -551,9 +552,12 @@ describe("what stays private", () => {
     expect(JSON.stringify(await ok("nc_list_calendars"))).not.toMatch(/dating/i);
     expect(JSON.stringify(await ok("nc_status"))).not.toMatch(/dating/i);
     const all = JSON.stringify(
-      await ok("nc_list_events", { from: "2026-11-01", to: "2026-12-31" }),
+      await ok("nc_list_events", { from: "2026-11-01", to: "2026-12-31" }, hidden),
     );
-    expect(all).not.toMatch(/dating|Sam|Lygon|a-date|19:00/i);
+    expect(all).not.toMatch(/dating|Sam|Lygon|a-date|19:00|"private"/i);
+    expect(
+      JSON.stringify(await ok("nc_list_events", { from: "2026-11-01", to: "2026-12-31" })),
+    ).not.toMatch(/dating|Sam|Lygon|a-date/i);
     for (const name of ["dating", "Dating"]) {
       const said = await fails("nc_list_events", { calendar: name });
       expect(said).toContain("No calendar");
@@ -575,8 +579,8 @@ describe("what stays private", () => {
     ).toContain("No calendar");
   });
 
-  it("gives its events as busy blocks that do not say which calendar, when asked", async () => {
-    const out = await ok("nc_list_events", { from: "2026-12-11", to: "2026-12-11" }, busy);
+  it("gives its events as busy blocks that do not say which calendar", async () => {
+    const out = await ok("nc_list_events", { from: "2026-12-11", to: "2026-12-11" });
     expect(out["events"]).toEqual([
       {
         private: true,
