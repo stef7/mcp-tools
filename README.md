@@ -552,32 +552,47 @@ within them events only: no tasks, no contacts, and no inviting attendees.
 | `nc_create_event` `nc_update_event`       | add, change; one occurrence or a series                                   |
 | `nc_delete_event` `nc_move_event`         | move to the Bin calendar; move between calendars, and back out of the Bin |
 
-The connector URL says which Nextcloud, or the worker's `NC_URL` variable does when the URL names
-none, and the login travels in a header:
+Which Nextcloud, and whose login, can each come from more than one place, so the pieces need not
+all sit together:
 
-| Part                                | Means                                                                                    |
-| ----------------------------------- | ---------------------------------------------------------------------------------------- |
-| `mcp-nc…/https://cloud.example.com` | which Nextcloud, in the path (a folder install works: `…/https://example.com/nextcloud`) |
-| `mcp-nc…/?nc=cloud.example.com`     | the same, as a parameter                                                                 |
-| `mcp-nc…/`                          | the worker's own Nextcloud: the `NC_URL` variable                                        |
-| `&tz=Australia/Melbourne`           | what `2026-11-20T10:00` means, and the zone times are shown in                           |
-| `&private=hidden`                   | leave private events out altogether, instead of showing bare busy blocks                 |
-| `&private_calendars=Health,Family`  | more calendar-name words to treat as private                                             |
-| `X-Auth-Token: login:app password`  | the whole login, as a connector header; nothing is stored on the worker                  |
-| `X-API-Key: login`                  | the login name alone; the worker adds the app password from its `NC_PASSWORD` secret     |
+| Part                                  | Means                                                                                    |
+| ------------------------------------- | ---------------------------------------------------------------------------------------- |
+| `mcp-nc…/https://cloud.example.com`   | which Nextcloud, in the path (a folder install works: `…/https://example.com/nextcloud`) |
+| `mcp-nc…/?nc=cloud.example.com`       | the same, as a parameter                                                                 |
+| `X-Tenant: https://cloud.example.com` | the same, as a connector header, where it is not on show                                 |
+| `NC_URL` on the worker                | the Nextcloud to use when neither the URL nor a header names one                         |
+| `&tz=Australia/Melbourne`             | what `2026-11-20T10:00` means, and the zone times are shown in                           |
+| `&private=hidden`                     | leave private events out altogether, instead of showing bare busy blocks                 |
+| `&private_calendars=Health,Family`    | more calendar-name words to treat as private                                             |
+| `X-Auth-Token: login:app password`    | the whole login, as a connector header; nothing is stored on the worker                  |
+| `X-Account-Id: login`                 | the login name alone; the worker adds the app password from its `NC_PASSWORD` secret     |
 
-Both header names are ones Claude lets any connector send. `X-Auth-Token` wins when both arrive.
+The header names are ones Claude's connector settings offer. `X-Auth-Token` wins over
+`X-Account-Id`; for the address, the connector URL wins over `X-Tenant`, which wins over `NC_URL`.
 
-An address that comes from `NC_URL` is kept to the worker: `nc_status`, the GET page, error
-messages and the connector's description say that it is set and never what it is, so it can be a
-secret (`npx wrangler secret put NC_URL`) rather than a plain variable. An address named in the
-connector URL is the caller's own and is shown back.
+Only an address in the connector URL is shown back. One that comes from `X-Tenant` or `NC_URL` is
+kept where it was put: `nc_status`, the GET page, error messages and the connector's description
+say that it is set and never what it is. So `NC_URL` can be a secret
+(`npx wrangler secret put NC_URL`) rather than a plain variable.
 
-`NC_PASSWORD` is sent to `NC_URL` and to no other host. A connector URL can name any address, so
-a stored password that followed it would be handed to whoever wrote the URL; a connector that
-names a different Nextcloud has to bring that Nextcloud's login in `X-Auth-Token`. With the
-password on the worker, Cloudflare Access is all that stands between a login name and the
-calendar, so keep the Access policy to the people who should have it.
+`NC_PASSWORD` is sent only to an address the worker vouches for. A request can name any host, so
+a stored password that followed it would be handed to whoever wrote the request. The worker
+vouches for two things:
+
+- its own `NC_URL`; and
+- an address whose SHA-256 equals `NC_URL_SHA256`. This lets the address live only in the
+  connector's `X-Tenant` header. The worker then holds a password and a fingerprint, the
+  connector holds an address and a login name, and neither has enough to sign in. Hash the
+  address as the worker normalises it (scheme and host in lower case, any folder, no trailing
+  slash):
+
+  ```sh
+  printf %s 'https://cloud.example.com' | sha256sum
+  ```
+
+Any other Nextcloud has to bring its own login in `X-Auth-Token`. With the password on the
+worker, Cloudflare Access is all that stands between a login name and the calendar, so keep the
+Access policy to the people who should have it.
 
 Set `tz`. Without it a time with no offset is refused rather than guessed at, and listings come
 back in UTC.
@@ -634,20 +649,21 @@ To set it up:
 1. **Create an app password.** In Nextcloud: your avatar -> **Personal settings** -> **Security**
    -> **Devices & sessions** -> name it and **Create new app password**. Keep the login name it
    shows with it.
-2. **Optionally, keep the address and the password on the worker**, once it exists on Cloudflare
-   (its first deploy is the merge to `main`). `NC_URL` is a plain variable, set in the dashboard
-   under Settings -> Variables and Secrets (`keep_vars` keeps it across deploys); the password
-   is a secret:
+2. **Optionally, keep the password on the worker**, once it exists on Cloudflare, with either
+   the address beside it or only the address's fingerprint:
 
    ```sh
    cd workers/mcp-nc
    npx wrangler secret put NC_PASSWORD         # paste the app password when asked
+   npx wrangler secret put NC_URL              # either: the address itself
+   npx wrangler secret put NC_URL_SHA256       # or: its SHA-256, with the address in X-Tenant
    ```
 
 3. **Put Cloudflare Access in front of the worker**, as under **Auth** below.
-4. **Add the connector in Claude**, and under its request headers set either `X-Auth-Token` to
-   `login:app password`, or, with step 2 done, `X-API-Key` to the login name alone. The URL is
-   then just `https://mcp-nc…/?tz=Australia/Melbourne`.
+4. **Add the connector in Claude** with the URL `https://mcp-nc…/?tz=Australia/Melbourne`, and
+   under its request headers set either `X-Auth-Token` to `login:app password`, or, with step 2
+   done, `X-Account-Id` to the login name alone. Add `X-Tenant` with the Nextcloud address if
+   the worker holds only its fingerprint.
 
 `nc_status`, or opening the connector URL in a browser, says which Nextcloud it is for, whether
 the login was accepted and which calendars it found. A browser sends neither header, so there it

@@ -10,10 +10,20 @@ interface Env {
   NC_URL?: string;
   /**
    * A Nextcloud app password (Personal settings -> Security -> Devices & sessions), for
-   * connectors that send only a login name, in X-API-Key. A secret:
-   * `npx wrangler secret put NC_PASSWORD`. It is sent to NC_URL as Basic auth and to no other
-   * host, whatever a connector URL names, and no tool result, error or log line carries it. A
-   * connector that sends a whole login in X-Auth-Token does not use it.
+   * connectors that send only a login name, in X-Account-Id. A secret:
+   * `npx wrangler secret put NC_PASSWORD`. It is sent as Basic auth only to an address the
+   * worker vouches for (NC_URL, or one matching NC_URL_SHA256), whatever a request names, and no
+   * tool result, error or log line carries it. A connector that sends a whole login in
+   * X-Auth-Token does not use it.
    */
   NC_PASSWORD?: string;
+  /**
+   * The SHA-256, in hex, of the one Nextcloud address NC_PASSWORD may also be sent to. It lets
+   * the address itself live only in the connector's X-Tenant header: the worker then holds a
+   * password and this fingerprint, and no address. Hash the address as the worker normalises
+   * it: scheme and host in lower case, any folder, no trailing slash.
+   *
+   *   printf %s 'https://cloud.example.com' | sha256sum
+   */
+  NC_URL_SHA256?: string;
 }
