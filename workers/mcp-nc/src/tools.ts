@@ -14,13 +14,12 @@ import {
   baseOf,
   connOf,
   createCalendar,
-  deleteCalendar,
-  deleteStored,
   discover,
   eventByUid,
   eventsBetween,
   homeBase,
   listCalendars,
+  moveStored,
   putNew,
   putOver,
   updateCalendar,
@@ -202,6 +201,9 @@ const describe = (ev: Comp, calendar: string, wanted: string | undefined, full: 
         }
       : {}),
     ...(alarms.length ? { reminders_minutes: alarms } : {}),
+    ...(get(ev, "X-MCP-NC-BINNED-FROM")
+      ? { binned_from: get(ev, "X-MCP-NC-BINNED-FROM")!.value }
+      : {}),
     ...(organizer ? { organizer: address(organizer) } : {}),
     ...(attendees.length ? { attendees } : {}),
   };
@@ -278,6 +280,34 @@ const busyBlock = (ev: Comp, zone: string) => {
         }),
   };
 };
+
+// ─── The Bin ───────────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Nothing is erased through this worker. An event that is "deleted" moves to a calendar called
+ * Bin, an ordinary calendar the user can open, restore from and empty in Nextcloud. It is left
+ * out of listings of all calendars, so a binned event stops looking like an appointment.
+ */
+const BIN = { name: "Bin", color: "#8a8a8a", description: "Events removed through mcp-nc." };
+const BINNED_FROM = "X-MCP-NC-BINNED-FROM";
+const BINNED_AT = "X-MCP-NC-BINNED-AT";
+
+const isBin = (cal: Calendar) => cal.id === "bin" || cal.name.trim().toLowerCase() === "bin";
+
+function binFor(conn: Conn, make: true): Promise<Calendar>;
+function binFor(conn: Conn, make: false): Promise<Calendar | undefined>;
+async function binFor(conn: Conn, make: boolean) {
+  const find = async () => {
+    const all = await listCalendars(conn);
+    return all.find((cal) => cal.id === "bin") ?? all.find(isBin);
+  };
+  const found = await find();
+  if (found || !make) return found;
+  await createCalendar(conn, BIN);
+  const made = await find();
+  if (!made) throw new Error("The Bin calendar could not be created, so nothing was moved.");
+  return made;
+}
 
 // ─── Finding things ────────────────────────────────────────────────────────────────────────────
 
@@ -653,7 +683,12 @@ export const ncTools = (): Tools => ({
       "written to, and whether it is a subscription or shared by someone else.",
     run: async (_, c) => {
       const { shown } = await calendarsOf(connOf(c), c);
-      return shown.map(({ href: _href, components: _components, ...rest }) => rest);
+      return shown.map(({ href: _href, components: _components, ...rest }) => ({
+        ...rest,
+        ...(isBin(rest as Calendar)
+          ? { bin: "Removed events are kept here. Left out when listing all calendars." }
+          : {}),
+      }));
     },
   }),
 
@@ -701,36 +736,6 @@ export const ncTools = (): Tools => ({
     },
   }),
 
-  delete_calendar: tool({
-    description:
-      "Delete a whole calendar and every event in it. Nextcloud keeps a deleted calendar in " +
-      "the Calendar app's trash bin (30 days unless the administrator changed it), where it " +
-      "can be restored. The name must be repeated in confirm_name.",
-    confirm: "Deletes a calendar and all its events.",
-    input: {
-      type: "object",
-      required: ["calendar", "confirm_name"],
-      properties: {
-        calendar: CALENDAR,
-        confirm_name: {
-          type: "string",
-          description: "The calendar's display name, exactly, to prove the right one is meant.",
-        },
-      },
-    },
-    run: async (a, c) => {
-      const conn = connOf(c);
-      const cal = await calendarFor(conn, c, a.calendar, false);
-      if (a.confirm_name !== cal.name)
-        throw new Error(
-          `confirm_name "${a.confirm_name}" is not this calendar's name, "${cal.name}". ` +
-            "Nothing was deleted.",
-        );
-      await deleteCalendar(conn, cal);
-      return { deleted: { id: cal.id, name: cal.name }, restore: "Calendar app -> Trash bin" };
-    },
-  }),
-
   list_events: tool({
     description:
       "Events between two times, from one calendar or from all of them, soonest first. A " +
@@ -770,7 +775,7 @@ export const ncTools = (): Tools => ({
       const hidden = new Set(a.calendar || !busy ? [] : every.hidden);
       const calendars = a.calendar
         ? [await calendarFor(conn, c, a.calendar, false)]
-        : [...every.shown, ...hidden];
+        : [...every.shown.filter((cal) => !isBin(cal)), ...hidden];
       const problems: string[] = [];
       const needle = a.query?.trim().toLowerCase();
       const found = (
@@ -990,11 +995,13 @@ export const ncTools = (): Tools => ({
 
   delete_event: tool({
     description:
-      "Delete an event. For a repeating event this deletes the whole series unless " +
-      "`occurrence` names one occurrence, which alone is removed. Nextcloud keeps a deleted " +
-      "event in the Calendar app's trash bin, where it can be restored; a removed occurrence " +
-      "is not kept there, and is put back by editing the series.",
-    confirm: "Deletes an event from the calendar.",
+      "Take an event off a calendar by moving it to the Bin calendar, which is made the first " +
+      "time it is needed. Nothing is erased: the event stays in the Bin, out of listings of all " +
+      "calendars, until the user empties the Bin in Nextcloud, and nc_move_event puts it back. " +
+      "For a repeating event this bins the whole series unless `occurrence` names one " +
+      "occurrence; that one is then skipped in the series (an edit, not a move), and " +
+      "nc_get_event lists it under removed_occurrences.",
+    confirm: "Moves an event to the Bin calendar.",
     input: {
       type: "object",
       required: ["calendar", "uid"],
@@ -1011,13 +1018,29 @@ export const ncTools = (): Tools => ({
       const zone = zoneFor(undefined, c);
       const o = await open(conn, cal, a.uid);
       const summary = unescapeText(get(o.master, "SUMMARY")?.value ?? "");
-      attendeeGuard(o.master, a.notify_attendees, "Deleting");
+      attendeeGuard(o.master, a.notify_attendees, "Removing");
       if (a.occurrence === undefined) {
-        await deleteStored(conn, o.stored);
+        if (isBin(cal))
+          throw new Error(
+            "This event is already in the Bin. Erasing it for good is done in Nextcloud, not here.",
+          );
+        const bin = await binFor(conn, true);
+        const moved = await moveStored(conn, o.stored, bin);
+        // Where it came from, so it can be put back. The move is what matters; if this note
+        // fails to save, the event is still safe in the Bin.
+        set(o.master, BINNED_FROM, cal.id);
+        set(o.master, BINNED_AT, nowStamp());
+        const noted = await putOver(conn, moved, serialise(o.vcal)).then(
+          () => true,
+          () => false,
+        );
         return {
-          deleted: { calendar: cal.id, uid: a.uid, summary },
-          ...(get(o.master, "RRULE") ? { scope: "The whole repeating series was deleted." } : {}),
-          restore: "Calendar app -> Trash bin",
+          binned: { uid: a.uid, summary, from: cal.id, now_in: bin.id },
+          ...(get(o.master, "RRULE") ? { scope: "The whole repeating series was moved." } : {}),
+          restore: `nc_move_event with calendar "${bin.id}" and to "${cal.id}"`,
+          ...(noted
+            ? {}
+            : { note: "The event moved, but its origin could not be recorded on it." }),
         };
       }
       const found = await occurrenceOf(conn, cal, o, a.occurrence, zone);
@@ -1027,9 +1050,43 @@ export const ncTools = (): Tools => ({
       touch(o.master);
       await putOver(conn, o.stored, serialise(o.vcal));
       return {
-        deleted: { calendar: cal.id, uid: a.uid, summary, occurrence: a.occurrence },
-        scope: "Only that occurrence was removed; the series continues.",
+        removed: { calendar: cal.id, uid: a.uid, summary, occurrence: a.occurrence },
+        scope: "Only that occurrence was skipped; the series continues.",
       };
+    },
+  }),
+
+  move_event: tool({
+    description:
+      "Move an event, with everything in it, from one calendar to another. This is also how " +
+      "an event comes back out of the Bin: its `binned_from` says which calendar it was in.",
+    confirm: "Moves an event to another calendar.",
+    input: {
+      type: "object",
+      required: ["calendar", "uid", "to"],
+      properties: {
+        calendar: {
+          ...CALENDAR,
+          description: `The calendar it is in now. ${CALENDAR.description}`,
+        },
+        uid: UID,
+        to: { ...CALENDAR, description: `The calendar to move it to. ${CALENDAR.description}` },
+        notify_attendees: NOTIFY,
+      },
+    },
+    run: async (a, c) => {
+      const conn = connOf(c);
+      const from = await calendarFor(conn, c, a.calendar, true);
+      const to = await calendarFor(conn, c, a.to, true);
+      if (from.id === to.id) throw new Error(`The event is already in "${to.name}".`);
+      const o = await open(conn, from, a.uid);
+      attendeeGuard(o.master, a.notify_attendees, "Moving");
+      const moved = await moveStored(conn, o.stored, to);
+      if (get(o.master, BINNED_FROM) && !isBin(to)) {
+        remove(o.master, BINNED_FROM, BINNED_AT);
+        await putOver(conn, moved, serialise(o.vcal)).catch(() => undefined);
+      }
+      return { moved: describe(o.master, to.id, zoneFor(undefined, c), false), from: from.id };
     },
   }),
 });

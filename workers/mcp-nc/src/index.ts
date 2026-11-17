@@ -19,6 +19,8 @@
  * own URL and its own Access policy.
  *
  * Calendars only, and within them events only: no tasks, no contacts, no inviting attendees.
+ * Nothing is erased: the worker sends no DELETE, a removed event moves to a Bin calendar, and
+ * a calendar cannot be deleted at all.
  * Reading runs freely. Every write needs user_confirmed, is refused if the event changed on the
  * server since it was read, and leaves alone whatever in an event it was not asked about.
  */
@@ -56,8 +58,12 @@ const Worker = mcpWorker({
           : "No time zone is set on this connector, so pass `timezone` with any time that has " +
             "no offset, and ask the user for theirs rather than assuming one. ") +
         "An all-day event's end is its last day. An entry marked private is a busy block: " +
-        "its time is all that is known, and it cannot be read or changed here. Tools named create_, update_ and delete_ " +
-        "change the calendar and need user_confirmed: true, given only once the user has " +
+        "its time is all that is known, and it cannot be read or changed here. Tools named " +
+        "create_, update_, delete_ and move_ change the calendar and need user_confirmed: " +
+        "true, given only once the user has agreed to that exact change. Nothing is erased " +
+        "here: nc_delete_event moves the event to the Bin calendar, which listings of all " +
+        "calendars leave out, and nc_move_event brings it back; there is no deleting a " +
+        "calendar. A change is still a change, so it needs that agreement, once the user has " +
         "agreed to that exact change. Read an event before changing it, send only the fields " +
         "that differ, and never guess a uid. For a repeating event say which is meant: leave " +
         "`occurrence` out for the whole series, or pass the occurrence's value from " +

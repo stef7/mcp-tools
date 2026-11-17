@@ -9,6 +9,7 @@
  *   - a calendar-query with <expand> returns one VEVENT per occurrence, in UTC, each with a
  *     RECURRENCE-ID, honouring EXDATE and overridden occurrences
  *   - PUT and DELETE honour If-Match and If-None-Match, and every save changes the ETag
+ *   - MOVE carries an object to another calendar, honouring If-Match and never overwriting
  *
  * And three things exist only to misbehave:
  *   team      a calendar shared read-only by "alex": every write to it is a 403
@@ -395,6 +396,26 @@ const handle = async (req, res) => {
     const saved = { ics: text, etag: etag() };
     cal.objects.set(file, saved);
     return send(had ? 204 : 201, "", { ETag: saved.etag });
+  }
+  if (req.method === "MOVE") {
+    if (!had) return send(404);
+    if (ifMatch && had.etag !== ifMatch) return precondition();
+    const to = decodeURIComponent(
+      new URL(req.headers.destination, `http://localhost:${PORT}`).pathname,
+    );
+    const [toId, toFile] = to.slice(HOME.length).split("/");
+    const target = calendars.get(toId);
+    if (!to.startsWith(HOME) || !target || !toFile)
+      return send(409, error("Sabre\\DAV\\Exception\\Conflict", "No such destination"));
+    if (target.readOnly)
+      return send(
+        403,
+        error("Sabre\\DAV\\Exception\\Forbidden", "You are not allowed to write here"),
+      );
+    if (target.objects.has(toFile)) return precondition();
+    cal.objects.delete(file);
+    target.objects.set(toFile, { ics: had.ics, etag: etag() });
+    return send(201);
   }
   if (req.method === "DELETE") {
     if (!had) return send(404);

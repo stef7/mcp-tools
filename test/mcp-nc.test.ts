@@ -88,16 +88,16 @@ describe("the connector", () => {
       "nc_list_calendars",
       "nc_create_calendar",
       "nc_update_calendar",
-      "nc_delete_calendar",
       "nc_list_events",
       "nc_get_event",
       "nc_create_event",
       "nc_update_event",
       "nc_delete_event",
+      "nc_move_event",
     ]);
     for (const t of tools)
       expect(t.inputSchema.required?.includes("user_confirmed") ?? false, t.name).toBe(
-        /_(create|update|delete)_/.test(t.name),
+        /_(create|update|delete|move)_/.test(t.name),
       );
   });
 
@@ -232,7 +232,7 @@ describe("calendars", () => {
     expect(JSON.stringify(await ok("nc_list_calendars"))).not.toContain("Nope");
   });
 
-  it("creates, recolours, renames and deletes one, asking for its name before deleting", async () => {
+  it("creates, recolours and renames one, and has no way to delete it", async () => {
     const made = await ok("nc_create_calendar", { name: "Côté Jardin", color: "#ff8800", ...yes });
     expect(made["created"]["id"]).toBe("cote-jardin");
     await ok("nc_update_calendar", {
@@ -249,10 +249,9 @@ describe("calendars", () => {
       await fails("nc_update_calendar", { calendar: "Garden", color: "green", ...yes }),
     ).toContain("hex");
     expect(
-      await fails("nc_delete_calendar", { calendar: "Garden", confirm_name: "garden", ...yes }),
-    ).toContain("Nothing was deleted");
-    await ok("nc_delete_calendar", { calendar: "Garden", confirm_name: "Garden", ...yes });
-    expect(JSON.stringify(await ok("nc_list_calendars"))).not.toContain("Garden");
+      await fails("nc_delete_calendar", { calendar: "Garden", confirm_name: "Garden", ...yes }),
+    ).toContain("Unknown tool");
+    expect(JSON.stringify(await ok("nc_list_calendars"))).toContain("Garden");
   });
 
   it("names the calendars when asked for one that is not there", async () => {
@@ -400,17 +399,58 @@ describe("events", () => {
     expect(ics).toContain("ATTENDEE;PARTSTAT=ACCEPTED:mailto:alex@example.com");
   });
 
-  it("deletes one, and then cannot find it", async () => {
+  it("moves a deleted event to the Bin instead of erasing it, and brings it back", async () => {
     const made = await create({
       calendar: "work",
       summary: "Short-lived",
       start: "2026-11-28T10:00",
+      location: "Room 9",
     });
     const args = { calendar: "work", uid: made["uid"] };
     expect(await fails("nc_delete_event", args)).toContain("user_confirmed");
-    await ok("nc_delete_event", { ...args, ...yes });
+    const out = await ok("nc_delete_event", { ...args, ...yes });
+    expect(out["binned"]).toMatchObject({ from: "work", now_in: "bin", summary: "Short-lived" });
+    // Gone from where it was, and from what is on across all calendars...
     expect(await fails("nc_get_event", args)).toContain("No event with UID");
-    expect(await list({ calendar: "work", query: "Short-lived" })).toEqual([]);
+    expect(await list({ query: "Short-lived" })).toEqual([]);
+    // ...but whole, in a calendar anyone can open, and saying where it came from.
+    const calendars = (await ok("nc_list_calendars")) as unknown as Json[];
+    expect(calendars.find((c) => c["id"] === "bin")).toMatchObject({ name: "Bin" });
+    const [binned] = await list({ calendar: "Bin", query: "Short-lived" });
+    expect(binned).toMatchObject({ uid: made["uid"], location: "Room 9", binned_from: "work" });
+    expect(await stored("bin", made["uid"])).toContain("SUMMARY:Short-lived");
+    // Deleting it again does not erase it either.
+    expect(await fails("nc_delete_event", { calendar: "bin", uid: made["uid"], ...yes })).toContain(
+      "already in the Bin",
+    );
+    const back = await ok("nc_move_event", {
+      calendar: "bin",
+      uid: made["uid"],
+      to: "work",
+      ...yes,
+    });
+    expect(back["moved"]).toMatchObject({ calendar: "work", summary: "Short-lived" });
+    expect(back["moved"]["binned_from"]).toBeUndefined();
+    const [again] = await list({ calendar: "work", query: "Short-lived" });
+    expect(again).toMatchObject({ start: "2026-11-28T10:00:00+11:00", location: "Room 9" });
+    expect(await stored("work", made["uid"])).not.toContain("BINNED");
+  });
+
+  it("uses the one Bin for the next event too, and moves between ordinary calendars", async () => {
+    const one = await create({ calendar: "work", summary: "Bin me too", start: "2026-11-29" });
+    await ok("nc_delete_event", { calendar: "work", uid: one["uid"], ...yes });
+    const bins = ((await ok("nc_list_calendars")) as unknown as Json[]).filter((c) => c["bin"]);
+    expect(bins).toHaveLength(1);
+    const two = await create({ calendar: "work", summary: "Wrong calendar", start: "2026-11-29" });
+    const move = { calendar: "work", uid: two["uid"], to: "Garden" };
+    expect(await fails("nc_move_event", move)).toContain("user_confirmed");
+    await ok("nc_move_event", { ...move, ...yes });
+    expect((await list({ calendar: "Garden" })).map((e) => e["summary"])).toEqual([
+      "Wrong calendar",
+    ]);
+    expect(await fails("nc_move_event", { ...move, calendar: "Garden", ...yes })).toContain(
+      "already in",
+    );
   });
 
   it("covers every calendar when none is named, soonest first", async () => {
@@ -640,7 +680,7 @@ describe("what stays private", () => {
       }),
     ).toContain("No calendar");
     expect(
-      await fails("nc_delete_calendar", { calendar: "dating", confirm_name: "Dating", ...yes }),
+      await fails("nc_move_event", { calendar: "work", uid: "from-a-phone", to: "Dating", ...yes }),
     ).toContain("No calendar");
   });
 
@@ -672,8 +712,12 @@ describe.skipIf(real)("against a server that misbehaves", () => {
   it("sends nothing when a write is not confirmed", async () => {
     const before = (await requests()).length;
     await fails("nc_create_event", { calendar: "work", summary: "x", start: "2026-12-12" });
-    await fails("nc_delete_calendar", { calendar: "work", confirm_name: "Work" });
+    await fails("nc_delete_event", { calendar: "work", uid: "from-a-phone" });
     expect((await requests()).length).toBe(before);
+  });
+
+  it("has never sent a DELETE, for anything", async () => {
+    expect((await requests()).filter((r) => r.method === "DELETE")).toEqual([]);
   });
 
   it("marks a calendar shared read-only and will not write to it", async () => {

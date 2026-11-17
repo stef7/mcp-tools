@@ -512,10 +512,6 @@ export const updateCalendar = async (conn: Conn, cal: Calendar, f: CalendarField
     );
 };
 
-export const deleteCalendar = async (conn: Conn, cal: Calendar) => {
-  expect(await dav(conn, "DELETE", cal.href), [200, 204], `Deleting the calendar "${cal.name}"`);
-};
-
 // ─── Events ────────────────────────────────────────────────────────────────────────────────────
 
 /** One calendar object as stored: its address, its version, and its iCalendar text. */
@@ -591,10 +587,24 @@ export const putOver = async (conn: Conn, was: Stored, ics: string) => {
   );
 };
 
-export const deleteStored = async (conn: Conn, was: Stored) => {
+/**
+ * Moves an object into another calendar, only if it is still the version that was read, and
+ * never over something already there. Returns where it now is. This worker sends no DELETE at
+ * all: taking an event away means moving it to the Bin calendar, where it can be seen and put
+ * back.
+ */
+export const moveStored = async (conn: Conn, was: Stored, to: Calendar): Promise<Stored> => {
+  const href = `${to.href}${was.href.split("/").pop() ?? ""}`;
   expect(
-    await dav(conn, "DELETE", was.href, { headers: was.etag ? { "If-Match": was.etag } : {} }),
-    [200, 204],
-    "Deleting the event",
+    await dav(conn, "MOVE", was.href, {
+      headers: {
+        Destination: resolve(conn, href),
+        Overwrite: "F",
+        ...(was.etag ? { "If-Match": was.etag } : {}),
+      },
+    }),
+    [201, 204],
+    `Moving the event to "${to.name}"`,
   );
+  return { href, etag: "", ics: was.ics };
 };

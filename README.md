@@ -542,14 +542,15 @@ set, whether Printify accepts it, and whether destructive calls are on.
 `mcp-nc` reads and edits the calendars of one Nextcloud account over CalDAV. Calendars only, and
 within them events only: no tasks, no contacts, and no inviting attendees.
 
-| Tool                                                           | Does                                                 |
-| -------------------------------------------------------------- | ---------------------------------------------------- |
-| `nc_status`                                                    | whether the connector reaches Nextcloud, and why not |
-| `nc_list_calendars`                                            | id, name, colour, writable, shared or subscribed     |
-| `nc_create_calendar` `nc_update_calendar` `nc_delete_calendar` | add, rename or recolour, delete (name repeated)      |
-| `nc_list_events`                                               | a span of time, one calendar or all, with search     |
-| `nc_get_event`                                                 | one event in full                                    |
-| `nc_create_event` `nc_update_event` `nc_delete_event`          | add, change, delete; one occurrence or a series      |
+| Tool                                      | Does                                                                      |
+| ----------------------------------------- | ------------------------------------------------------------------------- |
+| `nc_status`                               | whether the connector reaches Nextcloud, and why not                      |
+| `nc_list_calendars`                       | id, name, colour, writable, shared or subscribed                          |
+| `nc_create_calendar` `nc_update_calendar` | add; rename, recolour or redescribe. No deleting one                      |
+| `nc_list_events`                          | a span of time, one calendar or all, with search                          |
+| `nc_get_event`                            | one event in full                                                         |
+| `nc_create_event` `nc_update_event`       | add, change; one occurrence or a series                                   |
+| `nc_delete_event` `nc_move_event`         | move to the Bin calendar; move between calendars, and back out of the Bin |
 
 The connector URL says which Nextcloud, or the worker's `NC_URL` variable does when the URL names
 none, and the login travels in a header:
@@ -583,10 +584,20 @@ What may be written:
   elsewhere since it was read is a refusal, not an overwrite. Whatever the worker was not asked
   about (attendees, alarms, another client's `X-` properties) goes back as it came.
 - An event with attendees also needs `notify_attendees: true`, because Nextcloud may email them.
-- A repeating event is changed or deleted as a whole series unless `occurrence` names one
+- A repeating event is changed or binned as a whole series unless `occurrence` names one
   occurrence; the server is asked whether the series really has that occurrence first.
-- Deleting a calendar needs its name repeated. Nextcloud keeps deleted calendars and events in
-  the Calendar app's trash bin.
+
+Nothing is erased. The worker sends no `DELETE` request for anything:
+
+- `nc_delete_event` moves the event, whole, to a calendar called **Bin**, which it makes the
+  first time one is needed. The event notes which calendar it came from (`binned_from`), and
+  `nc_move_event` puts it back. Listings of all calendars leave the Bin out, so a binned event
+  stops looking like an appointment; name the Bin to see what is in it. Emptying it is done in
+  Nextcloud.
+- Removing one occurrence of a series cannot be a move, so it is an edit: the series skips that
+  date (`EXDATE`), and `nc_get_event` lists it under `removed_occurrences`.
+- There is no tool that deletes a calendar. `nc_update_calendar` changes a calendar's name,
+  colour or description and nothing else: its events and its id stay as they are.
 
 ### Keeping things private
 
