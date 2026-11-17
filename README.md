@@ -34,6 +34,7 @@ scripts/mock-proxy.mjs       fake Apify Proxy, for the proxy tests, re-signing H
 scripts/mock-helios.mjs      fake Helios, for the election lifecycle tests
 scripts/mock-printify.mjs    fake Printify: catalogue, uploads, products, orders, rate limits
 scripts/mock-nextcloud.mjs   fake Nextcloud: CalDAV discovery, calendars, events, recurrence
+scripts/seal-nextcloud.mjs   encrypts a Nextcloud login for mcp-nc; prints the seal and its key
 scripts/vendor-printify-spec.mjs
                              trims Printify's OpenAPI document into workers/mcp-printify/src/spec.json
 scripts/apify-tls-probe.mjs  checks HTTPS through the real Unblocker the way the Worker does it
@@ -552,47 +553,54 @@ within them events only: no tasks, no contacts, and no inviting attendees.
 | `nc_create_event` `nc_update_event`       | add, change; one occurrence or a series                                   |
 | `nc_delete_event` `nc_move_event`         | move to the Bin calendar; move between calendars, and back out of the Bin |
 
-Which Nextcloud, and whose login, can each come from more than one place, so the pieces need not
-all sit together:
+Which Nextcloud and whose login reach the worker one of two ways.
 
-| Part                                  | Means                                                                                    |
-| ------------------------------------- | ---------------------------------------------------------------------------------------- |
-| `mcp-nc…/https://cloud.example.com`   | which Nextcloud, in the path (a folder install works: `…/https://example.com/nextcloud`) |
-| `mcp-nc…/?nc=cloud.example.com`       | the same, as a parameter                                                                 |
-| `X-Tenant: https://cloud.example.com` | the same, as a connector header, where it is not on show                                 |
-| `NC_URL` on the worker                | the Nextcloud to use when neither the URL nor a header names one                         |
-| `&tz=Australia/Melbourne`             | what `2026-11-20T10:00` means, and the zone times are shown in                           |
-| `&private=hidden`                     | leave private events out altogether, instead of showing bare busy blocks                 |
-| `&private_calendars=Health,Family`    | more calendar-name words to treat as private                                             |
-| `X-Auth-Token: login:app password`    | the whole login, as a connector header; nothing is stored on the worker                  |
-| `X-Account-Id: login`                 | the login name alone; the worker adds the app password from its `NC_PASSWORD` secret     |
+**Sealed.** The address, login name and app password are encrypted together into one value,
+`NC_SEALED`, which is all the worker stores. The key is not on the worker: it sits in the Claude
+connector as an `X-Token` header, arrives with each request, opens the seal for that request and
+is kept nowhere.
 
-The header names are ones Claude's connector settings offer. `X-Auth-Token` wins over
-`X-Account-Id`; for the address, the connector URL wins over `X-Tenant`, which wins over `NC_URL`.
+| Held by          | Holds                            | On its own                          |
+| ---------------- | -------------------------------- | ----------------------------------- |
+| Cloudflare       | `NC_SEALED`, the encrypted login | unreadable                          |
+| Claude connector | `X-Token`, the key               | a key to something it does not have |
 
-Only an address in the connector URL is shown back. One that comes from `X-Tenant` or `NC_URL` is
-kept where it was put: `nc_status`, the GET page, error messages and the connector's description
-say that it is set and never what it is. So `NC_URL` can be a secret
-(`npx wrangler secret put NC_URL`) rather than a plain variable.
+It is encryption, not hashing: a hash cannot be turned back into the password that has to be
+sent to Nextcloud. The cipher is AES-256-GCM with a random 256-bit key, so there is no passphrase
+to guess, and because it authenticates, a wrong key or an altered seal fails outright. The
+address is inside the seal, so no request can point the password at another host. Neither the
+address nor the login name is repeated in any result, error or status line.
 
-`NC_PASSWORD` is sent only to an address the worker vouches for. A request can name any host, so
-a stored password that followed it would be handed to whoever wrote the request. The worker
-vouches for two things:
+`scripts/seal-nextcloud.mjs` makes both values. It runs on your own machine, asks for the three
+things, talks to nothing, writes no file, and prints the seal and the key:
 
-- its own `NC_URL`; and
-- an address whose SHA-256 equals `NC_URL_SHA256`. This lets the address live only in the
-  connector's `X-Tenant` header. The worker then holds a password and a fingerprint, the
-  connector holds an address and a login name, and neither has enough to sign in. Hash the
-  address as the worker normalises it (scheme and host in lower case, any folder, no trailing
-  slash):
+```sh
+node scripts/seal-nextcloud.mjs
+cd workers/mcp-nc && npx wrangler secret put NC_SEALED     # paste the seal
+```
 
-  ```sh
-  printf %s 'https://cloud.example.com' | sha256sum
-  ```
+Then put the key in the connector's request headers as `x-token`. Run the script again to rotate;
+it makes a new key and a new seal, and both are replaced together.
 
-Any other Nextcloud has to bring its own login in `X-Auth-Token`. With the password on the
-worker, Cloudflare Access is all that stands between a login name and the calendar, so keep the
-Access policy to the people who should have it.
+What this does not do: while a request is being served the worker necessarily holds both halves,
+so someone who can deploy code to the worker (a push to `main`, or the Cloudflare account) could
+capture the key from the next request. Splitting the secret protects each store at rest. It does
+not replace keeping those two accounts and the Access policy tight.
+
+**Open.** Everything arrives with the request and nothing is stored: the address in the
+connector URL and the whole login in a header. This is what the tests use.
+
+| Part                                | Means                                                                                          |
+| ----------------------------------- | ---------------------------------------------------------------------------------------------- |
+| `X-Token: key`                      | sealed: opens `NC_SEALED`. Wins over everything below                                          |
+| `mcp-nc…/https://cloud.example.com` | open: which Nextcloud, in the path (a folder install works: `…/https://example.com/nextcloud`) |
+| `mcp-nc…/?nc=cloud.example.com`     | open: the same, as a parameter                                                                 |
+| `X-Auth-Token: login:app password`  | open: the whole login                                                                          |
+| `&tz=Australia/Melbourne`           | what `2026-11-20T10:00` means, and the zone times are shown in                                 |
+| `&private=hidden`                   | leave private events out altogether, instead of showing bare busy blocks                       |
+| `&private_calendars=Health,Family`  | more calendar-name words to treat as private                                                   |
+
+Both header names are ones Claude's connector settings offer.
 
 Set `tz`. Without it a time with no offset is refused rather than guessed at, and listings come
 back in UTC.
@@ -649,25 +657,22 @@ To set it up:
 1. **Create an app password.** In Nextcloud: your avatar -> **Personal settings** -> **Security**
    -> **Devices & sessions** -> name it and **Create new app password**. Keep the login name it
    shows with it.
-2. **Optionally, keep the password on the worker**, once it exists on Cloudflare, with either
-   the address beside it or only the address's fingerprint:
+2. **Seal it.** Run `node scripts/seal-nextcloud.mjs` on your own machine and answer its three
+   questions. Store the seal on the worker, once it exists on Cloudflare:
 
    ```sh
    cd workers/mcp-nc
-   npx wrangler secret put NC_PASSWORD         # paste the app password when asked
-   npx wrangler secret put NC_URL              # either: the address itself
-   npx wrangler secret put NC_URL_SHA256       # or: its SHA-256, with the address in X-Tenant
+   npx wrangler secret put NC_SEALED           # paste the NC_SEALED value when asked
    ```
 
 3. **Put Cloudflare Access in front of the worker**, as under **Auth** below.
-4. **Add the connector in Claude** with the URL `https://mcp-nc…/?tz=Australia/Melbourne`, and
-   under its request headers set either `X-Auth-Token` to `login:app password`, or, with step 2
-   done, `X-Account-Id` to the login name alone. Add `X-Tenant` with the Nextcloud address if
-   the worker holds only its fingerprint.
+4. **Add the connector in Claude** with the URL `https://mcp-nc…/?tz=Australia/Melbourne` and
+   one request header, `x-token`, set to the key the script printed.
 
 `nc_status`, or opening the connector URL in a browser, says which Nextcloud it is for, whether
-the login was accepted and which calendars it found. A browser sends neither header, so there it
-stops at "No login header was sent".
+the login was accepted and which calendars it found. With a sealed login it says so without
+naming the address or the login. A browser sends no header, so there it stops at "No login header
+was sent".
 
 The tests run against `scripts/mock-nextcloud.mjs`. To run them against a real CalDAV server
 instead, serve one under `/remote.php/dav/` that accepts the login in `test/global-setup.ts`

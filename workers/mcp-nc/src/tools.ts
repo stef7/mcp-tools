@@ -11,13 +11,12 @@
  */
 import { tool, type Ctx, type Tools } from "../../../core/mcp";
 import {
-  baseOf,
   connOf,
   createCalendar,
   discover,
   eventByUid,
   eventsBetween,
-  homeBase,
+  namedBase,
   listCalendars,
   moveStored,
   putNew,
@@ -593,46 +592,37 @@ const anything = (fields: object) =>
 
 /** Whether this connector can reach its Nextcloud, in words. Never throws, never names a secret. */
 export const report = async (c: Ctx) => {
-  let where: ReturnType<typeof baseOf>;
-  let own: string | null;
+  const zone = zoneParam(c.params);
+  const key = "x-token" in c.headers;
+  const seal = !!c.env.NC_SEALED?.trim();
+  let named: string | null = null;
   try {
-    where = baseOf(c);
-    own = homeBase(c.env);
+    named = key ? null : namedBase(c.params);
   } catch (e) {
     return { ok: false, problem: e instanceof Error ? e.message : String(e) };
   }
-  const zone = zoneParam(c.params);
   const about = {
-    // Only an address in the connector URL is shown; one from a header or NC_URL is named.
-    nextcloud: where
-      ? where.shown
-        ? `${where.base} (named by the connector URL)`
-        : where.from === "NC_URL"
-          ? "the worker's NC_URL (set, not shown)"
-          : "the connector's X-Tenant header (sent, not shown)"
-      : "not set: put it in the connector URL (/https://<host> or ?nc=<host>), in an X-Tenant " +
-        "header, or in NC_URL on the worker",
+    mode: key
+      ? "sealed: X-Token opens the worker's NC_SEALED, which holds the address, login and password"
+      : "open: the address is in the connector URL and the login in X-Auth-Token",
+    nextcloud: key
+      ? "sealed (not shown)"
+      : (named ?? "not set: seal one into NC_SEALED, or add /https://<host> to the connector URL"),
+    sealed_login: seal ? "NC_SEALED is set" : "NC_SEALED is not set",
     timezone: zone
       ? validZone(zone)
         ? zone
         : `"${zone}" is not an IANA time zone name`
       : "not set: add ?tz=Australia/Melbourne so times without an offset mean local time",
-    stored_password: c.env.NC_PASSWORD?.trim()
-      ? "NC_PASSWORD is set, for X-Account-Id logins to " +
-        (own || c.env.NC_URL_SHA256?.trim()
-          ? [own && "NC_URL", c.env.NC_URL_SHA256?.trim() && "the address NC_URL_SHA256 matches"]
-              .filter(Boolean)
-              .join(" or ")
-          : "nowhere yet: neither NC_URL nor NC_URL_SHA256 is set")
-      : "NC_PASSWORD is not set, so the whole login must come in X-Auth-Token",
   };
-  if (!("x-auth-token" in c.headers) && !("x-account-id" in c.headers))
+  if (!key && !("x-auth-token" in c.headers))
     return {
       ok: false,
       ...about,
       login:
-        "No login header was sent. A browser never sends one; the connector does. Set " +
-        'X-Auth-Token there to "login:app password", or X-Account-Id to the login name alone.',
+        "No login header was sent. A browser never sends one; the connector does. Set X-Token " +
+        "there to the key scripts/seal-nextcloud.mjs printed, or X-Auth-Token to " +
+        '"login:app password".',
     };
   try {
     const conn = await connOf(c);
@@ -641,10 +631,10 @@ export const report = async (c: Ctx) => {
     return {
       ok: true,
       ...about,
-      login:
-        `${conn.via}: accepted, signed in as ${conn.user}` +
-        (conn.via === "X-Account-Id" ? " with the worker's NC_PASSWORD" : ""),
-      principal,
+      // A sealed login is not named, and its principal address would name it.
+      ...(conn.sealed
+        ? { login: "X-Token: opened NC_SEALED, and Nextcloud accepted the login inside it" }
+        : { login: `X-Auth-Token: accepted, signed in as ${conn.user}`, principal }),
       calendars: calendars.map(
         (cal) => `${cal.id} ("${cal.name}")${cal.can_write ? "" : " read-only"}`,
       ),
