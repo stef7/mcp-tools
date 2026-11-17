@@ -653,12 +653,14 @@ Two things never reach the model, and cannot be changed through it:
 - **Every event in a private calendar**: one whose name contains `Dating` (`PRIVATE_WORDS` in
   `workers/mcp-nc/src/tools.ts`) or a word from `?private_calendars=`. Case does not matter.
 
-A private calendar is not listed and cannot be named, and a private event's uid answers exactly
-as a missing one does. A listing of all calendars does carry each private event as a busy block:
-its start and end, and nothing else, not even which calendar, so nothing gets booked over the top
-of it. With `?private=hidden` even the blocks go, and private events do not exist as far as any
-tool can tell. A search never returns one either way, since a block that appears for one word and
-not another would give its text away.
+A private calendar is listed only as "Private calendar (colour #e9967a)": its colour, and nothing
+else. It has no name and no id, so it cannot be opened, searched or written to, and asking for it
+by any name answers as a missing calendar does. A private event's uid answers exactly as a
+missing one does. A listing of all calendars does carry each private event as a busy block: its
+start and end, and nothing else, not even which calendar, so nothing gets booked over the top of
+it. With `?private=hidden` the blocks and the colour-only listing both go, and private calendars
+and events do not exist as far as any tool can tell. A search never returns one either way, since
+a block that appears for one word and not another would give its text away.
 
 The filtering happens in the worker, before a result is built. Nothing private is in what Claude
 receives, so it is in no conversation and no log of one. On Cloudflare's side the worker writes

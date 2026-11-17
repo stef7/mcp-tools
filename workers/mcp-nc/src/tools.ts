@@ -218,8 +218,8 @@ const describe = (ev: Comp, calendar: string, wanted: string | undefined, full: 
  *   every event in a private calendar          one whose name contains a word in PRIVATE_WORDS
  *                                              or in the connector's ?private_calendars=
  *
- * A private calendar is not listed and cannot be named, and a private event's uid finds
- * nothing. What a listing of all calendars does carry is a bare busy block for each one: when,
+ * A private calendar is listed only as "Private calendar" with its colour: it has no name and
+ * no id, so it cannot be opened or written to, and a private event's uid finds nothing. What a listing of all calendars does carry is a bare busy block for each one: when,
  * and nothing else, not even which calendar, so nothing is booked over the top of it. With
  * ?private=hidden even that goes, and they do not exist as far as any tool can tell. The
  * filtering happens here, before a result is built, so nothing private reaches the model, the
@@ -258,6 +258,16 @@ const calendarsOf = async (conn: Conn, c: Ctx) => {
     hidden: events.filter((cal) => privateCalendar(cal, privacy)),
   };
 };
+
+/**
+ * All that is ever said about a private calendar: that there is one, and its colour, which is
+ * how its owner tells it from another. No id, so no tool can be pointed at it.
+ */
+const privateEntry = (cal: Calendar) => ({
+  private: true,
+  name: cal.color ? `Private calendar (colour ${cal.color})` : "Private calendar",
+  ...(cal.color ? { color: cal.color } : {}),
+});
 
 /** All that is ever said about a private event, and not even this with ?private=hidden. */
 const busyBlock = (ev: Comp, zone: string) => {
@@ -629,7 +639,8 @@ export const report = async (c: Ctx) => {
   try {
     const conn = await connOf(c);
     const { principal } = await discover(conn);
-    const calendars = (await calendarsOf(conn, c)).shown;
+    const every = await calendarsOf(conn, c);
+    const calendars = every.shown;
     return {
       ok: true,
       ...about,
@@ -642,9 +653,10 @@ export const report = async (c: Ctx) => {
                 : `${conn.how}: accepted (login not shown)`,
           }
         : { login: `${conn.how}: accepted, signed in as ${conn.user}`, principal }),
-      calendars: calendars.map(
-        (cal) => `${cal.id} ("${cal.name}")${cal.can_write ? "" : " read-only"}`,
-      ),
+      calendars: [
+        ...calendars.map((cal) => `${cal.id} ("${cal.name}")${cal.can_write ? "" : " read-only"}`),
+        ...(every.privacy.busy ? every.hidden.map((cal) => privateEntry(cal).name) : []),
+      ],
     };
   } catch (e) {
     return { ok: false, ...about, problem: e instanceof Error ? e.message : String(e) };
@@ -688,15 +700,21 @@ export const ncTools = (): Tools => ({
   list_calendars: tool({
     description:
       "The calendars of the signed-in Nextcloud user: id, name, colour, whether it can be " +
-      "written to, and whether it is a subscription or shared by someone else.",
+      "written to, and whether it is a subscription or shared by someone else. A private " +
+      "calendar is listed by its colour alone: it has no id, cannot be opened or written to, " +
+      "and its events appear in nc_list_events only as busy blocks.",
     run: async (_, c) => {
-      const { shown } = await calendarsOf(await connOf(c), c);
-      return shown.map(({ href: _href, components: _components, ...rest }) => ({
-        ...rest,
-        ...(isBin(rest as Calendar)
-          ? { bin: "Removed events are kept here. Left out when listing all calendars." }
-          : {}),
-      }));
+      const { shown, hidden, privacy } = await calendarsOf(await connOf(c), c);
+      return [
+        ...shown.map(({ href: _href, components: _components, ...rest }) => ({
+          ...rest,
+          ...(isBin(rest as Calendar)
+            ? { bin: "Removed events are kept here. Left out when listing all calendars." }
+            : {}),
+        })),
+        // With ?private=hidden a private calendar leaves no trace, not even this.
+        ...(privacy.busy ? hidden.map(privateEntry) : []),
+      ];
     },
   }),
 

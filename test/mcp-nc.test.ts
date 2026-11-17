@@ -76,7 +76,8 @@ const plant = async (calendar: string, uid: string, lines: string[]) => {
 
 beforeAll(async () => {
   if (!real) await fetch(`${base}/__mock/reset`, { method: "POST" });
-  for (const name of ["Work", "Dating"]) await ok("nc_create_calendar", { name, ...yes });
+  await ok("nc_create_calendar", { name: "Work", ...yes });
+  await ok("nc_create_calendar", { name: "Dating", color: "#e9967a", ...yes });
 });
 
 describe("the connector", () => {
@@ -785,15 +786,30 @@ describe("what stays private", () => {
     expect((await list({}, hidden)).some((e) => e["private"])).toBe(false);
   });
 
-  it("keeps a calendar with Dating in its name out of sight entirely", async () => {
+  it("lists a calendar with Dating in its name by colour alone, and lets nothing reach into it", async () => {
     await plant("dating", "a-date", [
       `DTSTART;TZID=${TZ}:20261211T190000`,
       `DTEND;TZID=${TZ}:20261211T210000`,
       "SUMMARY:Dinner with Sam",
       "LOCATION:Lygon St",
     ]);
-    expect(JSON.stringify(await ok("nc_list_calendars"))).not.toMatch(/dating/i);
-    expect(JSON.stringify(await ok("nc_status"))).not.toMatch(/dating/i);
+    // Listed, but only as a colour: no name, no id, nothing to point a tool at.
+    const calendars = (await ok("nc_list_calendars")) as unknown as Json[];
+    expect(calendars.filter((c) => c["private"])).toEqual([
+      { private: true, name: "Private calendar (colour #e9967a)", color: "#e9967a" },
+    ]);
+    expect(JSON.stringify(calendars)).not.toMatch(/dating/i);
+    const status = await ok("nc_status");
+    expect(status["calendars"]).toContain("Private calendar (colour #e9967a)");
+    expect(JSON.stringify(status)).not.toMatch(/dating/i);
+    // With ?private=hidden it is not listed at all.
+    expect(JSON.stringify(await ok("nc_list_calendars", {}, hidden))).not.toMatch(
+      /private|e9967a/i,
+    );
+    expect(JSON.stringify(await ok("nc_status", {}, hidden))).not.toMatch(/private c|e9967a/i);
+    expect(
+      await fails("nc_list_events", { calendar: "Private calendar (colour #e9967a)" }),
+    ).toContain("No calendar");
     const all = JSON.stringify(
       await ok("nc_list_events", { from: "2026-11-01", to: "2026-12-31" }, hidden),
     );
