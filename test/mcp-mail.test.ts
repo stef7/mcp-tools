@@ -99,6 +99,13 @@ describe("parsing", () => {
     );
     expect(decodeWords("=?iso-8859-1?Q?caf=E9_bar?=")).toBe("café bar");
   });
+  it("reads Gmail's attribution line too", () => {
+    expect(
+      forwardedBlock(
+        "fyi\n---------- Forwarded message ---------\nOn Wed, 4 Nov 2026 at 21:44, Sam Lee <sam@x.example> wrote:\n> hi",
+      ),
+    ).toMatchObject({ from: "Sam Lee <sam@x.example>", note: "fyi" });
+  });
   it("reads an inline forward block", () => {
     expect(forwardedBlock(parseMail(enc.encode(INLINE)).text)).toMatchObject({
       from: "Jane Recruiter <jane@agency.example>",
@@ -196,6 +203,36 @@ describe("filing and reading", () => {
     } as unknown as ForwardableEmailMessage);
     expect(bounced).toEqual([]);
     expect((await ok("mail_list", { search: "Star sender" }))["messages"]).toHaveLength(1);
+  });
+
+  it("reads Proton's attribution-line forward, keeping the forwarder's note", async () => {
+    const raw = [
+      "From: Stefano Perfili <me@proton.me>",
+      "Subject: Fw: Message replied: Principle Lead Engineer",
+      "Message-ID: <fwd-proton@proton.me>",
+      "Content-Type: text/plain; charset=utf-8",
+      "",
+      "I never got back to her",
+      "",
+      "-------- Original Message --------",
+      "On Wednesday, 11/04/26 at 21:44 Courtney-Amber Paioni <hit-reply@linkedin.com> wrote:",
+      "",
+      "> Hey Stefano, it's absolutely not too late.",
+    ].join("\r\n");
+    await deliver("me@proton.me", raw);
+    const { messages } = await ok("mail_list", { search: "absolutely not too late" });
+    expect(messages[0]).toMatchObject({
+      original_from: "Courtney-Amber Paioni <hit-reply@linkedin.com>",
+      original_date: "Wednesday, 11/04/26 at 21:44",
+      subject: "Message replied: Principle Lead Engineer",
+      forwarder_note: "I never got back to her",
+    });
+    const [full] = (await ok("mail_get", { ids: [messages[0].id] }))["messages"];
+    expect(full).toMatchObject({
+      original_from: "Courtney-Amber Paioni <hit-reply@linkedin.com>",
+      forwarder_note: "I never got back to her",
+    });
+    expect(full.text).toContain("I never got back to her"); // the note stays in the text too
   });
 
   it("does not file the same Message-ID twice", async () => {
