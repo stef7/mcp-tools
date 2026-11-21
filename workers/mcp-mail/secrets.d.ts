@@ -2,8 +2,9 @@
 interface Env {
   /**
    * Who may send mail in: comma-separated envelope senders. A whole address (`me@proton.me`) or a
-   * domain (`@proton.me`). Kept out of this public repo, so set it in the dashboard. Unset, every
-   * message is refused.
+   * domain (`@proton.me`), or `*` for any sender, which leaves the routed address itself as the
+   * only gate (so make it one nobody would guess). Kept out of this public repo, so set it in the
+   * dashboard. Unset, every message is refused. `*` means nothing in MAIL_READERS.
    */
   MAIL_ALLOWED_FROM?: string;
   /**

@@ -129,7 +129,9 @@ describe("filing and reading", () => {
       subject: "Lead Front End role",
       triaged: false,
     });
-    const full = await ok("mail_get", { id: messages[0].id });
+    const got = await ok("mail_get", { ids: [messages[0].id, 999999] });
+    expect(got["missing"]).toEqual([999999]);
+    const full = got["messages"][0];
     expect(full["envelope_from"]).toBe("me@proton.me");
     expect(full["text"]).toContain("open to a chat");
     expect(full["raw_kept"]).toBe(true);
@@ -143,6 +145,20 @@ describe("filing and reading", () => {
       subject: "Interview next steps",
       attachment_count: 2,
     });
+  });
+
+  it("keeps any sender when MAIL_ALLOWED_FROM is *", async () => {
+    const open = new Worker(createExecutionContext(), { ...env, MAIL_ALLOWED_FROM: "*" });
+    const raw = INLINE.replace("fwd-1", "star-1").replace(/Lead Front End/g, "Star sender");
+    const bounced: string[] = [];
+    await open.email({
+      from: "anyone@example.net",
+      to: "jobs@example.org",
+      raw: new Response(enc.encode(raw)).body!,
+      setReject: (why: string) => void bounced.push(why),
+    } as unknown as ForwardableEmailMessage);
+    expect(bounced).toEqual([]);
+    expect((await ok("mail_list", { search: "Star sender" }))["messages"]).toHaveLength(1);
   });
 
   it("does not file the same Message-ID twice", async () => {
@@ -164,7 +180,7 @@ describe("filing and reading", () => {
 
   it("reads nothing for someone not in MAIL_READERS", async () => {
     for (const name of ["mail_list", "mail_get", "mail_status", "mail_mark_triaged"]) {
-      const r = await call(name, { id: 1, ids: [1] }, "intruder@example.com");
+      const r = await call(name, { ids: [1] }, "intruder@example.com");
       expect(r.isError, `${name}: ${r.content[0]!.text}`).toBe(true);
       expect(r.content[0]!.text).not.toContain("agency.example");
     }

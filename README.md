@@ -705,12 +705,12 @@ instead, serve one under `/remote.php/dav/` that accepts the login in `test/glob
 Routing hands each message to the worker; the worker files it in D1 if the envelope sender is
 allowed, and bounces it if not.
 
-| Tool                | Does                                                                      |
-| ------------------- | ------------------------------------------------------------------------- |
-| `mail_status`       | how many are kept, how many untriaged, the newest one's date              |
-| `mail_list`         | untriaged messages, newest first, with search, a date and paging          |
-| `mail_get`          | one message in full: original sender, text, attachment names, how it came |
-| `mail_mark_triaged` | flag messages dealt with, with a note such as where they were filed       |
+| Tool                | Does                                                                       |
+| ------------------- | -------------------------------------------------------------------------- |
+| `mail_status`       | how many are kept, how many untriaged, the newest one's date               |
+| `mail_list`         | untriaged messages, newest first, with search, a date and paging           |
+| `mail_get`          | up to 20 messages in full: original sender, text, attachments, how it came |
+| `mail_mark_triaged` | flag messages dealt with, with a note such as where they were filed        |
 
 **Who it was really from.** A message you forward arrives from you. The worker keeps who sent it
 to the worker (`envelope_from`) and works out who originally sent it (`original_from`): from the
@@ -726,8 +726,9 @@ before is not filed twice. The table makes itself on first use; there is no migr
 Nothing is ever deleted: `mail_mark_triaged` only sets a flag and a note.
 
 **Who may send in** is `MAIL_ALLOWED_FROM`, a plain variable set in the dashboard (it is kept out
-of this public repo): comma-separated addresses, or `@domain` for a whole domain. Unset, every
-message bounces. The envelope sender is what is checked, which is your own address when you
+of this public repo): comma-separated addresses, or `@domain` for a whole domain, or `*` for
+anyone. With `*` the routed address is the only gate, so make it one nobody would guess (say
+`jobs-k7q2m9@`). Unset, every message bounces. The envelope sender is what is checked, which is your own address when you
 forward by hand or with a filter. A bounce names the sender that was refused, so a forwarding
 service that rewrites the envelope (SRS) shows you what to allow. An envelope sender can be
 forged; the worst that buys anyone is a row in an inbox only you can read, since nothing here acts
@@ -742,7 +743,8 @@ toolkit. The worker writes no log lines and has `observability` off.
 To set it up:
 
 1. **Create the database**: `npx wrangler d1 create mcp-mail`, and put the `database_id` it
-   prints into `workers/mcp-mail/wrangler.json`. The token in Actions needs D1 Edit as well.
+   prints into `workers/mcp-mail/wrangler.json`. Deploying only binds it, which the token's
+   Workers permission covers, as it already does for `mcp-fetch`.
 2. **Merge**, so the workflow deploys the worker.
 3. **Set the two variables** on `mcp-mail` in the dashboard: `MAIL_ALLOWED_FROM` (your own
    sending addresses) and `MAIL_READERS` (the email you sign in to Access with).
