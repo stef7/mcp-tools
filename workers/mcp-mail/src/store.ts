@@ -2,7 +2,7 @@
  * The inbox: one D1 table. The table makes itself the first time it is touched, so there is no
  * migration step to forget. Nothing here deletes a row.
  */
-import { addressOf, forwardedBlock, parseMail } from "./mime";
+import { addressOf, forwardedBlock, parseMail, unforward } from "./mime";
 
 /** D1 holds up to 2 MB a row; the raw message is kept only when it fits well inside that. */
 export const RAW_LIMIT = 1_000_000;
@@ -61,9 +61,13 @@ export const save = async (db: D1Database, m: Incoming) => {
   const p = parseMail(m.raw);
   const fwd = forwardedBlock(p.text);
   const inner = p.inner;
-  const originalFrom = inner?.get("from") ?? fwd?.["from"] ?? p.headers.get("from") ?? m.from;
-  const originalDate = inner?.get("date") ?? fwd?.["date"] ?? p.headers.get("date") ?? null;
-  const subject = inner?.get("subject") ?? fwd?.["subject"] ?? p.headers.get("subject") ?? "";
+  const originalFrom = inner?.get("from") ?? fwd?.from ?? p.headers.get("from") ?? m.from;
+  const originalDate = inner?.get("date") ?? fwd?.date ?? p.headers.get("date") ?? null;
+  const subject =
+    inner?.get("subject") ??
+    fwd?.subject ??
+    (inner || fwd ? unforward(p.headers.get("subject")) : p.headers.get("subject")) ??
+    "";
   const text = p.text.length > TEXT_LIMIT ? p.text.slice(0, TEXT_LIMIT) : p.text;
   const messageId = p.headers.get("message-id") ?? null;
 

@@ -18,9 +18,10 @@ import { version } from "../package.json";
 import { mcpWorker, tool, type Ctx } from "../../../core/mcp";
 import { truncate } from "../../../core/web";
 import { base64, bytesFrom, ensure, listed, save } from "./store";
+import { forwardedBlock, unforward } from "./mime";
 
-const LIST_COLUMNS = `id, received_at, original_from, original_date, subject, triaged, note,
-  substr(text, 1, 400) AS snippet, json_array_length(attachments) AS attachment_count`;
+const LIST_COLUMNS = `id, received_at, header_from, original_from, original_date, subject, triaged,
+  note, substr(text, 1, 4000) AS head, json_array_length(attachments) AS attachment_count`;
 
 /** Refuses unless the signed-in Access email is one of MAIL_READERS. */
 const reader = async (c: Ctx) => {
@@ -34,15 +35,55 @@ const reader = async (c: Ctx) => {
   return c.env.MAIL_DB;
 };
 
-type Row = Record<string, unknown> & { snippet?: string; text?: string; attachments?: string };
-const tidy = (r: Row) => ({
-  ...r,
-  triaged: !!r["triaged"],
-  ...(r.snippet !== undefined
-    ? { snippet: truncate(String(r.snippet).replace(/\s+/g, " "), 240) }
-    : {}),
-  ...(r.attachments !== undefined ? { attachments: JSON.parse(r.attachments) } : {}),
-});
+type Row = Record<string, unknown> & {
+  snippet?: string;
+  head?: string;
+  text?: string;
+  attachments?: string;
+};
+
+/**
+ * Who a forward was really from, worked out again from the text each time it is read, so a row
+ * filed before the parser learnt a client's format reads correctly too. A sender that came from
+ * an attached message (which differs from the outer From) is kept as filed. `forwarder_note` is
+ * what you wrote above the forwarded mail.
+ */
+const derive = (r: Row) => {
+  const { head, header_from, ...rest } = r;
+  const body = String(r.text ?? head ?? "");
+  const fwd = forwardedBlock(body);
+  const filedFromOuter = !r["original_from"] || r["original_from"] === header_from;
+  const out: Row = {
+    ...rest,
+    ...(r.text !== undefined ? { header_from } : {}),
+    ...(head !== undefined
+      ? { snippet: (fwd ? body.slice(body.indexOf(fwd.from)) : body).slice(0, 400) }
+      : {}),
+  };
+  if (!fwd) return out;
+  return {
+    ...out,
+    ...(filedFromOuter
+      ? {
+          original_from: fwd.from,
+          original_date: fwd.date ?? r["original_date"],
+          subject: fwd.subject ?? unforward(String(r["subject"] ?? "")),
+        }
+      : {}),
+    forwarder_note: fwd.note ?? null,
+  };
+};
+const tidy = (raw: Row) => {
+  const r = derive(raw);
+  return {
+    ...r,
+    triaged: !!r["triaged"],
+    ...(r.snippet !== undefined
+      ? { snippet: truncate(String(r.snippet).replace(/\s+/g, " "), 240) }
+      : {}),
+    ...(r.attachments !== undefined ? { attachments: JSON.parse(r.attachments) } : {}),
+  };
+};
 
 const Worker = mcpWorker({
   ...cfg,

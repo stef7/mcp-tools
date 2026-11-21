@@ -181,31 +181,67 @@ export const parseMail = (raw: Uint8Array): Parsed => {
 export const addressOf = (value = "") =>
   (/<([^>]+)>/.exec(value)?.[1] ?? value).trim().toLowerCase();
 
+/** `Fw: Fwd: FW: subject` -> `subject`. */
+export const unforward = (subject = "") => subject.replace(/^(\s*(fwd?|fw)\s*:\s*)+/i, "");
+
 /**
- * The header block a mail client writes when you forward inline:
+ * What a mail client writes when you forward inline. Either a header block:
  *
- *   ------- Forwarded Message -------          (Proton)
+ *   ------- Forwarded Message -------          (Proton, older)
  *   ---------- Forwarded message ---------     (Gmail)
  *   -----Original Message-----                 (Outlook)
  *   From: Name <a@b>
  *   Date: …
  *   Subject: …
  *
- * Returns what it says about the mail you forwarded, or nothing when there is no such block.
+ * or an attribution line, which is what Proton writes now:
+ *
+ *   -------- Original Message --------
+ *   On Wednesday, 11/04/26 at 21:44 Name <a@b> wrote:
+ *
+ * Returns who the forwarded mail was from, its date and subject where given, and `note`: whatever
+ * the forwarder wrote above it. Nothing when there is no such block.
  */
 export const forwardedBlock = (text: string) => {
   const marker = /^[>\s]*-{2,}\s*(?:Original Message|Forwarded [Mm]essage)\s*-{2,}\s*$/m.exec(text);
   if (!marker) return undefined;
   const found: Record<string, string> = {};
+  const note = text.slice(0, marker.index).trim();
   const lines = text.slice(marker.index + marker[0].length).split("\n");
   for (const line of lines.slice(0, 15)) {
-    const clean = line.replace(/^[>\s]*/, "").replace(/\*/g, "");
-    if (!clean.trim()) {
+    const clean = line
+      .replace(/^[>\s]*/, "")
+      .replace(/\*/g, "")
+      .trim();
+    if (!clean) {
       if (Object.keys(found).length) break; // the blank line that ends the block
       continue;
     }
-    const m = /^(From|Date|Sent|Subject|To):\s*(.*)$/i.exec(clean);
-    if (m) found[m[1]!.toLowerCase() === "sent" ? "date" : m[1]!.toLowerCase()] = m[2]!.trim();
+    const header = /^(From|Date|Sent|Subject|To):\s*(.*)$/i.exec(clean);
+    if (header) {
+      const key = header[1]!.toLowerCase();
+      found[key === "sent" ? "date" : key] = header[2]!.trim();
+      continue;
+    }
+    // "On <date>[,] Name <a@b> wrote:" — the sender is the last "Name <address>" before "wrote:".
+    // The date ends at its time (Proton: "at 21:44 Name <a@b>") or at its last comma (Gmail).
+    const said =
+      /^On\s+(.+?\d{1,2}[:.]\d{2}(?:\s?[ap]\.?m\.?)?),?\s+([^,<]*<[^>]+>)\s*wrote:\s*$/i.exec(
+        clean,
+      ) ?? /^On\s+(.+),\s*([^,<]*<[^>]+>)\s*wrote:\s*$/i.exec(clean);
+    if (said && !found["from"]) {
+      found["from"] = said[2]!.trim();
+      found["date"] ??= said[1]!.trim().replace(/,$/, "");
+      break;
+    }
+    if (!Object.keys(found).length) break; // something else first: not a forward block
   }
-  return found["from"] ? found : undefined;
+  if (!found["from"]) return undefined;
+  return { ...found, ...(note ? { note } : {}) } as {
+    from: string;
+    date?: string;
+    subject?: string;
+    to?: string;
+    note?: string;
+  };
 };
