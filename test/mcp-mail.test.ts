@@ -109,7 +109,9 @@ describe("parsing", () => {
     const p = parseMail(enc.encode(ATTACHED));
     expect(p.text).toContain("See attached.");
     expect(p.inner?.get("from")).toBe("Sam Hiring <sam@company.example>");
-    expect(p.attachments).toContainEqual({ filename: "pd.pdf", type: "application/pdf", size: 9 });
+    expect(p.attachments).toContainEqual(
+      expect.objectContaining({ filename: "pd.pdf", type: "application/pdf", size: 9 }),
+    );
   });
 });
 
@@ -145,10 +147,45 @@ describe("filing and reading", () => {
       subject: "Interview next steps",
       attachment_count: 2,
     });
+    const [mail] = (await ok("mail_get", { ids: [messages[0].id] }))["messages"];
+    expect(mail.files).toEqual([
+      { id: expect.any(Number), filename: "pd.pdf", type: "application/pdf", size: 9, kept: true },
+    ]);
+    const r = (await call("mail_get_attachment", { id: mail.files[0].id })) as Json;
+    expect(r["isError"]).toBeFalsy();
+    expect(r["content"][1]).toMatchObject({
+      type: "resource",
+      resource: { mimeType: "application/pdf", blob: "JVBERi0xLjQK" },
+    });
   });
 
-  it("keeps any sender when MAIL_ALLOWED_FROM is *", async () => {
-    const open = new Worker(createExecutionContext(), { ...env, MAIL_ALLOWED_FROM: "*" });
+  it("opens a text attachment as text", async () => {
+    const raw = [
+      "From: me@proton.me",
+      "Message-ID: <fwd-3@proton.me>",
+      "Subject: Notes",
+      'Content-Type: multipart/mixed; boundary="c"',
+      "",
+      "--c",
+      "Content-Type: text/plain",
+      "",
+      "Notes attached.",
+      "--c",
+      'Content-Type: text/csv; name="roles.csv"',
+      "Content-Disposition: attachment",
+      "",
+      "company,role\r\nZeller,Staff FE",
+      "--c--",
+    ].join("\r\n");
+    await deliver("me@proton.me", raw);
+    const { messages } = await ok("mail_list", { search: "Notes attached" });
+    const [mail] = (await ok("mail_get", { ids: [messages[0].id] }))["messages"];
+    const r = (await call("mail_get_attachment", { id: mail.files[0].id })) as Json;
+    expect(r["content"][0].text).toContain("Zeller,Staff FE");
+  });
+
+  it("keeps any sender when MAIL_ALLOWED_FROM is unset", async () => {
+    const open = new Worker(createExecutionContext(), { ...env, MAIL_ALLOWED_FROM: undefined });
     const raw = INLINE.replace("fwd-1", "star-1").replace(/Lead Front End/g, "Star sender");
     const bounced: string[] = [];
     await open.email({
@@ -179,8 +216,14 @@ describe("filing and reading", () => {
   });
 
   it("reads nothing for someone not in MAIL_READERS", async () => {
-    for (const name of ["mail_list", "mail_get", "mail_status", "mail_mark_triaged"]) {
-      const r = await call(name, { ids: [1] }, "intruder@example.com");
+    for (const name of [
+      "mail_list",
+      "mail_get",
+      "mail_get_attachment",
+      "mail_status",
+      "mail_mark_triaged",
+    ]) {
+      const r = await call(name, { id: 1, ids: [1] }, "intruder@example.com");
       expect(r.isError, `${name}: ${r.content[0]!.text}`).toBe(true);
       expect(r.content[0]!.text).not.toContain("agency.example");
     }

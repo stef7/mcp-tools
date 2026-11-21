@@ -705,12 +705,13 @@ instead, serve one under `/remote.php/dav/` that accepts the login in `test/glob
 Routing hands each message to the worker; the worker files it in D1 if the envelope sender is
 allowed, and bounces it if not.
 
-| Tool                | Does                                                                       |
-| ------------------- | -------------------------------------------------------------------------- |
-| `mail_status`       | how many are kept, how many untriaged, the newest one's date               |
-| `mail_list`         | untriaged messages, newest first, with search, a date and paging           |
-| `mail_get`          | up to 20 messages in full: original sender, text, attachments, how it came |
-| `mail_mark_triaged` | flag messages dealt with, with a note such as where they were filed        |
+| Tool                  | Does                                                                       |
+| --------------------- | -------------------------------------------------------------------------- |
+| `mail_status`         | how many are kept, how many untriaged, the newest one's date               |
+| `mail_list`           | untriaged messages, newest first, with search, a date and paging           |
+| `mail_get`            | up to 20 messages in full: original sender, text, attachments, how it came |
+| `mail_get_attachment` | one kept file: text as text, an image as an image, anything else embedded  |
+| `mail_mark_triaged`   | flag messages dealt with, with a note such as where they were filed        |
 
 **Who it was really from.** A message you forward arrives from you. The worker keeps who sent it
 to the worker (`envelope_from`) and works out who originally sent it (`original_from`): from the
@@ -719,16 +720,17 @@ writes when forwarding inline (`------- Forwarded Message -------` and its `From
 Proton, Gmail and Outlook write it), else the message's own `From`. The subject and date are
 taken the same way.
 
-**What is kept.** The text (the plain part, or the HTML part stripped), attachment names, types
-and sizes but not their contents, the `Authentication-Results` header, and the raw message when
-it is under 1 MB. Text past 400,000 characters is cut, and the row says so. A Message-ID seen
+**What is kept.** The text (the plain part, or the HTML part stripped), every attachment up to
+1.9 MB (one D1 row each; a bigger one is listed by name, type and size only), the
+`Authentication-Results` header, and the raw message when it is under 1 MB. A message attached
+whole is not kept as a file: its text is kept with the mail's. Text past 400,000 characters is cut, and the row says so. A Message-ID seen
 before is not filed twice. The table makes itself on first use; there is no migration to run.
 Nothing is ever deleted: `mail_mark_triaged` only sets a flag and a note.
 
 **Who may send in** is `MAIL_ALLOWED_FROM`, a plain variable set in the dashboard (it is kept out
-of this public repo): comma-separated addresses, or `@domain` for a whole domain, or `*` for
-anyone. With `*` the routed address is the only gate, so make it one nobody would guess (say
-`jobs-k7q2m9@`). Unset, every message bounces. The envelope sender is what is checked, which is your own address when you
+of this public repo). Unset or `*`, anyone may send: the routed address is then the only gate,
+so make it one nobody would guess (say `jobs-k7q2m9@`). To narrow it, list comma-separated
+addresses, or `@domain` for a whole domain, and every other sender bounces. The envelope sender is what is checked, which is your own address when you
 forward by hand or with a filter. A bounce names the sender that was refused, so a forwarding
 service that rewrites the envelope (SRS) shows you what to allow. An envelope sender can be
 forged; the worst that buys anyone is a row in an inbox only you can read, since nothing here acts
@@ -746,8 +748,8 @@ To set it up:
    prints into `workers/mcp-mail/wrangler.json`. Deploying only binds it, which the token's
    Workers permission covers, as it already does for `mcp-fetch`.
 2. **Merge**, so the workflow deploys the worker.
-3. **Set the two variables** on `mcp-mail` in the dashboard: `MAIL_ALLOWED_FROM` (your own
-   sending addresses) and `MAIL_READERS` (the email you sign in to Access with).
+3. **Set `MAIL_READERS`** on `mcp-mail` in the dashboard: the email you sign in to Access with.
+   `MAIL_ALLOWED_FROM` is optional (see above).
 4. **Route an address to it**: the domain -> Email -> Email Routing -> Routing rules -> Create
    address (say `jobs@`) -> action **Send to a Worker** -> `mcp-mail`.
 5. **Put Cloudflare Access in front of the worker**, as under **Auth** below.

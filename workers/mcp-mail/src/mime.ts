@@ -1,7 +1,7 @@
 /**
  * Just enough MIME to file an email: headers (folded, RFC 2047 encoded words), multipart walked
  * to its first text/plain and text/html, base64 and quoted-printable undone in the part's own
- * charset, attachments listed by name, type and size but not kept. A message/rfc822 part (a
+ * charset, attachments kept with their bytes. A message/rfc822 part (a
  * "forward as attachment") is parsed too, since its headers say who the mail was really from.
  *
  * Written here rather than pulled from npm because no worker in this repo has dependencies of
@@ -9,7 +9,13 @@
  */
 import { stripHtml } from "../../../core/web";
 
-export type Attachment = { filename: string; type: string; size: number };
+export type Attachment = {
+  filename: string;
+  type: string;
+  size: number;
+  /** The decoded bytes; absent for an attached message, whose text is kept with the mail's. */
+  data?: Uint8Array;
+};
 export type Parsed = {
   headers: Map<string, string>;
   text: string;
@@ -152,6 +158,7 @@ const walk = (raw: string, out: Walk, depth = 0) => {
       filename: filename || "(unnamed)",
       type: type.value,
       size: bytes.length,
+      data: bytes,
     });
   }
 };
