@@ -12,9 +12,13 @@ export default defineConfig({
         dev: { access: { aud: "test", identity: { email: "me@example.com" } } },
         // mcp-ghost keeps member sessions here; mcp-wp does not use it.
         kvNamespaces: ["SESSIONS"],
+        // mcp-mail's inbox.
+        d1Databases: ["MAIL_DB"],
         bindings: {
           WP_SITES: { "me@example.com": { localhost: { user: "wp-user", pass: "LOCAL_PASS" } } },
           LOCAL_PASS: "secretpass",
+          MAIL_READERS: "me@example.com",
+          MAIL_ALLOWED_FROM: "me@proton.me, @proton.me",
         },
       },
     }),
