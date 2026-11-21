@@ -23,6 +23,7 @@ workers/mcp-apify/           what Apify is costing you, by service and by Actor
 workers/mcp-helios/          Helios Voting: read, verify and run elections. Its own door, not in the toolkit
 workers/mcp-printify/        Printify: search its API, call it, upload artwork. Its own door too
 workers/mcp-nc/              Nextcloud calendars over CalDAV, read and write. Its own door too
+workers/mcp-mail/            a private inbox: mail forwarded to one address, kept in D1. Own door
 scripts/mock-wp.mjs          fake WordPress for local testing
 scripts/mock-ghost.mjs       fake Ghost, including the magic-link sign-in
 scripts/cf-tunnel-relay.mjs  runs on the Mac at the far end of the tunnel
@@ -698,11 +699,63 @@ instead, serve one under `/remote.php/dav/` that accepts the login in `test/glob
 (sabre/dav, the engine inside Nextcloud, does with a dozen lines of PHP) and set
 `NC_TEST_BASE=http://127.0.0.1:<port>`; the handful that need the mock's request log are skipped.
 
+## A private mail inbox
+
+`mcp-mail` keeps the emails sent to one address and lets Claude read them. Cloudflare Email
+Routing hands each message to the worker; the worker files it in D1 if the envelope sender is
+allowed, and bounces it if not.
+
+| Tool                | Does                                                                      |
+| ------------------- | ------------------------------------------------------------------------- |
+| `mail_status`       | how many are kept, how many untriaged, the newest one's date              |
+| `mail_list`         | untriaged messages, newest first, with search, a date and paging          |
+| `mail_get`          | one message in full: original sender, text, attachment names, how it came |
+| `mail_mark_triaged` | flag messages dealt with, with a note such as where they were filed       |
+
+**Who it was really from.** A message you forward arrives from you. The worker keeps who sent it
+to the worker (`envelope_from`) and works out who originally sent it (`original_from`): from the
+headers of a message attached whole (forward as attachment), else from the block a mail client
+writes when forwarding inline (`------- Forwarded Message -------` and its `From:` line, as
+Proton, Gmail and Outlook write it), else the message's own `From`. The subject and date are
+taken the same way.
+
+**What is kept.** The text (the plain part, or the HTML part stripped), attachment names, types
+and sizes but not their contents, the `Authentication-Results` header, and the raw message when
+it is under 1 MB. Text past 400,000 characters is cut, and the row says so. A Message-ID seen
+before is not filed twice. The table makes itself on first use; there is no migration to run.
+Nothing is ever deleted: `mail_mark_triaged` only sets a flag and a note.
+
+**Who may send in** is `MAIL_ALLOWED_FROM`, a plain variable set in the dashboard (it is kept out
+of this public repo): comma-separated addresses, or `@domain` for a whole domain. Unset, every
+message bounces. The envelope sender is what is checked, which is your own address when you
+forward by hand or with a filter. A bounce names the sender that was refused, so a forwarding
+service that rewrites the envelope (SRS) shows you what to allow. An envelope sender can be
+forged; the worst that buys anyone is a row in an inbox only you can read, since nothing here acts
+on what a message says.
+
+**Who may read** is `MAIL_READERS`, also a dashboard variable: comma-separated Cloudflare Access
+emails. Every tool checks the signed-in email against it before touching the database, on top of
+the worker's Access policy, so a policy that is loosened, switched off or bypassed by a service
+binding still shows nothing. Unset, every tool refuses. Like `mcp-nc` it is not bound into the
+toolkit. The worker writes no log lines and has `observability` off.
+
+To set it up:
+
+1. **Create the database**: `npx wrangler d1 create mcp-mail`, and put the `database_id` it
+   prints into `workers/mcp-mail/wrangler.json`. The token in Actions needs D1 Edit as well.
+2. **Merge**, so the workflow deploys the worker.
+3. **Set the two variables** on `mcp-mail` in the dashboard: `MAIL_ALLOWED_FROM` (your own
+   sending addresses) and `MAIL_READERS` (the email you sign in to Access with).
+4. **Route an address to it**: the domain -> Email -> Email Routing -> Routing rules -> Create
+   address (say `jobs@`) -> action **Send to a Worker** -> `mcp-mail`.
+5. **Put Cloudflare Access in front of the worker**, as under **Auth** below.
+6. **Add the connector in Claude** with the worker's URL.
+
 ## Auth (Cloudflare Access)
 
 Access runs before the Worker, so unauthenticated hits cost nothing. `mcp-toolkit` needs it, and so
 do the workers that have a URL of their own rather than a binding in the toolkit (`mcp-helios`,
-`mcp-printify`, `mcp-nc`); repeat steps 2 to 4 for each:
+`mcp-printify`, `mcp-nc`, `mcp-mail`); repeat steps 2 to 4 for each:
 
 1. Zero Trust -> Integrations -> Identity providers -> add **One-time PIN** (email code, no
    account needed).
