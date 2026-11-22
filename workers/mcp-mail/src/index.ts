@@ -18,7 +18,7 @@ import { version } from "../package.json";
 import { mcpWorker, tool, type Ctx } from "../../../core/mcp";
 import { truncate } from "../../../core/web";
 import { base64, bytesFrom, ensure, listed, save } from "./store";
-import { forwardedBlock, unforward } from "./mime";
+import { forwardedBlock, normaliseDate, unforward } from "./mime";
 
 const LIST_COLUMNS = `id, received_at, header_from, original_from, original_date, subject, triaged,
   note, substr(text, 1, 4000) AS head, json_array_length(attachments) AS attachment_count`;
@@ -60,8 +60,8 @@ const derive = (r: Row) => {
       ? { snippet: (fwd ? body.slice(body.indexOf(fwd.from)) : body).slice(0, 400) }
       : {}),
   };
-  if (!fwd) return out;
-  return {
+  if (!fwd) return withDate(out);
+  return withDate({
     ...out,
     ...(filedFromOuter
       ? {
@@ -71,7 +71,26 @@ const derive = (r: Row) => {
         }
       : {}),
     forwarder_note: fwd.note ?? null,
-  };
+  });
+};
+
+/**
+ * `original_date` comes back readable (`4 Nov 2026`), with `original_time` (`21:44`) and
+ * `original_date_iso` (`2026-11-04`) beside it, and the text as the mail client wrote it in
+ * `original_date_text`. Numeric dates are read month- or day-first by their weekday.
+ */
+const withDate = (r: Row): Row => {
+  const text = r["original_date"] == null ? null : String(r["original_date"]);
+  const w = normaliseDate(text);
+  return w
+    ? {
+        ...r,
+        original_date: w.date,
+        original_time: w.time,
+        original_date_iso: w.iso,
+        original_date_text: text,
+      }
+    : r;
 };
 const tidy = (raw: Row) => {
   const r = derive(raw);
