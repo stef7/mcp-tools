@@ -181,31 +181,164 @@ export const parseMail = (raw: Uint8Array): Parsed => {
 export const addressOf = (value = "") =>
   (/<([^>]+)>/.exec(value)?.[1] ?? value).trim().toLowerCase();
 
+/** `Fw: Fwd: FW: subject` -> `subject`. */
+export const unforward = (subject = "") => subject.replace(/^(\s*(fwd?|fw)\s*:\s*)+/i, "");
+
 /**
- * The header block a mail client writes when you forward inline:
+ * What a mail client writes when you forward inline. Either a header block:
  *
- *   ------- Forwarded Message -------          (Proton)
+ *   ------- Forwarded Message -------          (Proton, older)
  *   ---------- Forwarded message ---------     (Gmail)
  *   -----Original Message-----                 (Outlook)
  *   From: Name <a@b>
  *   Date: …
  *   Subject: …
  *
- * Returns what it says about the mail you forwarded, or nothing when there is no such block.
+ * or an attribution line, which is what Proton writes now:
+ *
+ *   -------- Original Message --------
+ *   On Wednesday, 11/04/26 at 21:44 Name <a@b> wrote:
+ *
+ * Returns who the forwarded mail was from, its date and subject where given, and `note`: whatever
+ * the forwarder wrote above it. Nothing when there is no such block.
  */
 export const forwardedBlock = (text: string) => {
   const marker = /^[>\s]*-{2,}\s*(?:Original Message|Forwarded [Mm]essage)\s*-{2,}\s*$/m.exec(text);
   if (!marker) return undefined;
   const found: Record<string, string> = {};
+  const note = text.slice(0, marker.index).trim();
   const lines = text.slice(marker.index + marker[0].length).split("\n");
   for (const line of lines.slice(0, 15)) {
-    const clean = line.replace(/^[>\s]*/, "").replace(/\*/g, "");
-    if (!clean.trim()) {
+    const clean = line
+      .replace(/^[>\s]*/, "")
+      .replace(/\*/g, "")
+      .trim();
+    if (!clean) {
       if (Object.keys(found).length) break; // the blank line that ends the block
       continue;
     }
-    const m = /^(From|Date|Sent|Subject|To):\s*(.*)$/i.exec(clean);
-    if (m) found[m[1]!.toLowerCase() === "sent" ? "date" : m[1]!.toLowerCase()] = m[2]!.trim();
+    const header = /^(From|Date|Sent|Subject|To):\s*(.*)$/i.exec(clean);
+    if (header) {
+      const key = header[1]!.toLowerCase();
+      found[key === "sent" ? "date" : key] = header[2]!.trim();
+      continue;
+    }
+    // "On <date>[,] Name <a@b> wrote:" — the sender is the last "Name <address>" before "wrote:".
+    // The date ends at its time (Proton: "at 21:44 Name <a@b>") or at its last comma (Gmail).
+    const said =
+      /^On\s+(.+?\d{1,2}[:.]\d{2}(?:\s?[ap]\.?m\.?)?),?\s+([^,<]*<[^>]+>)\s*wrote:\s*$/i.exec(
+        clean,
+      ) ?? /^On\s+(.+),\s*([^,<]*<[^>]+>)\s*wrote:\s*$/i.exec(clean);
+    if (said && !found["from"]) {
+      found["from"] = said[2]!.trim();
+      found["date"] ??= said[1]!.trim().replace(/,$/, "");
+      break;
+    }
+    if (!Object.keys(found).length) break; // something else first: not a forward block
   }
-  return found["from"] ? found : undefined;
+  if (!found["from"]) return undefined;
+  return { ...found, ...(note ? { note } : {}) } as {
+    from: string;
+    date?: string;
+    subject?: string;
+    to?: string;
+    note?: string;
+  };
+};
+
+const MONTHS = ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"];
+const SHORT = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+const WEEKDAYS = ["sun", "mon", "tue", "wed", "thu", "fri", "sat"];
+
+export type When = {
+  /** For reading: `4 Nov 2026`. */
+  date: string;
+  /** `21:44`, when the text gave a time. */
+  time: string | null;
+  /** For sorting and filing: `2026-11-04`. */
+  iso: string;
+};
+
+const pad = (n: number) => String(n).padStart(2, "0");
+const when = (y: number, m: number, d: number, time: string | null): When | undefined => {
+  const t = new Date(Date.UTC(y, m - 1, d));
+  if (t.getUTCFullYear() !== y || t.getUTCMonth() !== m - 1 || t.getUTCDate() !== d)
+    return undefined;
+  return { date: `${d} ${SHORT[m - 1]} ${y}`, time, iso: `${y}-${pad(m)}-${pad(d)}` };
+};
+const weekdayOf = (y: number, m: number, d: number) => new Date(Date.UTC(y, m - 1, d)).getUTCDay();
+
+/** `9:44 PM`, `21:44`, `21.44` -> `21:44`. */
+const timeIn = (s: string) => {
+  const m = /\b(\d{1,2})[:.](\d{2})(?::\d{2})?\s*([ap])?\.?m?\.?\b/i.exec(s);
+  if (!m) return null;
+  let h = Number(m[1]);
+  const half = m[3]?.toLowerCase();
+  if (half === "p" && h < 12) h += 12;
+  if (half === "a" && h === 12) h = 0;
+  return h < 24 ? `${pad(h)}:${m[2]}` : null;
+};
+
+/**
+ * A date as a mail client writes it, made unambiguous. Handles a header with a time zone
+ * (`Sat, 21 Nov 2026 12:08:01 +0000`, shown in Melbourne time), month names in either order
+ * (`Nov 4, 2026`, `4 November 2026`), and the numeric form Proton uses on phones
+ * (`Wednesday, 11/04/26 at 21:44`), where the weekday decides between month-first and
+ * day-first; with no weekday to go on, a part over 12 decides, and otherwise month-first.
+ */
+export const normaliseDate = (text: string | null | undefined): When | undefined => {
+  if (!text) return undefined;
+  const s = text.trim();
+
+  // A header date carries its own offset: show it as Melbourne sees it.
+  if (/[+-]\d{4}\b|\bGMT\b|\bUTC\b|Z$/.test(s) && !Number.isNaN(Date.parse(s))) {
+    const parts = new Intl.DateTimeFormat("en-AU", {
+      timeZone: "Australia/Melbourne",
+      year: "numeric",
+      month: "numeric",
+      day: "numeric",
+      hour: "2-digit",
+      minute: "2-digit",
+      hourCycle: "h23",
+    }).formatToParts(new Date(s));
+    const get = (t: string) => Number(parts.find((p) => p.type === t)?.value);
+    return when(get("year"), get("month"), get("day"), `${pad(get("hour"))}:${pad(get("minute"))}`);
+  }
+
+  const time = timeIn(s);
+  const yearOf = (y: string) => (y.length === 2 ? 2000 + Number(y) : Number(y));
+
+  // Month written as a word, either side of the day.
+  const name = /\b(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\.?/i.exec(s);
+  if (name) {
+    const m = MONTHS.indexOf(name[1]!.toLowerCase()) + 1;
+    const rest = s.slice(0, name.index) + " " + s.slice(name.index + name[0].length);
+    const year = /\b(\d{4})\b/.exec(rest)?.[1];
+    const day = /\b(\d{1,2})(?:st|nd|rd|th)?\b(?![:.]\d)/.exec(rest.replace(/\b\d{4}\b/, ""))?.[1];
+    if (year && day) return when(Number(year), m, Number(day), time);
+  }
+
+  // Numeric a/b/y: let the weekday, then a part over 12, decide the order.
+  const num = /\b(\d{1,2})[/.-](\d{1,2})[/.-](\d{2}|\d{4})\b/.exec(s);
+  if (num) {
+    const a = Number(num[1]);
+    const b = Number(num[2]);
+    const y = yearOf(num[3]!);
+    const wd = /\b(sun|mon|tue|wed|thu|fri|sat)[a-z]*/i.exec(s)?.[1]?.toLowerCase();
+    const monthFirst = when(y, a, b, time);
+    const dayFirst = when(y, b, a, time);
+    if (wd) {
+      const want = WEEKDAYS.indexOf(wd);
+      if (monthFirst && weekdayOf(y, a, b) === want) return monthFirst;
+      if (dayFirst && weekdayOf(y, b, a) === want) return dayFirst;
+    }
+    if (a > 12) return dayFirst;
+    return monthFirst ?? dayFirst;
+  }
+
+  if (!Number.isNaN(Date.parse(s))) {
+    const d = new Date(s);
+    return when(d.getFullYear(), d.getMonth() + 1, d.getDate(), time);
+  }
+  return undefined;
 };

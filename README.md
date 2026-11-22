@@ -716,9 +716,14 @@ allowed, and bounces it if not.
 **Who it was really from.** A message you forward arrives from you. The worker keeps who sent it
 to the worker (`envelope_from`) and works out who originally sent it (`original_from`): from the
 headers of a message attached whole (forward as attachment), else from the block a mail client
-writes when forwarding inline (`------- Forwarded Message -------` and its `From:` line, as
-Proton, Gmail and Outlook write it), else the message's own `From`. The subject and date are
-taken the same way.
+writes when forwarding inline: a `From:` header block, or an attribution line such as Proton's
+`On Wednesday, 11/04/26 at 21:44 Name <a@b> wrote:`. Failing both, the message's own `From`. The
+subject (less any `Fw:`) and date are taken the same way, and whatever you wrote above the
+forwarded mail comes back as `forwarder_note`. Dates come back readable (`original_date`
+`4 Nov 2026`, plus `original_time` and `original_date_iso` for sorting), with the client's own
+text in `original_date_text`. Proton on a phone writes `11/04/26`, month first; the weekday it
+gives decides month- or day-first, and a header date is shown in Melbourne time. This is worked out again each time a message is
+read, so mail filed before the parser knew a format reads correctly once it does.
 
 **What is kept.** The text (the plain part, or the HTML part stripped), every attachment up to
 1.9 MB (one D1 row each; a bigger one is listed by name, type and size only), the

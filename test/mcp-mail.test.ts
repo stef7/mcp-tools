@@ -7,7 +7,12 @@
 import { createExecutionContext, env } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
 import Worker from "../workers/mcp-mail/src/index";
-import { decodeWords, forwardedBlock, parseMail } from "../workers/mcp-mail/src/mime";
+import {
+  decodeWords,
+  forwardedBlock,
+  normaliseDate,
+  parseMail,
+} from "../workers/mcp-mail/src/mime";
 
 type Res = { content: { text: string }[]; isError?: boolean };
 type Json = Record<string, any>; // eslint-disable-line @typescript-eslint/no-explicit-any
@@ -98,6 +103,28 @@ describe("parsing", () => {
       "Fwd: Interview – next steps",
     );
     expect(decodeWords("=?iso-8859-1?Q?caf=E9_bar?=")).toBe("café bar");
+  });
+  it("reads Gmail's attribution line too", () => {
+    expect(
+      forwardedBlock(
+        "fyi\n---------- Forwarded message ---------\nOn Wed, 4 Nov 2026 at 21:44, Sam Lee <sam@x.example> wrote:\n> hi",
+      ),
+    ).toMatchObject({ from: "Sam Lee <sam@x.example>", note: "fyi" });
+  });
+  it("makes dates unambiguous and readable", () => {
+    const cases: [string, string, string | null][] = [
+      ["Wednesday, 11/04/26 at 21:44", "4 Nov 2026", "21:44"], // Proton phone: month first
+      ["Thursday, 05/11/26 at 09:00", "5 Nov 2026", "09:00"], // weekday says day first here
+      ["13/11/2026", "13 Nov 2026", null], // a part over 12 decides
+      ["Wednesday, November 4th, 2026 at 9:44 PM", "4 Nov 2026", "21:44"],
+      ["Nov 4, 2026", "4 Nov 2026", null],
+      ["4 November 2026 at 21:44", "4 Nov 2026", "21:44"],
+      ["Sat, 21 Nov 2026 12:08:01 +0000", "21 Nov 2026", "23:08"], // shown in Melbourne time
+    ];
+    for (const [text, date, time] of cases)
+      expect(normaliseDate(text), text).toMatchObject({ date, time });
+    expect(normaliseDate("Wednesday, 11/04/26")?.iso).toBe("2026-11-04");
+    expect(normaliseDate("no date here")).toBeUndefined();
   });
   it("reads an inline forward block", () => {
     expect(forwardedBlock(parseMail(enc.encode(INLINE)).text)).toMatchObject({
@@ -196,6 +223,39 @@ describe("filing and reading", () => {
     } as unknown as ForwardableEmailMessage);
     expect(bounced).toEqual([]);
     expect((await ok("mail_list", { search: "Star sender" }))["messages"]).toHaveLength(1);
+  });
+
+  it("reads Proton's attribution-line forward, keeping the forwarder's note", async () => {
+    const raw = [
+      "From: Stefano Perfili <me@proton.me>",
+      "Subject: Fw: Message replied: Principle Lead Engineer",
+      "Message-ID: <fwd-proton@proton.me>",
+      "Content-Type: text/plain; charset=utf-8",
+      "",
+      "I never got back to her",
+      "",
+      "-------- Original Message --------",
+      "On Wednesday, 11/04/26 at 21:44 Courtney-Amber Paioni <hit-reply@linkedin.com> wrote:",
+      "",
+      "> Hey Stefano, it's absolutely not too late.",
+    ].join("\r\n");
+    await deliver("me@proton.me", raw);
+    const { messages } = await ok("mail_list", { search: "absolutely not too late" });
+    expect(messages[0]).toMatchObject({
+      original_from: "Courtney-Amber Paioni <hit-reply@linkedin.com>",
+      original_date: "4 Nov 2026",
+      original_time: "21:44",
+      original_date_iso: "2026-11-04",
+      original_date_text: "Wednesday, 11/04/26 at 21:44",
+      subject: "Message replied: Principle Lead Engineer",
+      forwarder_note: "I never got back to her",
+    });
+    const [full] = (await ok("mail_get", { ids: [messages[0].id] }))["messages"];
+    expect(full).toMatchObject({
+      original_from: "Courtney-Amber Paioni <hit-reply@linkedin.com>",
+      forwarder_note: "I never got back to her",
+    });
+    expect(full.text).toContain("I never got back to her"); // the note stays in the text too
   });
 
   it("does not file the same Message-ID twice", async () => {

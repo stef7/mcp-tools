@@ -18,9 +18,10 @@ import { version } from "../package.json";
 import { mcpWorker, tool, type Ctx } from "../../../core/mcp";
 import { truncate } from "../../../core/web";
 import { base64, bytesFrom, ensure, listed, save } from "./store";
+import { forwardedBlock, normaliseDate, unforward } from "./mime";
 
-const LIST_COLUMNS = `id, received_at, original_from, original_date, subject, triaged, note,
-  substr(text, 1, 400) AS snippet, json_array_length(attachments) AS attachment_count`;
+const LIST_COLUMNS = `id, received_at, header_from, original_from, original_date, subject, triaged,
+  note, substr(text, 1, 4000) AS head, json_array_length(attachments) AS attachment_count`;
 
 /** Refuses unless the signed-in Access email is one of MAIL_READERS. */
 const reader = async (c: Ctx) => {
@@ -34,15 +35,74 @@ const reader = async (c: Ctx) => {
   return c.env.MAIL_DB;
 };
 
-type Row = Record<string, unknown> & { snippet?: string; text?: string; attachments?: string };
-const tidy = (r: Row) => ({
-  ...r,
-  triaged: !!r["triaged"],
-  ...(r.snippet !== undefined
-    ? { snippet: truncate(String(r.snippet).replace(/\s+/g, " "), 240) }
-    : {}),
-  ...(r.attachments !== undefined ? { attachments: JSON.parse(r.attachments) } : {}),
-});
+type Row = Record<string, unknown> & {
+  snippet?: string;
+  head?: string;
+  text?: string;
+  attachments?: string;
+};
+
+/**
+ * Who a forward was really from, worked out again from the text each time it is read, so a row
+ * filed before the parser learnt a client's format reads correctly too. A sender that came from
+ * an attached message (which differs from the outer From) is kept as filed. `forwarder_note` is
+ * what you wrote above the forwarded mail.
+ */
+const derive = (r: Row) => {
+  const { head, header_from, ...rest } = r;
+  const body = String(r.text ?? head ?? "");
+  const fwd = forwardedBlock(body);
+  const filedFromOuter = !r["original_from"] || r["original_from"] === header_from;
+  const out: Row = {
+    ...rest,
+    ...(r.text !== undefined ? { header_from } : {}),
+    ...(head !== undefined
+      ? { snippet: (fwd ? body.slice(body.indexOf(fwd.from)) : body).slice(0, 400) }
+      : {}),
+  };
+  if (!fwd) return withDate(out);
+  return withDate({
+    ...out,
+    ...(filedFromOuter
+      ? {
+          original_from: fwd.from,
+          original_date: fwd.date ?? r["original_date"],
+          subject: fwd.subject ?? unforward(String(r["subject"] ?? "")),
+        }
+      : {}),
+    forwarder_note: fwd.note ?? null,
+  });
+};
+
+/**
+ * `original_date` comes back readable (`4 Nov 2026`), with `original_time` (`21:44`) and
+ * `original_date_iso` (`2026-11-04`) beside it, and the text as the mail client wrote it in
+ * `original_date_text`. Numeric dates are read month- or day-first by their weekday.
+ */
+const withDate = (r: Row): Row => {
+  const text = r["original_date"] == null ? null : String(r["original_date"]);
+  const w = normaliseDate(text);
+  return w
+    ? {
+        ...r,
+        original_date: w.date,
+        original_time: w.time,
+        original_date_iso: w.iso,
+        original_date_text: text,
+      }
+    : r;
+};
+const tidy = (raw: Row) => {
+  const r = derive(raw);
+  return {
+    ...r,
+    triaged: !!r["triaged"],
+    ...(r.snippet !== undefined
+      ? { snippet: truncate(String(r.snippet).replace(/\s+/g, " "), 240) }
+      : {}),
+    ...(r.attachments !== undefined ? { attachments: JSON.parse(r.attachments) } : {}),
+  };
+};
 
 const Worker = mcpWorker({
   ...cfg,
