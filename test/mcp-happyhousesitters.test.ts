@@ -110,20 +110,28 @@ describe("ranking around a move-out date", () => {
     before_days: 10,
     after_days: 14,
     include_covering: true,
-    min_days_from_target: 0,
+    min_days_from_target: 1,
     include_closed: false,
     today: "2026-11-23",
   };
   const all = [HAMPTON, DUDLEY, FOOTSCRAY, SCORESBY, HIGHETT].map((s) => normalise(s));
 
-  it("puts the nearest start first and keeps sits already running on the date", () => {
+  it("puts sits running on the date first, longest left first, then the smallest gap", () => {
     const out = rankAround(all, opts);
-    expect(out.map((s) => s.id)).toEqual([153754, 153216, 153743, 153757]);
-    const highett = out[0]!;
-    expect(highett).toMatchObject({ start_offset_days: 3, covers_target: false });
-    expect(highett.days_from_target).toBe(11);
-    const scoresby = out.find((s) => s.id === 153757)!;
-    expect(scoresby).toMatchObject({ covers_target: true, days_from_target: 16 });
+    expect(out.map((s) => s.id)).toEqual([153757, 153216, 153754]);
+    expect(out[0]).toMatchObject({ covers_target: true, gap_days: 0, days_from_target: 16 });
+    expect(out[2]).toMatchObject({
+      start_offset_days: 3,
+      covers_target: false,
+      gap_days: 3,
+      days_from_target: 11,
+    });
+  });
+
+  it("drops a sit that ends on the date, unless asked to keep everything", () => {
+    expect(rankAround(all, opts).map((s) => s.id)).not.toContain(153743);
+    const out = rankAround(all, { ...opts, min_days_from_target: 0 });
+    expect(out.map((s) => s.id)).toContain(153743);
   });
 
   it("drops sits that only started near the date when covering ones are not wanted", () => {
@@ -133,7 +141,7 @@ describe("ranking around a move-out date", () => {
 
   it("drops sits giving too few nights from the date on", () => {
     const out = rankAround(all, { ...opts, min_days_from_target: 7 });
-    expect(out.map((s) => s.id)).toEqual([153754, 153757]);
+    expect(out.map((s) => s.id)).toEqual([153757, 153754]);
   });
 
   it("leaves out sits whose applications have closed", () => {
@@ -168,10 +176,10 @@ describe("the around_date tool", () => {
       include_closed: true,
     })) as { content: { text: string }[] };
     const out = JSON.parse(res.content[0]!.text);
-    expect(out.sits.map((s: { id: number }) => s.id)).toEqual([153754, 153216, 153743, 153757]);
+    expect(out.sits.map((s: { id: number }) => s.id)).toEqual([153757, 153216, 153754]);
     // Pages 2 and 3 go out together in one batch; the cut-off is checked between batches.
     expect(asked[0]).toBe("1");
-    expect(out.found).toBe(4);
+    expect(out.found).toBe(3);
   });
 });
 

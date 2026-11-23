@@ -92,13 +92,16 @@ export default mcpWorker({
   tools: {
     around_date: tool({
       description:
-        "Find house sits that start close to a target date, e.g. a move-out date, closest first. " +
+        "Find house sits to move into around a target date, e.g. a move-out date. Ranked by " +
+        "gap_days (nights between the target and the sit's start, 0 if it is already running), " +
+        "then by the most nights it gives from the target on. " +
         "Reads the site's listings sorted by start date and ranks them here, because the site's " +
         "own date filter drops any sit that runs past the end of the range. Each result carries " +
         "start_offset_days (start minus target; negative means it began earlier), covers_target " +
         "(already under way on the target date, so you could move in that day) and " +
-        "days_from_target (nights it gives you from the target date on). Sits whose applications " +
-        "have closed are left out unless include_closed.",
+        "days_from_target (nights it gives you from the target date on). Sits ending on or " +
+        "before the target are left out, and so are sits whose applications have closed " +
+        "unless include_closed.",
       input: {
         type: "object",
         required: ["target_date"],
@@ -121,8 +124,10 @@ export default mcpWorker({
           },
           min_days_from_target: {
             type: "integer",
-            default: 0,
-            description: "Drop sits giving fewer nights than this from the target date on.",
+            default: 1,
+            description:
+              "Drop sits giving fewer nights than this from the target date on. 0 keeps sits " +
+              "that end before it.",
           },
           include_closed: {
             type: "boolean",
@@ -158,7 +163,7 @@ export default mcpWorker({
             before_days: before,
             after_days: after,
             include_covering: a.include_covering ?? true,
-            min_days_from_target: a.min_days_from_target ?? 0,
+            min_days_from_target: a.min_days_from_target ?? 1,
             include_closed: a.include_closed ?? false,
             today: today(),
           },
