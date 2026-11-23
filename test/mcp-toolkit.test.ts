@@ -53,7 +53,6 @@ describe("a bound worker it cannot reach", () => {
       "data_gov_au",
       "fetch",
       "ghost",
-      "happyhousesitters",
       "un_docs",
       "wp",
     ]);
