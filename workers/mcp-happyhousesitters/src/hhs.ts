@@ -347,6 +347,8 @@ export type Ranked = Sit & {
   start_offset_days: number;
   /** The sit is under way on the target date. */
   covers_target: boolean;
+  /** Nights between the target date and the sit's start that need somewhere else (0 if none). */
+  gap_days: number;
   /** Days of the sit left from the target date on (0 if it ends before). */
   days_from_target: number;
 };
@@ -363,8 +365,9 @@ export type AroundOpts = {
 
 /**
  * Keep sits that start within [target - before, target + after], plus (optionally) sits already
- * under way on the target date. Closest start first; on a tie, the one lasting longer past the
- * target.
+ * under way on the target date, that still give `min_days_from_target` nights from the target on.
+ * Ranked for someone who has to be out by the target date: fewest nights to cover between the
+ * target and the sit (none if it is already running), then the most nights it gives after it.
  */
 export const rankAround = (sits: Sit[], o: AroundOpts): Ranked[] =>
   sits
@@ -377,6 +380,7 @@ export const rankAround = (sits: Sit[], o: AroundOpts): Ranked[] =>
         ...s,
         start_offset_days: off,
         covers_target: off <= 0 && left >= 0,
+        gap_days: Math.max(0, off),
         days_from_target: Math.max(0, Math.min(left, left - off)),
       };
     })
@@ -388,8 +392,9 @@ export const rankAround = (sits: Sit[], o: AroundOpts): Ranked[] =>
     )
     .sort(
       (a, b) =>
-        Math.abs(a.start_offset_days) - Math.abs(b.start_offset_days) ||
-        b.days_from_target - a.days_from_target,
+        a.gap_days - b.gap_days ||
+        b.days_from_target - a.days_from_target ||
+        Math.abs(a.start_offset_days) - Math.abs(b.start_offset_days),
     );
 
 export const suburbs = async (term: string) => {
