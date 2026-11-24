@@ -12,8 +12,9 @@ export default defineConfig({
         dev: { access: { aud: "test", identity: { email: "me@example.com" } } },
         // mcp-ghost keeps member sessions here; mcp-wp does not use it.
         kvNamespaces: ["SESSIONS"],
-        // mcp-mail's inbox.
+        // mcp-mail's inbox, and the bucket its raw messages and attachments go to.
         d1Databases: ["MAIL_DB"],
+        r2Buckets: ["MAIL_FILES"],
         bindings: {
           WP_SITES: { "me@example.com": { localhost: { user: "wp-user", pass: "LOCAL_PASS" } } },
           LOCAL_PASS: "secretpass",
