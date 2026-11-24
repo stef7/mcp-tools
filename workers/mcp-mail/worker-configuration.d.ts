@@ -3,6 +3,8 @@
 // Runtime types generated with workerd@1.20260926.1 2026-09-01
 interface __BaseEnv_Env {
 	MAIL_DB: D1Database;
+	MAIL_FILES: R2Bucket;
+	AI: Ai;
 }
 declare namespace Cloudflare {
 	interface GlobalProps {

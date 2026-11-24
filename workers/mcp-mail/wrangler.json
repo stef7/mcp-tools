@@ -12,5 +12,7 @@
       "database_name": "mcp-mail",
       "database_id": "11b99dd0-c611-40e1-97a0-aba2263cee61"
     }
-  ]
+  ],
+  "r2_buckets": [{ "binding": "MAIL_FILES", "bucket_name": "mcp-mail-files" }],
+  "ai": { "binding": "AI" }
 }

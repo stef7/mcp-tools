@@ -1,12 +1,16 @@
 /**
- * The inbox: one D1 table. The table makes itself the first time it is touched, so there is no
- * migration step to forget. Nothing here deletes a row.
+ * The inbox: D1 for the messages, R2 for the bytes. The tables make themselves the first time they
+ * are touched, and new columns are added the same way, so there is no migration step to forget.
+ * Nothing here deletes a row or an object.
  */
 import { addressOf, forwardedBlock, parseMail, unforward } from "./mime";
 
-/** D1 holds up to 2 MB a row; the raw message is kept only when it fits well inside that. */
+/**
+ * Limits for D1 alone, used only when no R2 bucket is bound (as in older deployments). D1 holds up
+ * to 2 MB a row; the raw message is kept only when it fits well inside that.
+ */
 export const RAW_LIMIT = 1_000_000;
-/** An attachment is kept when it fits in one D1 row (2 MB); a bigger one is listed, not kept. */
+/** Without R2, an attachment is kept when it fits in one D1 row (2 MB); a bigger one is listed. */
 export const ATTACHMENT_LIMIT = 1_900_000;
 /** Text beyond this is cut, and the row says so. */
 export const TEXT_LIMIT = 400_000;
@@ -46,17 +50,42 @@ const SCHEMA = [
   "CREATE INDEX IF NOT EXISTS attachment_mail ON attachment (mail_id)",
 ];
 
+/** Columns added after the tables first shipped. Each runs once; "duplicate column" means done. */
+const COLUMNS = [
+  "ALTER TABLE mail ADD COLUMN raw_key TEXT",
+  "ALTER TABLE attachment ADD COLUMN r2_key TEXT",
+];
+
 let ready: Promise<unknown> | undefined;
 export const ensure = (db: D1Database) =>
-  (ready ??= db.batch(SCHEMA.map((s) => db.prepare(s))).catch((e) => {
+  (ready ??= (async () => {
+    await db.batch(SCHEMA.map((s) => db.prepare(s)));
+    for (const sql of COLUMNS)
+      await db
+        .prepare(sql)
+        .run()
+        .catch((e) => {
+          if (!/duplicate column/i.test(String(e))) throw e;
+        });
+  })().catch((e) => {
     ready = undefined; // try again next time rather than remembering a failure
     throw e;
   }));
 
+/** A filename made safe for an R2 key. The real name stays in D1. */
+const keyName = (name: string) => name.replace(/[^\w.\- ]+/g, "_").slice(0, 120) || "file";
+
 export type Incoming = { from: string; to: string; raw: Uint8Array; receivedAt?: Date };
 
-/** Files one message. Returns its id, or the id it already had if this Message-ID was seen. */
-export const save = async (db: D1Database, m: Incoming) => {
+/**
+ * Files one message. Returns its id, or the id it already had if this Message-ID was seen.
+ *
+ * With a bucket, the raw message and every attachment go to R2 first, under fresh random keys, and
+ * only then is the row written. If R2 fails nothing is in D1, so the bounce and the sender's retry
+ * start clean; the other order would leave a row whose retry `INSERT OR IGNORE` skips, losing the
+ * files for good. An object left behind by a failed insert is never read and costs nothing much.
+ */
+export const save = async (db: D1Database, files: R2Bucket | undefined, m: Incoming) => {
   await ensure(db);
   const p = parseMail(m.raw);
   const fwd = forwardedBlock(p.text);
@@ -71,12 +100,23 @@ export const save = async (db: D1Database, m: Incoming) => {
   const text = p.text.length > TEXT_LIMIT ? p.text.slice(0, TEXT_LIMIT) : p.text;
   const messageId = p.headers.get("message-id") ?? null;
 
+  const stem = `${new Date().toISOString().slice(0, 10)}/${crypto.randomUUID()}`;
+  const rawKey = files ? `${stem}/message.eml` : null;
+  const kept = p.attachments
+    .filter((a) => a.data)
+    .map((a, i) => ({ ...a, key: files ? `${stem}/${i}-${keyName(a.filename)}` : null }));
+  if (files)
+    await Promise.all([
+      files.put(rawKey!, m.raw, { httpMetadata: { contentType: "message/rfc822" } }),
+      ...kept.map((a) => files.put(a.key!, a.data!, { httpMetadata: { contentType: a.type } })),
+    ]);
+
   const inserted = await db
     .prepare(
       `INSERT OR IGNORE INTO mail (received_at, envelope_from, envelope_to, header_from,
         original_from, original_date, subject, date_header, message_id, text, text_truncated,
-        attachments, auth, raw, raw_size)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        attachments, auth, raw, raw_size, raw_key)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     )
     .bind(
       (m.receivedAt ?? new Date()).toISOString(),
@@ -94,21 +134,29 @@ export const save = async (db: D1Database, m: Incoming) => {
       p.headers.get("arc-authentication-results") ??
         p.headers.get("authentication-results") ??
         null,
-      m.raw.length <= RAW_LIMIT ? m.raw : null,
+      files || m.raw.length > RAW_LIMIT ? null : m.raw,
       m.raw.length,
+      rawKey,
     )
     .run();
   if (inserted.meta.changes) {
     const id = inserted.meta.last_row_id;
-    const files = p.attachments.filter((a) => a.data);
-    if (files.length)
+    if (kept.length)
       await db.batch(
-        files.map((a) =>
+        kept.map((a) =>
           db
             .prepare(
-              "INSERT INTO attachment (mail_id, filename, type, size, data) VALUES (?, ?, ?, ?, ?)",
+              `INSERT INTO attachment (mail_id, filename, type, size, data, r2_key)
+               VALUES (?, ?, ?, ?, ?, ?)`,
             )
-            .bind(id, a.filename, a.type, a.size, a.size <= ATTACHMENT_LIMIT ? a.data! : null),
+            .bind(
+              id,
+              a.filename,
+              a.type,
+              a.size,
+              a.key || a.size > ATTACHMENT_LIMIT ? null : a.data!,
+              a.key,
+            ),
         ),
       );
     return { id, duplicate: false };

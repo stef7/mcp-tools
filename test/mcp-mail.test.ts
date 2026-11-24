@@ -2,9 +2,11 @@
  * mcp-mail against a local D1. Pinned down: a forwarded mail is filed under who really sent it
  * (inline forward, forward as attachment, or sent straight); an unlisted sender bounces and is
  * not kept; a reader not in MAIL_READERS reads nothing, and with it unset nobody does; triaging
- * only flags. (Who is signed in when no email is passed is miniflare's stand-in for Access.)
+ * only flags; raw messages and attachments of any size go to R2, and a document is read back as
+ * Markdown, converted once and then cached. (Who is signed in when no email is passed is
+ * miniflare's stand-in for Access. Workers AI is faked: it only exists once deployed.)
  */
-import { createExecutionContext, env } from "cloudflare:test";
+import { createExecutionContext, env, waitOnExecutionContext } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
 import Worker from "../workers/mcp-mail/src/index";
 import {
@@ -178,12 +180,88 @@ describe("filing and reading", () => {
     expect(mail.files).toEqual([
       { id: expect.any(Number), filename: "pd.pdf", type: "application/pdf", size: 9, kept: true },
     ]);
-    const r = (await call("mail_get_attachment", { id: mail.files[0].id })) as Json;
+    const r = (await call("mail_get_attachment", { id: mail.files[0].id, as: "file" })) as Json;
     expect(r["isError"]).toBeFalsy();
     expect(r["content"][1]).toMatchObject({
       type: "resource",
       resource: { mimeType: "application/pdf", blob: "JVBERi0xLjQK" },
     });
+  });
+
+  it("keeps a big attachment in R2 and reads a document back as Markdown, converting once", async () => {
+    const big = new Uint8Array(2_500_000).fill(65); // over the old 1.9 MB D1 limit
+    const raw = [
+      "From: me@proton.me",
+      "Message-ID: <fwd-big@proton.me>",
+      "Subject: Big JD",
+      'Content-Type: multipart/mixed; boundary="d"',
+      "",
+      "--d",
+      "Content-Type: text/plain",
+      "",
+      "JD attached, it is a big one.",
+      "--d",
+      "Content-Type: application/octet-stream",
+      'Content-Disposition: attachment; filename="jd.docx"',
+      "Content-Transfer-Encoding: base64",
+      "",
+      "BODY",
+      "--d--",
+    ].join("\r\n");
+    // Base64 in chunks whose size divides by 3, so the pieces join into one valid body.
+    let b64 = "";
+    for (let i = 0; i < big.length; i += 0x6000)
+      b64 += btoa(String.fromCharCode(...big.subarray(i, i + 0x6000)));
+    const body = b64.replace(/(.{76})/g, "$1\r\n");
+    expect(await deliver("me@proton.me", raw.replace("BODY", body))).toEqual([]);
+
+    const { messages } = await ok("mail_list", { search: "big one" });
+    const [mail] = (await ok("mail_get", { ids: [messages[0].id] }))["messages"];
+    expect(mail.raw_kept).toBe(true);
+    expect(mail.files).toEqual([
+      expect.objectContaining({ filename: "jd.docx", size: big.length, kept: true }),
+    ]);
+    const stored = await env.MAIL_FILES.list();
+    expect(stored.objects.some((o) => o.key.endsWith("-jd.docx") && o.size === big.length)).toBe(
+      true,
+    );
+
+    const asked: { name: string; type: string; size: number }[] = [];
+    const ai = {
+      toMarkdown: async (doc: { name: string; blob: Blob }) => {
+        asked.push({ name: doc.name, type: doc.blob.type, size: doc.blob.size });
+        return {
+          id: "1",
+          name: doc.name,
+          mimeType: doc.blob.type,
+          format: "markdown",
+          tokens: 9,
+          data: "# Senior AWS Software Engineer\n\n" + "x".repeat(150_000),
+        };
+      },
+    };
+    const read = async (args: Json) => {
+      const ctx = createExecutionContext();
+      const w = new Worker(ctx, { ...env, AI: ai as unknown as Ai });
+      const r = (await w.call("mail_get_attachment", args, { email: ME })) as Res;
+      await waitOnExecutionContext(ctx);
+      expect(r.isError, r.content[0]?.text).toBeFalsy();
+      return r.content[0]!.text;
+    };
+    const first = await read({ id: mail.files[0].id });
+    expect(first).toContain("# Senior AWS Software Engineer");
+    expect(first).toMatch(/more: pass offset 100000/);
+    expect(asked).toEqual([
+      {
+        name: "jd.docx",
+        type: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        size: big.length,
+      },
+    ]);
+    const second = await read({ id: mail.files[0].id, offset: 100_000 });
+    expect(second).toMatch(/characters 100000–\d+ of \d+:/);
+    expect(second).not.toMatch(/more: pass offset/);
+    expect(asked).toHaveLength(1); // the second page came from the cache
   });
 
   it("opens a text attachment as text", async () => {
