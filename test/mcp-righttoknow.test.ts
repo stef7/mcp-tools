@@ -842,8 +842,8 @@ describe("repeated paragraphs", () => {
     // Short lines stay ("Dear Mr Amir", and "SCOPE:", which labels what the marker replaces);
     // only one caught between two repeats would go with them.
     expect(reply.text).toBe(
-      "Dear Mr Amir\n\nSCOPE:\n\n[… 2 paragraphs (270 characters) omitted, repeated from " +
-        "outgoing-1 of 2026-08-25 …]\n\nThe estimated charge is $880.60.",
+      "Dear Mr Amir\n\nSCOPE:\n\n[2 paras (270 chars) repeated from outgoing-1 (2026-08-25)]" +
+        "\n\nThe estimated charge is $880.60.",
     );
     expect(reply.omitted).toEqual([
       { from: "outgoing-1", date: "2026-08-25", paragraphs: 2, chars: 270 },
@@ -859,7 +859,7 @@ describe("repeated paragraphs", () => {
       ),
     ]);
     expect(out.get("incoming-2")!.text).toMatch(
-      /^\[… 3 paragraphs .* outgoing-1 of 2026-08-25 …\]\n\nNew text\.$/,
+      /^\[3 paras \(\d+ chars\) repeated from outgoing-1 \(2026-08-25\)\]\n\nNew text\.$/,
     );
   });
 });

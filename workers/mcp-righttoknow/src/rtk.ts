@@ -368,10 +368,8 @@ export const withoutRepeats = (msgs: Message[]) => {
         paragraphs++;
         chars += t.length;
       }
-      const sources = run.map((r) => `${r.from} of ${r.date}`).join(", ");
-      text +=
-        `[… ${paragraphs} paragraph${paragraphs === 1 ? "" : "s"} ` +
-        `(${chars.toLocaleString("en-AU")} characters) omitted, repeated from ${sources} …]\n\n`;
+      const sources = run.map((r) => `${r.from} (${r.date})`).join(", ");
+      text += `[${paragraphs} para${paragraphs === 1 ? "" : "s"} (${chars} chars) repeated from ${sources}]\n\n`;
       for (const r of run) {
         const o = omitted.find((x) => x.from === r.from);
         if (o) ((o.paragraphs += r.paragraphs), (o.chars += r.chars));
