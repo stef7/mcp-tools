@@ -42,6 +42,7 @@ import {
 
 /** What mcp-fetch offers over RPC: its `egress` routes and its own tools. */
 type FetchRpc = {
+  cachedAt(url: string): Promise<number | null>;
   egress(url: string, opts?: { headers?: Record<string, string> }): Promise<Response>;
   call(name: string, args: object, req?: object): Promise<Result>;
 };
@@ -89,6 +90,8 @@ async function cachedOnly(env: Env, url: string): Promise<string | undefined> {
 
 /** Per message, by default. Most letters fit; a council's longest decision letters do not. */
 const MAX_CHARS = 15_000;
+/** righttoknow_request's default: enough to see what each message says, not the whole thread. */
+const PREVIEW_CHARS = 1_000;
 
 const cut = (text: string, max: number) =>
   max > 0 && text.length > max
@@ -281,10 +284,10 @@ export default mcpWorker({
     request: tool({
       description:
         "One Right to Know request without loading a challenged page: title, authority, " +
-        "requester, status, and its dated event history. Each message comes in full if " +
-        "righttoknow_full_request has loaded the page before (that copy is cached), with its " +
-        "attachments; otherwise as a ~150-character snippet, marked with `more` where " +
-        "righttoknow_full_request would give the rest. Accepts a slug " +
+        "requester, status, and its dated event history. If righttoknow_full_request has " +
+        `loaded the page before, each message shows its first ${PREVIEW_CHARS} characters from ` +
+        "that cached copy, with attachments; pass `ids` for whole messages. Messages the cache " +
+        "lacks come as the site's ~150-character snippet, marked `more`. Accepts a slug " +
         "('internal_anu_correspondence_conc'), a numeric request id, or a request URL.",
       input: {
         type: "object",
@@ -292,12 +295,17 @@ export default mcpWorker({
         properties: {
           request: { type: "string", description: "Slug, numeric id or URL." },
           ids: IDS,
-          max_chars: maxCharsInput(
-            "Asking again for its id with max_chars 0 reads the same cached copy: it costs nothing.",
-          ),
+          max_chars: {
+            type: "integer",
+            description:
+              `Cut each cached message to this many characters; 0 for no limit. Default ` +
+              `${PREVIEW_CHARS}, or ${MAX_CHARS} when \`ids\` is given. A cut message is ` +
+              "marked truncated, with its full length; asking again costs the site nothing.",
+          },
         },
       },
-      async run({ request, ids, max_chars = MAX_CHARS }, { env }) {
+      async run({ request, ids, max_chars }, { env }) {
+        const limit = max_chars ?? (ids?.length ? MAX_CHARS : PREVIEW_CHARS);
         const meta = await requestMeta(env, request);
         const page = `${ORIGIN}/request/${meta.url_title}`;
         const [events, html] = await Promise.all([
@@ -305,6 +313,13 @@ export default mcpWorker({
           // The folded page only: quoted earlier emails are noise, and folded is the default.
           cachedOnly(env, page),
         ]);
+        // A missing or older mcp-fetch just means no date, not a failed request.
+        const at = html
+          ? await Promise.resolve()
+              .then(() => rpc(env).cachedAt(page))
+              .catch(() => null)
+          : null;
+        const when = at ? `cached ${new Date(at).toISOString().slice(0, 10)}` : "cached";
         const snippets = new Map(events.map((e) => [e.id, e.snippet]));
         const bodies = new Map(html ? parseCorrespondence(html, page).map((m) => [m.id, m]) : []);
         let missing = 0;
@@ -325,7 +340,7 @@ export default mcpWorker({
               return {
                 ...base,
                 author: m.author,
-                ...cut(m.text, max_chars),
+                ...cut(m.text, limit),
                 ...(m.attachments.length ? { attachments: m.attachments } : {}),
               };
             const snippet = snippets.get(e.id);
@@ -341,10 +356,12 @@ export default mcpWorker({
           ...summary(meta),
           full_text: !html
             ? "No cached copy of the page: snippets only. righttoknow_full_request loads it."
-            : missing
-              ? `From the cached copy of the page; ${missing} newer message(s) are snippets, ` +
-                "which righttoknow_full_request would load."
-              : "Every message, from the cached copy of the page.",
+            : `Message text from the copy of the page ${when}` +
+              (missing
+                ? `; ${missing} newer message(s) are snippets, which righttoknow_full_request ` +
+                  "would load."
+                : ".") +
+              " The site may since have hidden or redacted a message; this copy would not show it.",
           events: out,
         };
       },

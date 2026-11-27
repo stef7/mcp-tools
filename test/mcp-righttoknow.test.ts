@@ -36,6 +36,7 @@ const fakeFetch = (pages: (args: Record<string, unknown>) => string) => {
       calls.push({ name, ...args });
       return { content: [{ type: "text", text: pages(args) }] };
     },
+    cachedAt: async () => Date.parse("2026-11-20T03:00:00Z"),
     egress: async () => new Response("", { status: 500 }),
   };
   return { calls, env: { ...env, FETCH } as unknown as Env };
@@ -447,7 +448,20 @@ describe("righttoknow_request", () => {
       attachments: [{ name: "FOIs 202600332 Consultation.pdf" }],
     });
     expect(response.more).toBeUndefined();
-    expect(out.full_text).toMatch(/1 newer message/);
+    expect(out.full_text).toMatch(/cached 2026-11-20; 1 newer message/);
+    expect(out.full_text).toMatch(/hidden or redacted/);
+  });
+
+  it("previews 1,000 characters a message by default, 15,000 for messages picked by id", async () => {
+    stubJson();
+    const long = "y".repeat(20_000);
+    const page = PAGE.replace("This is a notice under section 24AB of the FOI Act.", long);
+    const { env: e } = fakeFetch(() => page);
+    const all = json(await run("righttoknow_request", { request: REQ }, e));
+    expect(all.events[1].text).toHaveLength(1_000 + " […]".length);
+    const one = json(await run("righttoknow_request", { request: REQ, ids: ["50918"] }, e));
+    expect(one.events[0].text).toHaveLength(15_000 + " […]".length);
+    expect(one.events[0].length).toBeGreaterThan(20_000);
   });
 
   it("picks messages by id, with or without their prefix", async () => {

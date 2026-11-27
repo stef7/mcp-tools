@@ -539,4 +539,17 @@ export default class extends Tools {
     if (skipped.length) out.headers.set("x-egress-skipped", skipped.join("; "));
     return out;
   }
+
+  /**
+   * When `url` was last downloaded, in epoch milliseconds: null if nothing is cached, 0 if it was
+   * cached before downloads were dated. Never goes to the network.
+   */
+  async cachedAt(url: string): Promise<number | null> {
+    const page = url.split("#")[0] ?? url;
+    const at = await this.env.CACHE.get(`at:${page}`);
+    if (at) return Number(at);
+    // Listing reads the key's name only, never the cached bytes.
+    const { keys } = await this.env.CACHE.list({ prefix: `raw:${page}`, limit: 1 });
+    return keys[0]?.name === `raw:${page}` ? 0 : null;
+  }
 }
