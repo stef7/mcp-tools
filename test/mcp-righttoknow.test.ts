@@ -428,6 +428,47 @@ describe("righttoknow_request", () => {
     expect(out.events[1].snippet).toMatch(/^Dear S P, I refer to your two requests/);
   });
 
+  it("gives messages in full from a kept page, snippets where it has none", async () => {
+    stubJson();
+    // PAGE holds outgoing-32695 and incoming-50918; META's events are outgoing-32450 and
+    // incoming-50918, so one comes from the kept page and one stays a snippet.
+    const { calls, env: e } = fakeFetch(() => PAGE);
+    const out = json(await run("righttoknow_request", { request: REQ, max_chars: 20 }, e));
+    expect(calls).toEqual([{ name: "fetch_url", url: REQ, format: "raw", cache_only: true }]);
+    const [sent, response] = out.events;
+    expect(sent).toMatchObject({ message: "outgoing-32450", more: "righttoknow_full_request" });
+    expect(sent.snippet).toMatch(/^Under the Freedom of Information Act/);
+    expect(response).toMatchObject({
+      message: "incoming-50918",
+      author: "Freedom of Information, Australian National University",
+      text: "Dear S P,\n\nThis is a […]",
+      truncated: true,
+      attachments: [{ name: "FOIs 202600332 Consultation.pdf" }],
+    });
+    expect(response.more).toBeUndefined();
+    expect(out.full_text).toMatch(/1 newer message/);
+  });
+
+  it("says snippets only when nothing is kept, without fetching the page", async () => {
+    stubJson();
+    const calls: Record<string, unknown>[] = [];
+    const FETCH = {
+      call: async (name: string, args: Record<string, unknown>) => {
+        calls.push({ name, ...args });
+        return { content: [{ type: "text", text: `Not kept: ${args.url}` }], isError: true };
+      },
+    };
+    const out = json(
+      await run("righttoknow_request", { request: REQ }, { ...env, FETCH } as unknown as Env),
+    );
+    expect(calls.map((c) => [c.url, c.cache_only])).toEqual([
+      [REQ, true],
+      [`${REQ}?unfold=1`, true],
+    ]);
+    expect(out.full_text).toMatch(/^No kept copy/);
+    expect(out.events[1].more).toBe("righttoknow_full_request");
+  });
+
   it("says when the site has no such request", async () => {
     vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response("", { status: 404 }));
     const r = await run("righttoknow_request", { request: "no_such_request" });

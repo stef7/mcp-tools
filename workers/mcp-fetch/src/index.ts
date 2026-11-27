@@ -318,6 +318,12 @@ const Tools = mcpWorker({
               "Re-download if the kept copy is older than this many seconds (604800 is a week). " +
               "Default: the kept copy is used however old it is.",
           },
+          cache_only: {
+            type: "boolean",
+            description:
+              "Never go to the network: answer from the kept copy, or say there is none. For " +
+              "checking what is already kept without fetching it. Default false.",
+          },
           select: {
             type: "string",
             description:
@@ -340,18 +346,21 @@ const Tools = mcpWorker({
           },
         },
       },
-      async run({ url, format, force, max_age, via, select }, c) {
+      async run({ url, format, force, max_age, cache_only, via, select }, c) {
         const env = await schema(c);
         const fmt: Format = FORMATS.includes(format as Format) ? (format as Format) : "auto";
         // The server never sees a #fragment, so every fragment of a page shares one download.
         const page = url.split("#")[0] ?? url;
+        // Answered before anything is stored: a miss here is a question, not a failed fetch.
+        if (cache_only && !(await env.CACHE.get(`raw:${page}`, "arrayBuffer")))
+          return { content: [{ type: "text", text: `Not kept: ${page}` }], isError: true };
         try {
           const { bytes, ct, cached, route } = await bytesFor(
             env,
             page,
-            force === true,
+            force === true && !cache_only,
             via,
-            max_age ?? undefined,
+            cache_only ? undefined : (max_age ?? undefined),
           );
           const kind = kindOf(page, ct ?? null);
           const cut = await narrow(bytes, url, kind, select);

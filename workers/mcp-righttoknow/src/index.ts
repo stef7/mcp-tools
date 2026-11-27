@@ -2,7 +2,8 @@
  * mcp-righttoknow — FOI requests on Right to Know (righttoknow.org.au), read without a login.
  *
  *   righttoknow_search            the site's search, operators included: newest matching events
- *   righttoknow_request           one request: details, event history, a snippet of each message
+ *   righttoknow_request           one request: details, history, each message from a kept page
+ *                                 if there is one, else a snippet
  *   righttoknow_feed              the latest events on a search, agency, requester or request
  *   righttoknow_authority         an agency's record and request counts, optionally its events
  *   righttoknow_user              a requester's profile and latest events
@@ -75,6 +76,21 @@ async function kept(
   if (out.isError) throw new Error(`Could not load ${url}: ${text}`);
   return text;
 }
+
+/** A page mcp-fetch already keeps, or undefined. Never goes to the network. */
+async function keptOnly(env: Env, url: string): Promise<string | undefined> {
+  try {
+    const out = await rpc(env).call("fetch_url", { url, format: "raw", cache_only: true });
+    return out.isError ? undefined : out.content[0]?.text;
+  } catch {
+    return undefined; // mcp-fetch unreachable: snippets only.
+  }
+}
+
+const cut = (text: string, max: number) =>
+  max > 0 && text.length > max
+    ? { text: text.slice(0, max) + " […]", truncated: true as const }
+    : { text };
 
 type RequestJson = {
   id: number;
@@ -239,29 +255,69 @@ export default mcpWorker({
     request: tool({
       description:
         "One Right to Know request without loading a challenged page: title, authority, " +
-        "requester, status, and its dated event history with a ~150-character snippet of each " +
-        "message. Accepts a slug ('internal_anu_correspondence_conc'), a numeric request id, or " +
-        "a request URL. For the full text of messages and their attachments, " +
-        "righttoknow_full_request.",
+        "requester, status, and its dated event history. Each message comes in full if " +
+        "righttoknow_full_request has loaded the page before (that copy is kept), with its " +
+        "attachments; otherwise as a ~150-character snippet, marked with `more` where " +
+        "righttoknow_full_request would give the rest. Accepts a slug " +
+        "('internal_anu_correspondence_conc'), a numeric request id, or a request URL.",
       input: {
         type: "object",
         required: ["request"],
-        properties: { request: { type: "string", description: "Slug, numeric id or URL." } },
+        properties: {
+          request: { type: "string", description: "Slug, numeric id or URL." },
+          max_chars: {
+            type: "integer",
+            description:
+              "Cut each kept message to this many characters; 0 for no limit. Default 4000. " +
+              "Cut messages are marked truncated; asking again with 0 costs nothing.",
+          },
+        },
       },
-      async run({ request }, { env }) {
+      async run({ request, max_chars = 4000 }, { env }) {
         const meta = await requestMeta(env, request);
-        const events = await getJson<RawEvent[]>(env, FEEDS.request(meta.url_title));
+        const page = `${ORIGIN}/request/${meta.url_title}`;
+        const [events, html] = await Promise.all([
+          getJson<RawEvent[]>(env, FEEDS.request(meta.url_title)),
+          keptOnly(env, page).then((h) => h ?? keptOnly(env, `${page}?unfold=1`)),
+        ]);
         const snippets = new Map(events.map((e) => [e.id, e.snippet]));
-        return {
-          ...summary(meta),
-          events: (meta.info_request_events ?? []).map((e) => ({
+        const bodies = new Map(html ? parseCorrespondence(html, page).map((m) => [m.id, m]) : []);
+        let missing = 0;
+        const out = (meta.info_request_events ?? []).map((e) => {
+          const message = anchorOf(e);
+          const base = {
             id: e.id,
             type: e.event_type,
             at: e.created_at,
             status: e.described_state ?? e.calculated_state ?? undefined,
-            message: anchorOf(e),
-            snippet: snippets.get(e.id) ? cleanSnippet(snippets.get(e.id)) : undefined,
-          })),
+            message,
+          };
+          const m = message ? bodies.get(message) : undefined;
+          if (m)
+            return {
+              ...base,
+              author: m.author,
+              ...cut(m.text, max_chars),
+              ...(m.attachments.length ? { attachments: m.attachments } : {}),
+            };
+          const snippet = snippets.get(e.id);
+          const isMessage = !!(e.incoming_message_id || e.outgoing_message_id);
+          if (isMessage) missing++;
+          return {
+            ...base,
+            snippet: snippet ? cleanSnippet(snippet) : undefined,
+            ...(isMessage ? { more: "righttoknow_full_request" } : {}),
+          };
+        });
+        return {
+          ...summary(meta),
+          full_text: !html
+            ? "No kept copy of the page: snippets only. righttoknow_full_request loads it."
+            : missing
+              ? `From the kept copy of the page; ${missing} newer message(s) are snippets, ` +
+                "which righttoknow_full_request would load."
+              : "Every message, from the kept copy of the page.",
+          events: out,
         };
       },
     }),
