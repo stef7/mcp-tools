@@ -36,6 +36,7 @@ import {
   slugOf,
   tagCounts,
   toEntry,
+  withoutRepeats,
   type Authority,
   type RawEvent,
 } from "./rtk";
@@ -287,7 +288,8 @@ export default mcpWorker({
         "requester, status, and its dated event history. If righttoknow_full_request has " +
         `loaded the page before, each message shows its first ${PREVIEW_CHARS} characters from ` +
         "that cached copy, with attachments; pass `ids` for whole messages. Messages the cache " +
-        "lacks come as the site's ~150-character snippet, marked `more`. Accepts a slug " +
+        "lacks come as the site's ~150-character snippet, marked `more`. Paragraphs repeating " +
+        "an earlier message are replaced by a marker naming it (see keep_repeats). Accepts a slug " +
         "('internal_anu_correspondence_conc'), a numeric request id, or a request URL.",
       input: {
         type: "object",
@@ -295,6 +297,13 @@ export default mcpWorker({
         properties: {
           request: { type: "string", description: "Slug, numeric id or URL." },
           ids: IDS,
+          keep_repeats: {
+            type: "boolean",
+            description:
+              "Keep paragraphs that repeat an earlier message word for word (agencies restate " +
+              "the whole request atop most letters). Default false: each is replaced by a " +
+              "marker naming the message it repeats, and listed in `omitted`.",
+          },
           max_chars: {
             type: "integer",
             description:
@@ -304,7 +313,7 @@ export default mcpWorker({
           },
         },
       },
-      async run({ request, ids, max_chars }, { env }) {
+      async run({ request, ids, keep_repeats = false, max_chars }, { env }) {
         const limit = max_chars ?? (ids?.length ? MAX_CHARS : PREVIEW_CHARS);
         const meta = await requestMeta(env, request);
         const page = `${ORIGIN}/request/${meta.url_title}`;
@@ -321,7 +330,10 @@ export default mcpWorker({
           : null;
         const when = at ? `cached ${new Date(at).toISOString().slice(0, 10)}` : "cached";
         const snippets = new Map(events.map((e) => [e.id, e.snippet]));
-        const bodies = new Map(html ? parseCorrespondence(html, page).map((m) => [m.id, m]) : []);
+        const parsed = html ? parseCorrespondence(html, page) : [];
+        const bodies = new Map(parsed.map((m) => [m.id, m]));
+        // Repeats are judged against every earlier message, whichever `ids` are asked for.
+        const fresh = keep_repeats ? undefined : withoutRepeats(parsed);
         let missing = 0;
         const wanted = picker(ids);
         const out = (meta.info_request_events ?? [])
@@ -336,13 +348,20 @@ export default mcpWorker({
               message,
             };
             const m = message ? bodies.get(message) : undefined;
-            if (m)
+            if (m) {
+              const f = fresh?.get(m.id);
+              const shown = f?.text ?? m.text;
+              const { text, truncated } = cut(shown, limit);
               return {
                 ...base,
                 author: m.author,
-                ...cut(m.text, limit),
+                text,
+                ...(truncated || f?.omitted.length ? { length: m.text.length } : {}),
+                ...(truncated ? { truncated } : {}),
+                ...(f?.omitted.length ? { omitted: f.omitted } : {}),
                 ...(m.attachments.length ? { attachments: m.attachments } : {}),
               };
+            }
             const snippet = snippets.get(e.id);
             const isMessage = !!(e.incoming_message_id || e.outgoing_message_id);
             if (isMessage) missing++;

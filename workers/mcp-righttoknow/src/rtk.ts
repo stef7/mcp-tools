@@ -294,3 +294,94 @@ export const tagCounts = (all: Authority[]) => {
   for (const a of all) for (const t of Object.keys(a.tags)) n.set(t, (n.get(t) ?? 0) + 1);
   return Object.fromEntries([...n].sort((a, b) => b[1] - a[1]));
 };
+
+// ---------------------------------------------------------------- repeats
+
+/** Where omitted text first appeared: a message on the same request. */
+export type Omission = { from: string; date: string; paragraphs: number; chars: number };
+
+/** Paragraphs, and list items within them, with the separators kept so the text can be rebuilt. */
+const UNIT_SPLIT = /(\n{2,}|\n(?=(?:\d{1,2}\.|\([a-z0-9]{1,3}\)|•)\s))/;
+/** Shorter than this ("Dear Mr Amir", "Kind regards") is kept even when repeated. */
+const MIN_REPEAT = 60;
+
+/** Same words, whatever the line wrapping, case or curly quotes. */
+const norm = (s: string) =>
+  s.replace(/[“”]/g, '"').replace(/[‘’]/g, "'").replace(/\s+/g, " ").trim().toLowerCase();
+
+/**
+ * Each message's text with paragraphs that already appeared word for word in an earlier message
+ * on the page taken out. Each stretch of them becomes one marker naming the messages it repeats,
+ * and a short line caught between two repeats ("SCOPE:") goes with them. Agencies restate the
+ * whole request at the top of most letters; this lets a preview reach what a letter says.
+ * Messages are read in page order, oldest first.
+ */
+export const withoutRepeats = (msgs: Message[]) => {
+  const seen = new Map<string, { id: string; date: string }>();
+  const out = new Map<string, { text: string; omitted: Omission[] }>();
+  for (const m of msgs) {
+    const parts = m.text.split(UNIT_SPLIT);
+    const units = [] as {
+      text: string;
+      sep: string;
+      key: string;
+      from?: { id: string; date: string } | undefined;
+    }[];
+    for (let i = 0; i < parts.length; i += 2) {
+      const text = parts[i] ?? "";
+      const key = norm(text);
+      units.push({
+        text,
+        sep: parts[i + 1] ?? "",
+        key,
+        from: key.length >= MIN_REPEAT ? seen.get(key) : undefined,
+      });
+    }
+    // A short line between two repeats (a heading such as "SCOPE:") is part of the repeat.
+    units.forEach((u, i) => {
+      if (u.from || u.key.length >= MIN_REPEAT) return;
+      const before = units
+        .slice(0, i)
+        .reverse()
+        .find((x) => x.key);
+      const after = units.slice(i + 1).find((x) => x.key);
+      if (before?.from && after?.from) u.from = before.from;
+    });
+    const omitted: Omission[] = [];
+    let text = "";
+    for (let i = 0; i < units.length;) {
+      const u = units[i]!;
+      if (!u.from) {
+        text += u.text + u.sep;
+        i++;
+        continue;
+      }
+      const run: Omission[] = [];
+      let paragraphs = 0;
+      let chars = 0;
+      for (; i < units.length && units[i]!.from; i++) {
+        const { from, text: t } = units[i]!;
+        const date = from!.date.slice(0, 10);
+        const o = run.find((r) => r.from === from!.id);
+        if (o) (o.paragraphs++, (o.chars += t.length));
+        else run.push({ from: from!.id, date, paragraphs: 1, chars: t.length });
+        paragraphs++;
+        chars += t.length;
+      }
+      const sources = run.map((r) => `${r.from} of ${r.date}`).join(", ");
+      text +=
+        `[… ${paragraphs} paragraph${paragraphs === 1 ? "" : "s"} ` +
+        `(${chars.toLocaleString("en-AU")} characters) omitted, repeated from ${sources} …]\n\n`;
+      for (const r of run) {
+        const o = omitted.find((x) => x.from === r.from);
+        if (o) ((o.paragraphs += r.paragraphs), (o.chars += r.chars));
+        else omitted.push({ ...r });
+      }
+    }
+    for (const u of units)
+      if (u.key.length >= MIN_REPEAT && !seen.has(u.key))
+        seen.set(u.key, { id: m.id, date: m.date });
+    out.set(m.id, { text: text.trim(), omitted });
+  }
+  return out;
+};

@@ -17,6 +17,8 @@ import {
   slugOf,
   tagCounts,
   toEntry,
+  withoutRepeats,
+  type Message,
   type RawEvent,
 } from "../workers/mcp-righttoknow/src/rtk";
 
@@ -800,5 +802,64 @@ describe("righttoknow_site and righttoknow_citations", () => {
     stubJson(asked);
     await run("righttoknow_feed", { kind: "list", value: "successful" });
     expect(asked).toEqual(["/feed/list/successful.json"]);
+  });
+});
+
+describe("repeated paragraphs", () => {
+  const scope =
+    "I request all documents created by Council, its councillors or staff between 7 April 2026 " +
+    "and 22 June 2026 relating to the booking or the decision to cancel it.";
+  const cats =
+    "1. Any Delegate Report completed for the cancellation decision under Rule 2.3.4 of " +
+    "Council's Governance Rules;";
+  const msg = (id: string, date: string, text: string): Message => ({
+    id,
+    direction: id.startsWith("incoming") ? "incoming" : "outgoing",
+    author: "",
+    date,
+    text,
+    attachments: [],
+    link: "",
+  });
+
+  it("are replaced by one marker naming what they repeat, whatever the line wrapping", () => {
+    const out = withoutRepeats([
+      msg(
+        "outgoing-1",
+        "2026-08-25T11:32:04+10:00",
+        `Dear Council,\n\nSCOPE:\n\n${scope}\n\n${cats}`,
+      ),
+      msg(
+        "incoming-2",
+        "2026-08-31T13:02:29+10:00",
+        // The agency's restatement, hard-wrapped and with a curly apostrophe.
+        `Dear Mr Amir\n\nSCOPE:\n\n${scope.replace("staff between", "staff\nbetween")}\n\n` +
+          `${cats.replace("'", "’")}\n\nThe estimated charge is $880.60.`,
+      ),
+    ]);
+    expect(out.get("outgoing-1")!.omitted).toEqual([]);
+    const reply = out.get("incoming-2")!;
+    // Short lines stay ("Dear Mr Amir", and "SCOPE:", which labels what the marker replaces);
+    // only one caught between two repeats would go with them.
+    expect(reply.text).toBe(
+      "Dear Mr Amir\n\nSCOPE:\n\n[… 2 paragraphs (270 characters) omitted, repeated from " +
+        "outgoing-1 of 2026-08-25 …]\n\nThe estimated charge is $880.60.",
+    );
+    expect(reply.omitted).toEqual([
+      { from: "outgoing-1", date: "2026-08-25", paragraphs: 2, chars: 270 },
+    ]);
+  });
+  it("take a short line caught between two repeats with them", () => {
+    const out = withoutRepeats([
+      msg("outgoing-1", "2026-08-25T11:32:04+10:00", `${scope}\n\nCATEGORIES:\n\n${cats}`),
+      msg(
+        "incoming-2",
+        "2026-09-03T19:15:28+10:00",
+        `${scope}\n\nCATEGORIES:\n\n${cats}\n\nNew text.`,
+      ),
+    ]);
+    expect(out.get("incoming-2")!.text).toMatch(
+      /^\[… 3 paragraphs .* outgoing-1 of 2026-08-25 …\]\n\nNew text\.$/,
+    );
   });
 });
