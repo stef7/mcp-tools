@@ -649,9 +649,30 @@ export const scanTable = async <R>(
   return { total, scanned: at - offset, rows, ...(at < total && { next_offset: at }) };
 };
 
+/**
+ * Terms as a list, however they came: a list, a JSON list in a string, or comma-separated words.
+ * A client holding a tool list from before `contains` existed sends it as a string.
+ */
+export const termsOf = (v: unknown): string[] => {
+  if (Array.isArray(v)) return v.map(String);
+  if (typeof v !== "string") return [];
+  const s = v.trim();
+  if (s.startsWith("[")) {
+    try {
+      const parsed: unknown = JSON.parse(s);
+      if (Array.isArray(parsed)) return parsed.map(String);
+    } catch {
+      // Not JSON after all: read it as words.
+    }
+  }
+  return s.split(",");
+};
+
 /** True when any of the terms appears in the question or answer, ignoring case. */
-export const mentions = (terms: string[]) => {
-  const wanted = terms.map((t) => t.trim().toLowerCase()).filter(Boolean);
+export const mentions = (terms: unknown) => {
+  const wanted = termsOf(terms)
+    .map((t) => t.trim().toLowerCase())
+    .filter(Boolean);
   return (r: { QuestionText?: string; AnswerText?: string }) => {
     const text = `${htmlToText(r.QuestionText)}\n${htmlToText(r.AnswerText)}`.toLowerCase();
     return wanted.some((t) => text.includes(t));

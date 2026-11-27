@@ -32,6 +32,7 @@ import {
   LISTS,
   resolve,
   mentions,
+  termsOf,
   scanTable,
   SCAN_DEFAULT,
   SCAN_MAX,
@@ -320,13 +321,14 @@ export default mcpWorker({
         };
         const form = (start: number, length: number) => writtenForm(query, start, length);
         const text = (a.text ?? "snippet") as TextMode;
-        if (a.contains?.length) {
+        const contains = termsOf(a.contains).filter((t) => t.trim());
+        if (contains.length) {
           const scan = Math.min(a.scan ?? SCAN_DEFAULT, SCAN_MAX);
           const found = await scanTable<WrittenRow>(
             net,
             "/api/qon/getdata",
             form,
-            mentions(a.contains),
+            mentions(contains),
             offset,
             limit,
             scan,
@@ -336,7 +338,7 @@ export default mcpWorker({
               parliament: parliament === "x" ? "all" : Number(parliament),
               ...(senator ? { senator_id: senator } : {}),
               ...(ministry ? { ministry_id: ministry } : {}),
-              contains: a.contains,
+              contains,
             },
             total_in_scope: found.total,
             offset,
