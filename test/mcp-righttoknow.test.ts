@@ -7,11 +7,16 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import Worker from "../workers/mcp-righttoknow/src/index";
 import {
   decode,
+  findAuthorities,
   htmlToText,
+  parseAuthorities,
+  parseCsv,
   parseCorrespondence,
   parseFeed,
   requestRef,
+  slugInPage,
   slugOf,
+  tagCounts,
 } from "../workers/mcp-righttoknow/src/rtk";
 
 type Spec = { name: string; annotations: Record<string, boolean> };
@@ -173,6 +178,7 @@ describe("the tool list", () => {
     expect(specs.map((t) => t.name)).toEqual([
       "righttoknow_search",
       "righttoknow_request",
+      "righttoknow_authorities",
       "righttoknow_authority",
       "righttoknow_user",
       "righttoknow_feed",
@@ -302,6 +308,18 @@ describe("the request tool", () => {
 });
 
 describe("the feed tool", () => {
+  it("reads a request's feed at /request/<slug>/feed, where /feed/request/ redirects", async () => {
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      expect(urlOf(input).pathname).toBe("/request/internal_anu_correspondence_conc/feed");
+      return new Response(FEED, { headers: { "content-type": "application/atom+xml" } });
+    });
+    const res = (await worker().call("righttoknow_feed", {
+      kind: "request",
+      value: "internal_anu_correspondence_conc",
+    })) as { content: { text: string }[] };
+    expect(JSON.parse(res.content[0]!.text).count).toBe(2);
+  });
+
   afterEach(() => vi.restoreAllMocks());
 
   it("keeps only events after `since`", async () => {
@@ -316,5 +334,86 @@ describe("the feed tool", () => {
     })) as { content: { text: string }[] };
     const out = JSON.parse(res.content[0]!.text);
     expect(out.entries.map((e: { event_id: number }) => e.event_id)).toEqual([525727]);
+  });
+});
+
+// The header and quoting are PublicBodyCSV's own (mysociety/alaveteli, lib/public_body_csv.rb).
+const CSV = [
+  "Internal ID,Name,Short name,URL name,Tags,Home page,Publication scheme,Disclosure log,Notes,Created at,Updated at,Version",
+  '723,Australian National University,ANU,anu,wikidata:Q127990 federal foi_yes university,http://www.anu.edu.au/,,https://www.anu.edu.au/freedom-of-information/disclosure-log,"The ANU is ""unique"", it says.\nSecond line.",2012-10-15 08:40:52 UTC,2026-11-26 17:55:09 UTC,9',
+  "913,Office of the Australian Information Commissioner,OAIC,oaic,federal foi_yes attorney_general,http://www.oaic.gov.au,,,,2012-10-15,2026-11-09,4",
+  "1200,Department of Home Affairs,,home_affairs,federal foi_yes,https://www.homeaffairs.gov.au,,,,2017-12-20,2026-11-01,7",
+  "5000,University of Melbourne,UniMelb,unimelb,vic foi_yes university,https://www.unimelb.edu.au,,,,2013-01-01,2026-10-01,3",
+  "",
+].join("\r\n");
+
+describe("the authorities list", () => {
+  it("parses quoted fields holding commas, doubled quotes and line breaks", () => {
+    const rows = parseCsv(CSV);
+    expect(rows).toHaveLength(5);
+    expect(rows[1]![8]).toBe('The ANU is "unique", it says.\nSecond line.');
+  });
+
+  it("reads each authority by column name, tags split into flags and values", () => {
+    const [anu] = parseAuthorities(CSV);
+    expect(anu).toMatchObject({
+      slug: "anu",
+      name: "Australian National University",
+      short_name: "ANU",
+      tags: { wikidata: "Q127990", federal: true, foi_yes: true, university: true },
+      disclosure_log: "https://www.anu.edu.au/freedom-of-information/disclosure-log",
+    });
+    expect(anu!.publication_scheme).toBeUndefined();
+  });
+
+  it("finds by every word and every tag, exact short names first", () => {
+    const all = parseAuthorities(CSV);
+    // A name starting with the query outranks one merely containing it.
+    expect(findAuthorities(all, "university").map((a) => a.slug)).toEqual(["unimelb", "anu"]);
+    expect(findAuthorities(all, "anu").map((a) => a.slug)).toEqual(["anu"]);
+    expect(findAuthorities(all, "", ["university", "vic"]).map((a) => a.slug)).toEqual(["unimelb"]);
+    expect(findAuthorities(all, "home affairs", ["federal"]).map((a) => a.slug)).toEqual([
+      "home_affairs",
+    ]);
+    expect(tagCounts(all)).toMatchObject({ federal: 3, foi_yes: 4, university: 2, vic: 1 });
+  });
+
+  it("is fetched through mcp-fetch, and summarised by tag when nothing is asked", async () => {
+    const asked: object[] = [];
+    const FETCH = {
+      call: async (name: string, args: object) => {
+        asked.push({ name, ...args });
+        return { content: [{ type: "text", text: CSV }] };
+      },
+    };
+    const w = new Worker(createExecutionContext(), { ...env, FETCH } as unknown as Env);
+    const call = async (args: object) =>
+      JSON.parse(
+        ((await w.call("righttoknow_authorities", args)) as { content: { text: string }[] })
+          .content[0]!.text,
+      );
+    expect(await call({ refresh: true })).toMatchObject({ total: 4, tags: { foi_yes: 4 } });
+    expect(asked[0]).toEqual({
+      name: "fetch_url",
+      url: "https://www.righttoknow.org.au/body/all-authorities.csv",
+      format: "raw",
+      force: true,
+    });
+    const found = await call({ query: "ANU", notes: false });
+    expect(found).toMatchObject({ matched: 1, authorities: [{ slug: "anu" }] });
+    expect(found.authorities[0].notes).toBeUndefined();
+    // Parsed once per isolate: the second call did not fetch again.
+    expect(asked).toHaveLength(1);
+  });
+});
+
+describe("a challenged redirect", () => {
+  it("is read off the page instead", () => {
+    expect(
+      slugInPage(
+        '<input value="https://www.righttoknow.org.au/request/15604" /> Printed from ' +
+          "https://www.righttoknow.org.au/request/internal_anu_correspondence_conc on",
+      ),
+    ).toBe("internal_anu_correspondence_conc");
   });
 });

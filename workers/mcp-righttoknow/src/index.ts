@@ -3,6 +3,7 @@
  *
  *   righttoknow_search       the site's search, operators included: newest matching events
  *   righttoknow_request      one request: details, event history, every message, attachments
+ *   righttoknow_authorities  every agency, by name and tag, from the site's CSV export
  *   righttoknow_authority    an agency's record and request counts, optionally its latest events
  *   righttoknow_user         a requester's profile and latest events
  *   righttoknow_feed         the latest events on a search, agency, requester or request
@@ -19,11 +20,16 @@ import { BLOCKED } from "../../../core/egress";
 import { BROWSER_UA } from "../../../core/web";
 import {
   ORIGIN,
+  findAuthorities,
   htmlToText,
+  parseAuthorities,
   parseCorrespondence,
   parseFeed,
   requestRef,
+  slugInPage,
   slugOf,
+  tagCounts,
+  type Authority,
   type FeedEntry,
 } from "./rtk";
 
@@ -53,31 +59,55 @@ const getJson = async (env: Env, path: string) =>
   JSON.parse(await get(env, path, "application/json"));
 
 /** A request id or event URL redirects to the request; follow one hop by hand to get its slug. */
-async function resolveSlug(input: string): Promise<string> {
+async function resolveSlug(env: Env, input: string): Promise<string> {
   const ref = requestRef(input);
   if ("slug" in ref) return ref.slug;
   const res = await fetch(new URL(ref.redirect, ORIGIN), {
     redirect: "manual",
     headers: { "User-Agent": BROWSER_UA },
   });
-  const slug = res.headers.get("location")?.match(/\/request\/([^/?#]+)/)?.[1];
-  if (!slug) throw new Error(`Could not resolve ${input} to a request (HTTP ${res.status}).`);
-  return slug;
+  const slug = res.headers.get("location")?.match(/\/request\/([a-z0-9_]+)/i)?.[1];
+  if (slug && !/^\d+$/.test(slug)) return slug;
+  // Challenged (the site often challenges these paths from data-centre IPs): fetch the page
+  // through egress instead, and read the request it belongs to off the page.
+  const found = slugInPage(await get(env, ref.redirect));
+  if (!found) throw new Error(`Could not resolve ${input} to a request (HTTP ${res.status}).`);
+  return found;
 }
 
 const FEEDS = {
   search: (v: string) => `/feed/search/${encodeURIComponent(v)}`,
   body: (v: string) => `/feed/body/${slugOf(v, "body")}`,
   user: (v: string) => `/feed/user/${slugOf(v, "user")}`,
-  request: (v: string) => `/feed/request/${v}`,
+  // /feed/request/<slug> answers with a 301 to this.
+  request: (v: string) => `/request/${v}/feed`,
 };
 type FeedKind = keyof typeof FEEDS;
 
 async function feed(env: Env, kind: FeedKind, value: string, since?: string) {
-  const v = kind === "request" ? await resolveSlug(value) : value;
+  const v = kind === "request" ? await resolveSlug(env, value) : value;
   const entries: FeedEntry[] = parseFeed(await get(env, FEEDS[kind](v), "application/atom+xml"));
   const after = since ? Date.parse(since) : NaN;
   return Number.isNaN(after) ? entries : entries.filter((e) => Date.parse(e.published) > after);
+}
+
+const CSV_URL = `${ORIGIN}/body/all-authorities.csv`;
+let authorityCache: { at: number; list: Authority[] } | undefined;
+
+/**
+ * Every authority, from the site's CSV export. The site challenges that file from data-centre
+ * IPs, so it comes through mcp-fetch's fetch_url, which keeps it: one paid fetch, then free until
+ * `refresh`. Parsed once per isolate for an hour on top of that.
+ */
+async function authorities(env: Env, refresh = false): Promise<Authority[]> {
+  if (!refresh && authorityCache && Date.now() - authorityCache.at < 3_600_000)
+    return authorityCache.list;
+  const out = await rpc(env).call("fetch_url", { url: CSV_URL, format: "raw", force: refresh });
+  const text = out.content[0]?.text ?? "";
+  if (out.isError || !/^\s*"?Internal ID"?,/i.test(text))
+    throw new Error(`Could not get the authorities list: ${text.slice(0, 200)}`);
+  authorityCache = { at: Date.now(), list: parseAuthorities(text) };
+  return authorityCache.list;
 }
 
 const SINCE = {
@@ -108,7 +138,7 @@ export default mcpWorker({
   info: () => ({
     instructions:
       "Right to Know (righttoknow.org.au) is the OpenAustralia Foundation's public FOI request " +
-      "site. righttoknow_search finds requests; righttoknow_request reads one in full; " +
+      "site. righttoknow_search finds requests; righttoknow_authorities finds an agency's slug; righttoknow_request reads one in full; " +
       "righttoknow_authority and righttoknow_user give an agency's or requester's record; " +
       "righttoknow_feed gives the latest events, and with `since` only the new ones; " +
       "righttoknow_attachment reads a released document. Read-only.",
@@ -170,7 +200,7 @@ export default mcpWorker({
         },
       },
       async run({ request, messages = "all", unfold = false, max_chars = 6000 }, { env }) {
-        const slug = await resolveSlug(request);
+        const slug = await resolveSlug(env, request);
         const page = `/request/${slug}`;
         const [meta, html] = await Promise.all([
           getJson(env, `${page}.json`),
@@ -213,6 +243,46 @@ export default mcpWorker({
                 : undefined,
           })),
           ...(messages === "none" ? {} : { messages: msgs }),
+        };
+      },
+    }),
+
+    authorities: tool({
+      description:
+        "Find authorities on Right to Know by name and tag, from the site's full list (its CSV " +
+        "export). Matches every word of `query` against name, short name and slug, so 'home " +
+        "affairs' or 'ANU' both work; `tags` keeps only authorities carrying all of them, e.g. " +
+        "['federal'], ['university'], ['council', 'vic'], ['foi_no']. Returns each one's slug " +
+        "(for righttoknow_authority, and requested_from: in righttoknow_search), names, tags, " +
+        "home page and disclosure log. With neither query nor tags, returns the tags in use and " +
+        "how many authorities carry each.",
+      input: {
+        type: "object",
+        properties: {
+          query: { type: "string", description: "Words to match in the name, e.g. 'health'." },
+          tags: {
+            type: "array",
+            items: { type: "string" },
+            description: "Tags every result must carry (without any ':value' part).",
+          },
+          limit: { type: "integer", description: "Most results to return. Default 50." },
+          notes: { type: "boolean", description: "Include each authority's notes. Default false." },
+          refresh: {
+            type: "boolean",
+            description: "Download the list again rather than use the kept copy. Default false.",
+          },
+        },
+      },
+      async run({ query = "", tags = [], limit = 50, notes = false, refresh = false }, { env }) {
+        const all = await authorities(env, refresh);
+        if (!query.trim() && !tags.length) return { total: all.length, tags: tagCounts(all) };
+        const found = findAuthorities(all, query, tags);
+        return {
+          total: all.length,
+          matched: found.length,
+          authorities: found
+            .slice(0, Math.max(1, limit))
+            .map(({ notes: n, ...a }) => ({ ...a, ...(notes && n ? { notes: n } : {}) })),
         };
       },
     }),

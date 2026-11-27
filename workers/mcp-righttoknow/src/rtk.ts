@@ -164,3 +164,123 @@ export const slugOf = (input: string, kind: "body" | "user"): string => {
   const s = input.trim();
   return first(s, new RegExp(`/${kind}/([^/?#.]+)`)) ?? s;
 };
+
+/**
+ * The request a page belongs to, read from the page itself: its "Link to this" fields, or a
+ * redirect body's link. For when the redirect could not be read directly (a challenge in the way,
+ * or an egress route that followed it).
+ */
+export const slugInPage = (html: string): string | undefined =>
+  [...html.matchAll(/righttoknow\.org\.au\/request\/([a-z0-9_]+)/gi)]
+    .map((m) => m[1] ?? "")
+    .find((s) => s && !/^\d+$/.test(s));
+
+// ---------------------------------------------------------------- authorities
+
+/** RFC 4180: quoted fields may hold commas, doubled quotes and line breaks. */
+export const parseCsv = (text: string): string[][] => {
+  const rows: string[][] = [];
+  let row: string[] = [];
+  let field = "";
+  let quoted = false;
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    if (quoted) {
+      if (c === '"' && text[i + 1] === '"') ((field += '"'), i++);
+      else if (c === '"') quoted = false;
+      else field += c;
+    } else if (c === '"') quoted = true;
+    else if (c === ",") (row.push(field), (field = ""));
+    else if (c === "\n" || c === "\r") {
+      if (c === "\r" && text[i + 1] === "\n") i++;
+      (row.push(field), rows.push(row), (row = []), (field = ""));
+    } else field += c;
+  }
+  if (field || row.length) (row.push(field), rows.push(row));
+  return rows.filter((r) => r.some((f) => f !== ""));
+};
+
+export type Authority = {
+  slug: string;
+  name: string;
+  short_name?: string | undefined;
+  /** `federal`, `foi_yes`… as `true`; `wikidata:Q123` as `"Q123"`. */
+  tags: Record<string, string | true>;
+  home_page?: string | undefined;
+  publication_scheme?: string | undefined;
+  disclosure_log?: string | undefined;
+  notes?: string | undefined;
+  updated_at?: string | undefined;
+};
+
+/**
+ * /body/all-authorities.csv, as Alaveteli's PublicBodyCSV writes it: Internal ID, Name, Short
+ * name, URL name, Tags, Home page, Publication scheme, Disclosure log, Notes, Created at,
+ * Updated at, Version. Columns are found by header, so a reordering does not break this.
+ */
+export const parseAuthorities = (csv: string): Authority[] => {
+  const [head = [], ...rows] = parseCsv(csv);
+  const col = (name: string) => head.findIndex((h) => h.trim().toLowerCase() === name);
+  const at = {
+    name: col("name"),
+    short: col("short name"),
+    slug: col("url name"),
+    tags: col("tags"),
+    home: col("home page"),
+    ips: col("publication scheme"),
+    log: col("disclosure log"),
+    notes: col("notes"),
+    updated: col("updated at"),
+  };
+  if (at.name < 0 || at.slug < 0)
+    throw new Error("The authorities CSV has no Name or URL name column.");
+  const get = (r: string[], i: number) => (i >= 0 && r[i]?.trim()) || undefined;
+  return rows.map((r) => ({
+    slug: get(r, at.slug) ?? "",
+    name: get(r, at.name) ?? "",
+    short_name: get(r, at.short),
+    tags: Object.fromEntries(
+      (get(r, at.tags) ?? "")
+        .split(/\s+/)
+        .filter(Boolean)
+        .map((t) => {
+          const i = t.indexOf(":");
+          return i < 0 ? [t, true] : [t.slice(0, i), t.slice(i + 1)];
+        }),
+    ),
+    home_page: get(r, at.home),
+    publication_scheme: get(r, at.ips),
+    disclosure_log: get(r, at.log),
+    notes: get(r, at.notes),
+    updated_at: get(r, at.updated),
+  }));
+};
+
+/**
+ * Authorities whose name, short name or slug holds every word of `query`, and that carry every
+ * tag in `tags`. Exact and leading matches on the short name or name rank first.
+ */
+export const findAuthorities = (all: Authority[], query = "", tags: string[] = []) => {
+  const words = query.toLowerCase().split(/\s+/).filter(Boolean);
+  const q = words.join(" ");
+  const hay = (a: Authority) => `${a.name} ${a.short_name ?? ""} ${a.slug}`.toLowerCase();
+  const score = (a: Authority) => {
+    const short = (a.short_name ?? "").toLowerCase();
+    const name = a.name.toLowerCase();
+    if (!q) return 0;
+    if (short === q || name === q || a.slug === q) return 0;
+    if (name.startsWith(q) || short.startsWith(q)) return 1;
+    return 2;
+  };
+  return all
+    .filter((a) => tags.every((t) => t in a.tags))
+    .filter((a) => words.every((w) => hay(a).includes(w)))
+    .sort((a, b) => score(a) - score(b) || a.name.localeCompare(b.name));
+};
+
+/** How many authorities carry each tag, most first. */
+export const tagCounts = (all: Authority[]) => {
+  const n = new Map<string, number>();
+  for (const a of all) for (const t of Object.keys(a.tags)) n.set(t, (n.get(t) ?? 0) + 1);
+  return Object.fromEntries([...n].sort((a, b) => b[1] - a[1]));
+};
