@@ -443,10 +443,23 @@ describe("righttoknow_request", () => {
       author: "Freedom of Information, Australian National University",
       text: "Dear S P,\n\nThis is a […]",
       truncated: true,
+      length: 62,
       attachments: [{ name: "FOIs 202600332 Consultation.pdf" }],
     });
     expect(response.more).toBeUndefined();
     expect(out.full_text).toMatch(/1 newer message/);
+  });
+
+  it("picks messages by id, with or without their prefix", async () => {
+    stubJson();
+    const { env: e } = fakeFetch(() => PAGE);
+    const out = json(await run("righttoknow_request", { request: REQ, ids: ["50918"] }, e));
+    expect(out.events.map((ev: { message: string }) => ev.message)).toEqual(["incoming-50918"]);
+    expect(out.events[0].truncated).toBeUndefined();
+    const both = json(
+      await run("righttoknow_request", { request: REQ, ids: ["outgoing-32450", "50918"] }, e),
+    );
+    expect(both.events).toHaveLength(2);
   });
 
   it("says snippets only when nothing is kept, without fetching the page", async () => {
@@ -461,10 +474,8 @@ describe("righttoknow_request", () => {
     const out = json(
       await run("righttoknow_request", { request: REQ }, { ...env, FETCH } as unknown as Env),
     );
-    expect(calls.map((c) => [c.url, c.cache_only])).toEqual([
-      [REQ, true],
-      [`${REQ}?unfold=1`, true],
-    ]);
+    // The folded page only: an unfolded copy is never used in its place.
+    expect(calls.map((c) => [c.url, c.cache_only])).toEqual([[REQ, true]]);
     expect(out.full_text).toMatch(/^No kept copy/);
     expect(out.events[1].more).toBe("righttoknow_full_request");
   });
@@ -529,6 +540,24 @@ describe("righttoknow_full_request", () => {
       "outgoing-32695",
       "incoming-50918",
     ]);
+  });
+
+  it("returns only the messages asked for, cut at 15,000 characters by default", async () => {
+    stubJson();
+    const long = "x".repeat(16_000);
+    const page = PAGE.replace("This is a notice under section 24AB of the FOI Act.", long);
+    const { env: e } = fakeFetch(() => page);
+    const out = json(
+      await run(
+        "righttoknow_full_request",
+        { request: REQ, user_confirmed: true, ids: ["incoming-50918"] },
+        e,
+      ),
+    );
+    expect(out.messages).toHaveLength(1);
+    expect(out.messages[0]).toMatchObject({ id: "incoming-50918", truncated: true });
+    expect(out.messages[0].text).toHaveLength(15_000 + " […]".length);
+    expect(out.messages[0].length).toBeGreaterThan(16_000);
   });
 
   it("loads the page again once the request has a message the kept copy lacks", async () => {

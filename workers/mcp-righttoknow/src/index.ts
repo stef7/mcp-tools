@@ -87,10 +87,36 @@ async function keptOnly(env: Env, url: string): Promise<string | undefined> {
   }
 }
 
+/** Per message, by default. Most letters fit; a council's longest decision letters do not. */
+const MAX_CHARS = 15_000;
+
 const cut = (text: string, max: number) =>
   max > 0 && text.length > max
-    ? { text: text.slice(0, max) + " […]", truncated: true as const }
+    ? { text: text.slice(0, max) + " […]", truncated: true as const, length: text.length }
     : { text };
+
+/** `ids` as given (`incoming-51144`, `outgoing-32166`, or a bare `51144`) to a matcher. */
+const picker = (ids?: string[]) =>
+  ids?.length
+    ? (anchor?: string) =>
+        !!anchor && ids.some((i) => i === anchor || anchor.endsWith(`-${String(i).trim()}`))
+    : () => true;
+
+const IDS = {
+  type: "array",
+  items: { type: "string" },
+  description:
+    "Only these messages, by the id in the event list: 'incoming-51144', 'outgoing-32166', or " +
+    "just the number. With a higher max_chars, reads one long message without the rest.",
+} as const;
+
+const maxCharsInput = (extra: string) =>
+  ({
+    type: "integer",
+    description:
+      `Cut each message to this many characters; 0 for no limit. Default ${MAX_CHARS}. A cut ` +
+      `message is marked truncated, with its full length. ${extra}`,
+  }) as const;
 
 type RequestJson = {
   id: number;
@@ -265,50 +291,52 @@ export default mcpWorker({
         required: ["request"],
         properties: {
           request: { type: "string", description: "Slug, numeric id or URL." },
-          max_chars: {
-            type: "integer",
-            description:
-              "Cut each kept message to this many characters; 0 for no limit. Default 4000. " +
-              "Cut messages are marked truncated; asking again with 0 costs nothing.",
-          },
+          ids: IDS,
+          max_chars: maxCharsInput(
+            "Asking again for its id with max_chars 0 reads the same kept copy: it costs nothing.",
+          ),
         },
       },
-      async run({ request, max_chars = 4000 }, { env }) {
+      async run({ request, ids, max_chars = MAX_CHARS }, { env }) {
         const meta = await requestMeta(env, request);
         const page = `${ORIGIN}/request/${meta.url_title}`;
         const [events, html] = await Promise.all([
           getJson<RawEvent[]>(env, FEEDS.request(meta.url_title)),
-          keptOnly(env, page).then((h) => h ?? keptOnly(env, `${page}?unfold=1`)),
+          // The folded page only: quoted earlier emails are noise, and folded is the default.
+          keptOnly(env, page),
         ]);
         const snippets = new Map(events.map((e) => [e.id, e.snippet]));
         const bodies = new Map(html ? parseCorrespondence(html, page).map((m) => [m.id, m]) : []);
         let missing = 0;
-        const out = (meta.info_request_events ?? []).map((e) => {
-          const message = anchorOf(e);
-          const base = {
-            id: e.id,
-            type: e.event_type,
-            at: e.created_at,
-            status: e.described_state ?? e.calculated_state ?? undefined,
-            message,
-          };
-          const m = message ? bodies.get(message) : undefined;
-          if (m)
+        const wanted = picker(ids);
+        const out = (meta.info_request_events ?? [])
+          .filter((e) => wanted(anchorOf(e)))
+          .map((e) => {
+            const message = anchorOf(e);
+            const base = {
+              id: e.id,
+              type: e.event_type,
+              at: e.created_at,
+              status: e.described_state ?? e.calculated_state ?? undefined,
+              message,
+            };
+            const m = message ? bodies.get(message) : undefined;
+            if (m)
+              return {
+                ...base,
+                author: m.author,
+                ...cut(m.text, max_chars),
+                ...(m.attachments.length ? { attachments: m.attachments } : {}),
+              };
+            const snippet = snippets.get(e.id);
+            const isMessage = !!(e.incoming_message_id || e.outgoing_message_id);
+            if (isMessage) missing++;
             return {
               ...base,
-              author: m.author,
-              ...cut(m.text, max_chars),
-              ...(m.attachments.length ? { attachments: m.attachments } : {}),
+              snippet: snippet ? cleanSnippet(snippet) : undefined,
+              ...(isMessage ? { more: "righttoknow_full_request" } : {}),
             };
-          const snippet = snippets.get(e.id);
-          const isMessage = !!(e.incoming_message_id || e.outgoing_message_id);
-          if (isMessage) missing++;
-          return {
-            ...base,
-            snippet: snippet ? cleanSnippet(snippet) : undefined,
-            ...(isMessage ? { more: "righttoknow_full_request" } : {}),
-          };
-        });
+          });
         return {
           ...summary(meta),
           full_text: !html
@@ -638,14 +666,12 @@ export default mcpWorker({
           messages: {
             type: "string",
             enum: ["all", "latest"],
-            description: "Which messages to return. Default all.",
+            description: "Which messages to return. Default all. `ids` picks particular ones.",
           },
-          max_chars: {
-            type: "integer",
-            description:
-              "Cut each message body to this many characters; 0 for no limit. Default 6000. " +
-              "Cut messages are marked truncated.",
-          },
+          ids: IDS,
+          max_chars: maxCharsInput(
+            "Asking again for its id with max_chars 0 uses the kept page: no new load.",
+          ),
           force: {
             type: "boolean",
             description: "Load the page again even if the kept copy is current. Default false.",
@@ -653,7 +679,7 @@ export default mcpWorker({
         },
       },
       async run(
-        { request, unfold = false, messages = "all", max_chars = 6000, force = false },
+        { request, unfold = false, messages = "all", ids, max_chars = MAX_CHARS, force = false },
         { env },
       ) {
         const meta = await requestMeta(env, request);
@@ -669,13 +695,10 @@ export default mcpWorker({
           all = parseCorrespondence(await kept(env, page, { force: true }), page);
           reloaded = true;
         }
-        let msgs = messages === "latest" ? all.slice(-1) : all;
-        if (max_chars > 0)
-          msgs = msgs.map((m) =>
-            m.text.length > max_chars
-              ? { ...m, text: m.text.slice(0, max_chars) + " […]", truncated: true }
-              : m,
-          );
+        const wanted = picker(ids);
+        const msgs = (messages === "latest" ? all.slice(-1) : all)
+          .filter((m) => wanted(m.id))
+          .map((m) => ({ ...m, ...cut(m.text, max_chars) }));
         return {
           ...summary(meta),
           page: reloaded ? "loaded from Right to Know" : "kept copy, current",
