@@ -2,7 +2,8 @@
  * mcp-righttoknow — FOI requests on Right to Know (righttoknow.org.au), read without a login.
  *
  *   righttoknow_search            the site's search, operators included: newest matching events
- *   righttoknow_request           one request: details, event history, a snippet of each message
+ *   righttoknow_request           one request: details, history, each message from the cached page
+ *                                 if there is one, else a snippet
  *   righttoknow_feed              the latest events on a search, agency, requester or request
  *   righttoknow_authority         an agency's record and request counts, optionally its events
  *   righttoknow_user              a requester's profile and latest events
@@ -15,9 +16,9 @@
  *
  * Right to Know is run by a small charity, and puts its HTML pages behind a Cloudflare challenge.
  * Everything but the `full_` tools reads the JSON the site serves without one. The `full_` tools
- * load challenged pages, so each needs `user_confirmed`, and what they load is kept by mcp-fetch
+ * load challenged pages, so each needs `user_confirmed`, and what they load is cached by mcp-fetch
  * and reused until the request changes (or, for documents, for good). The authority list is a
- * challenged CSV too, kept for a week.
+ * challenged CSV too, cached for a week.
  */
 import cfg from "../wrangler.json";
 import { version } from "../package.json";
@@ -35,12 +36,14 @@ import {
   slugOf,
   tagCounts,
   toEntry,
+  withoutRepeats,
   type Authority,
   type RawEvent,
 } from "./rtk";
 
 /** What mcp-fetch offers over RPC: its `egress` routes and its own tools. */
 type FetchRpc = {
+  cachedAt(url: string): Promise<number | null>;
   egress(url: string, opts?: { headers?: Record<string, string> }): Promise<Response>;
   call(name: string, args: object, req?: object): Promise<Result>;
 };
@@ -62,10 +65,10 @@ async function getJson<T = any>(env: Env, path: string): Promise<T> {
 }
 
 /**
- * A challenged page, through mcp-fetch's fetch_url, which keeps it: `force` loads it again,
- * `max_age` (seconds) loads it again once the kept copy is that old.
+ * A challenged page, through mcp-fetch's fetch_url, which caches it: `force` loads it again,
+ * `max_age` (seconds) loads it again once the cached copy is that old.
  */
-async function kept(
+async function cached(
   env: Env,
   url: string,
   opts: { format?: "raw" | "markdown"; force?: boolean; max_age?: number } = {},
@@ -75,6 +78,49 @@ async function kept(
   if (out.isError) throw new Error(`Could not load ${url}: ${text}`);
   return text;
 }
+
+/** A page mcp-fetch has already cached, or undefined. Never goes to the network. */
+async function cachedOnly(env: Env, url: string): Promise<string | undefined> {
+  try {
+    const out = await rpc(env).call("fetch_url", { url, format: "raw", cache_only: true });
+    return out.isError ? undefined : out.content[0]?.text;
+  } catch {
+    return undefined; // mcp-fetch unreachable: snippets only.
+  }
+}
+
+/** Per message, by default. Most letters fit; a council's longest decision letters do not. */
+const MAX_CHARS = 15_000;
+/** righttoknow_request's default: enough to see what each message says, not the whole thread. */
+const PREVIEW_CHARS = 1_000;
+
+const cut = (text: string, max: number) =>
+  max > 0 && text.length > max
+    ? { text: text.slice(0, max) + " […]", truncated: true as const, length: text.length }
+    : { text };
+
+/** `ids` as given (`incoming-51144`, `outgoing-32166`, or a bare `51144`) to a matcher. */
+const picker = (ids?: string[]) =>
+  ids?.length
+    ? (anchor?: string) =>
+        !!anchor && ids.some((i) => i === anchor || anchor.endsWith(`-${String(i).trim()}`))
+    : () => true;
+
+const IDS = {
+  type: "array",
+  items: { type: "string" },
+  description:
+    "Only these messages, by the id in the event list: 'incoming-51144', 'outgoing-32166', or " +
+    "just the number. With a higher max_chars, reads one long message without the rest.",
+} as const;
+
+const maxCharsInput = (extra: string) =>
+  ({
+    type: "integer",
+    description:
+      `Cut each message to this many characters; 0 for no limit. Default ${MAX_CHARS}. A cut ` +
+      `message is marked truncated, with its full length. ${extra}`,
+  }) as const;
 
 type RequestJson = {
   id: number;
@@ -158,13 +204,13 @@ const WEEK = 7 * 24 * 3600;
 let authorityCache: { at: number; list: Authority[] } | undefined;
 
 /**
- * Every authority, from the site's CSV export: challenged, so kept by mcp-fetch and loaded again
- * only once the kept copy is a week old (or on `refresh`). Parsed once per isolate per hour.
+ * Every authority, from the site's CSV export: challenged, so cached by mcp-fetch and loaded again
+ * only once the cached copy is a week old (or on `refresh`). Parsed once per isolate per hour.
  */
 async function authorities(env: Env, refresh = false): Promise<Authority[]> {
   if (!refresh && authorityCache && Date.now() - authorityCache.at < 3_600_000)
     return authorityCache.list;
-  const text = await kept(env, CSV_URL, { max_age: WEEK, force: refresh });
+  const text = await cached(env, CSV_URL, { max_age: WEEK, force: refresh });
   if (!/^\s*"?Internal ID"?,/i.test(text))
     throw new Error(`The authorities list did not come back as CSV: ${text.slice(0, 200)}`);
   authorityCache = { at: Date.now(), list: parseAuthorities(text) };
@@ -239,29 +285,103 @@ export default mcpWorker({
     request: tool({
       description:
         "One Right to Know request without loading a challenged page: title, authority, " +
-        "requester, status, and its dated event history with a ~150-character snippet of each " +
-        "message. Accepts a slug ('internal_anu_correspondence_conc'), a numeric request id, or " +
-        "a request URL. For the full text of messages and their attachments, " +
-        "righttoknow_full_request.",
+        "requester, status, and its dated event history. If righttoknow_full_request has " +
+        `loaded the page before, each message shows its first ${PREVIEW_CHARS} characters from ` +
+        "that cached copy, with attachments; pass `ids` for whole messages. Messages the cache " +
+        "lacks come as the site's ~150-character snippet, marked `more`. Paragraphs repeating " +
+        "an earlier message are replaced by a marker naming it (see keep_repeats). Accepts a slug " +
+        "('internal_anu_correspondence_conc'), a numeric request id, or a request URL.",
       input: {
         type: "object",
         required: ["request"],
-        properties: { request: { type: "string", description: "Slug, numeric id or URL." } },
+        properties: {
+          request: { type: "string", description: "Slug, numeric id or URL." },
+          ids: IDS,
+          keep_repeats: {
+            type: "boolean",
+            description:
+              "Keep paragraphs that repeat an earlier message word for word (agencies restate " +
+              "the whole request atop most letters). Default false: each is replaced by a " +
+              "marker naming the message it repeats, and listed in `omitted`.",
+          },
+          max_chars: {
+            type: "integer",
+            description:
+              `Cut each cached message to this many characters; 0 for no limit. Default ` +
+              `${PREVIEW_CHARS}, or ${MAX_CHARS} when \`ids\` is given. A cut message is ` +
+              "marked truncated, with its full length; asking again costs the site nothing.",
+          },
+        },
       },
-      async run({ request }, { env }) {
+      async run({ request, ids, keep_repeats = false, max_chars }, { env }) {
+        const limit = max_chars ?? (ids?.length ? MAX_CHARS : PREVIEW_CHARS);
         const meta = await requestMeta(env, request);
-        const events = await getJson<RawEvent[]>(env, FEEDS.request(meta.url_title));
+        const page = `${ORIGIN}/request/${meta.url_title}`;
+        const [events, html] = await Promise.all([
+          getJson<RawEvent[]>(env, FEEDS.request(meta.url_title)),
+          // The folded page only: quoted earlier emails are noise, and folded is the default.
+          cachedOnly(env, page),
+        ]);
+        // A missing or older mcp-fetch just means no date, not a failed request.
+        const at = html
+          ? await Promise.resolve()
+              .then(() => rpc(env).cachedAt(page))
+              .catch(() => null)
+          : null;
+        const when = at ? `cached ${new Date(at).toISOString().slice(0, 10)}` : "cached";
         const snippets = new Map(events.map((e) => [e.id, e.snippet]));
+        const parsed = html ? parseCorrespondence(html, page) : [];
+        const bodies = new Map(parsed.map((m) => [m.id, m]));
+        // Repeats are judged against every earlier message, whichever `ids` are asked for.
+        const fresh = keep_repeats ? undefined : withoutRepeats(parsed);
+        let missing = 0;
+        const wanted = picker(ids);
+        const out = (meta.info_request_events ?? [])
+          .filter((e) => wanted(anchorOf(e)))
+          .map((e) => {
+            const message = anchorOf(e);
+            const base = {
+              id: e.id,
+              type: e.event_type,
+              at: e.created_at,
+              status: e.described_state ?? e.calculated_state ?? undefined,
+              message,
+            };
+            const m = message ? bodies.get(message) : undefined;
+            if (m) {
+              const f = fresh?.get(m.id);
+              const shown = f?.text ?? m.text;
+              const { text, truncated } = cut(shown, limit);
+              return {
+                ...base,
+                author: m.author,
+                text,
+                ...(truncated || f?.omitted.length ? { length: m.text.length } : {}),
+                ...(truncated ? { truncated } : {}),
+                ...(f?.omitted.length ? { omitted: f.omitted } : {}),
+                ...(m.attachments.length ? { attachments: m.attachments } : {}),
+              };
+            }
+            const snippet = snippets.get(e.id);
+            const isMessage = !!(e.incoming_message_id || e.outgoing_message_id);
+            if (isMessage) missing++;
+            return {
+              ...base,
+              snippet: snippet ? cleanSnippet(snippet) : undefined,
+              ...(isMessage ? { more: "righttoknow_full_request" } : {}),
+            };
+          });
         return {
           ...summary(meta),
-          events: (meta.info_request_events ?? []).map((e) => ({
-            id: e.id,
-            type: e.event_type,
-            at: e.created_at,
-            status: e.described_state ?? e.calculated_state ?? undefined,
-            message: anchorOf(e),
-            snippet: snippets.get(e.id) ? cleanSnippet(snippets.get(e.id)) : undefined,
-          })),
+          full_text: !html
+            ? "No cached copy of the page: snippets only. righttoknow_full_request loads it."
+            : `Message text from the copy of the page ${when}` +
+              (missing
+                ? `; ${missing} newer message(s) are snippets, which righttoknow_full_request ` +
+                  "would load."
+                : ".") +
+              " The site may since have hidden or redacted a message; this copy would not show it.",
+          events: out,
         };
       },
     }),
@@ -352,7 +472,7 @@ export default mcpWorker({
     authorities: tool({
       description:
         "Find authorities on Right to Know by name and tag, from the site's full list (its CSV " +
-        "export, kept for a week). Matches every word of `query` against name, short name and " +
+        "export, cached for a week). Matches every word of `query` against name, short name and " +
         "slug, so 'home affairs' or 'ANU' both work; `tags` keeps only authorities carrying " +
         "all of them, e.g. ['federal'], ['university'], ['council', 'vic'], ['foi_no']. " +
         "Returns each one's slug (for righttoknow_authority, and requested_from: in " +
@@ -372,7 +492,7 @@ export default mcpWorker({
           refresh: {
             type: "boolean",
             description:
-              "Load the list again even if the kept copy is under a week old. It is a " +
+              "Load the list again even if the cached copy is under a week old. It is a " +
               "challenged page: only when the user asks for it. Default false.",
           },
         },
@@ -564,7 +684,7 @@ export default mcpWorker({
     full_request: tool({
       description:
         "Every message of one Right to Know request in full, with its attachments (name, size, " +
-        "and a url for righttoknow_full_attachment). The page is kept: a later call reuses it " +
+        "and a url for righttoknow_full_attachment). The page is cached: a later call reuses it " +
         "unless the request has a newer message, which the free JSON shows. Try " +
         "righttoknow_request first; its snippets are often enough.",
       confirm: CHALLENGED,
@@ -577,52 +697,47 @@ export default mcpWorker({
             type: "boolean",
             description:
               "Include the quoted earlier emails folded under 'show quoted sections'. A " +
-              "separate page from the folded one, kept separately. Default false.",
+              "separate page from the folded one, cached separately. Default false.",
           },
           messages: {
             type: "string",
             enum: ["all", "latest"],
-            description: "Which messages to return. Default all.",
+            description: "Which messages to return. Default all. `ids` picks particular ones.",
           },
-          max_chars: {
-            type: "integer",
-            description:
-              "Cut each message body to this many characters; 0 for no limit. Default 6000. " +
-              "Cut messages are marked truncated.",
-          },
+          ids: IDS,
+          max_chars: maxCharsInput(
+            "Asking again for its id with max_chars 0 uses the cached page: no new load.",
+          ),
           force: {
             type: "boolean",
-            description: "Load the page again even if the kept copy is current. Default false.",
+            description: "Load the page again even if the cached copy is current. Default false.",
           },
         },
       },
       async run(
-        { request, unfold = false, messages = "all", max_chars = 6000, force = false },
+        { request, unfold = false, messages = "all", ids, max_chars = MAX_CHARS, force = false },
         { env },
       ) {
         const meta = await requestMeta(env, request);
         const page = `${ORIGIN}/request/${meta.url_title}${unfold ? "?unfold=1" : ""}`;
-        // The newest message the JSON knows of. If the kept page lacks it, the page is stale.
+        // The newest message the JSON knows of. If the cached page lacks it, the page is stale.
         const newest = (meta.info_request_events ?? [])
           .filter((e) => e.incoming_message_id || e.outgoing_message_id)
           .sort((a, b) => Date.parse(b.created_at) - Date.parse(a.created_at))
           .map(anchorOf)[0];
-        let all = parseCorrespondence(await kept(env, page, { force }), page);
+        let all = parseCorrespondence(await cached(env, page, { force }), page);
         let reloaded = force;
         if (!force && newest && !all.some((m) => m.id === newest)) {
-          all = parseCorrespondence(await kept(env, page, { force: true }), page);
+          all = parseCorrespondence(await cached(env, page, { force: true }), page);
           reloaded = true;
         }
-        let msgs = messages === "latest" ? all.slice(-1) : all;
-        if (max_chars > 0)
-          msgs = msgs.map((m) =>
-            m.text.length > max_chars
-              ? { ...m, text: m.text.slice(0, max_chars) + " […]", truncated: true }
-              : m,
-          );
+        const wanted = picker(ids);
+        const msgs = (messages === "latest" ? all.slice(-1) : all)
+          .filter((m) => wanted(m.id))
+          .map((m) => ({ ...m, ...cut(m.text, max_chars) }));
         return {
           ...summary(meta),
-          page: reloaded ? "loaded from Right to Know" : "kept copy, current",
+          page: reloaded ? "loaded from Right to Know" : "cached copy, current",
           ...(newest && !all.some((m) => m.id === newest)
             ? { note: `${newest} is in the event history but not on the page (hidden?).` }
             : {}),
@@ -635,7 +750,7 @@ export default mcpWorker({
       description:
         "Read a document attached to a Right to Know response: a decision letter, schedule or " +
         "released documents, converted to markdown. Pass an attachment `url` from " +
-        "righttoknow_full_request. A document is kept for good once loaded, so asking again " +
+        "righttoknow_full_request. A document is cached for good once loaded, so asking again " +
         "costs nothing.",
       confirm: CHALLENGED,
       input: {
@@ -645,7 +760,7 @@ export default mcpWorker({
           url: { type: "string", description: "Attachment download URL, or its 'View' URL." },
           force: {
             type: "boolean",
-            description: "Load it again even though a copy is kept. Default false.",
+            description: "Load it again even though a copy is cached. Default false.",
           },
         },
       },
@@ -656,7 +771,7 @@ export default mcpWorker({
         // One download per document: the "View" form maps onto the download form.
         const path = u.pathname.replace("/attach/html/", "/attach/").replace(/\.html$/, "");
         const download = ORIGIN + path;
-        return { url: download, text: await kept(env, download, { format: "markdown", force }) };
+        return { url: download, text: await cached(env, download, { format: "markdown", force }) };
       },
     }),
   },

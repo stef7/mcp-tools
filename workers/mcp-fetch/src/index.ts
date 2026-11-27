@@ -103,7 +103,7 @@ const download = async (env: Env, url: string, via?: Via) => {
 
 /**
  * Original bytes, from KV unless `force` says to go back to the origin, or `maxAge` (seconds)
- * says the kept copy is too old. A copy kept before downloads were dated counts as too old.
+ * says the cached copy is too old. A copy cached before downloads were dated counts as too old.
  */
 const bytesFor = async (env: Env, url: string, force: boolean, via?: Via, maxAge?: number) => {
   if (!force) {
@@ -291,7 +291,7 @@ const Tools = mcpWorker({
   tools: {
     url: tool({
       description:
-        "Fetch one URL and return its content. The original bytes are kept (until `force` or " +
+        "Fetch one URL and return its content. The original bytes are cached (until `force` or " +
         "`max_age` says otherwise), so asking " +
         "for a different format later never re-downloads. PDFs and Word documents are converted " +
         "with Workers AI. Nothing is followed, crawled or inferred: you get the URL you asked for.",
@@ -315,8 +315,14 @@ const Tools = mcpWorker({
           max_age: {
             type: "integer",
             description:
-              "Re-download if the kept copy is older than this many seconds (604800 is a week). " +
-              "Default: the kept copy is used however old it is.",
+              "Re-download if the cached copy is older than this many seconds (604800 is a week). " +
+              "Default: the cached copy is used however old it is.",
+          },
+          cache_only: {
+            type: "boolean",
+            description:
+              "Never go to the network: answer from the cached copy, or say there is none. For " +
+              "checking what is already cached without fetching it. Default false.",
           },
           select: {
             type: "string",
@@ -340,18 +346,21 @@ const Tools = mcpWorker({
           },
         },
       },
-      async run({ url, format, force, max_age, via, select }, c) {
+      async run({ url, format, force, max_age, cache_only, via, select }, c) {
         const env = await schema(c);
         const fmt: Format = FORMATS.includes(format as Format) ? (format as Format) : "auto";
         // The server never sees a #fragment, so every fragment of a page shares one download.
         const page = url.split("#")[0] ?? url;
+        // Answered before anything is stored: a miss here is a question, not a failed fetch.
+        if (cache_only && !(await env.CACHE.get(`raw:${page}`, "arrayBuffer")))
+          return { content: [{ type: "text", text: `Not cached: ${page}` }], isError: true };
         try {
           const { bytes, ct, cached, route } = await bytesFor(
             env,
             page,
-            force === true,
+            force === true && !cache_only,
             via,
-            max_age ?? undefined,
+            cache_only ? undefined : (max_age ?? undefined),
           );
           const kind = kindOf(page, ct ?? null);
           const cut = await narrow(bytes, url, kind, select);
@@ -529,5 +538,18 @@ export default class extends Tools {
     out.headers.set("x-egress-via", via);
     if (skipped.length) out.headers.set("x-egress-skipped", skipped.join("; "));
     return out;
+  }
+
+  /**
+   * When `url` was last downloaded, in epoch milliseconds: null if nothing is cached, 0 if it was
+   * cached before downloads were dated. Never goes to the network.
+   */
+  async cachedAt(url: string): Promise<number | null> {
+    const page = url.split("#")[0] ?? url;
+    const at = await this.env.CACHE.get(`at:${page}`);
+    if (at) return Number(at);
+    // Listing reads the key's name only, never the cached bytes.
+    const { keys } = await this.env.CACHE.list({ prefix: `raw:${page}`, limit: 1 });
+    return keys[0]?.name === `raw:${page}` ? 0 : null;
   }
 }

@@ -17,6 +17,8 @@ import {
   slugOf,
   tagCounts,
   toEntry,
+  withoutRepeats,
+  type Message,
   type RawEvent,
 } from "../workers/mcp-righttoknow/src/rtk";
 
@@ -28,7 +30,7 @@ type Spec = {
 type Out = { content: { text: string }[]; isError?: boolean };
 const REQ = "https://www.righttoknow.org.au/request/internal_anu_correspondence_conc";
 
-/** mcp-fetch's fetch_url, kept copies and all, as a stub: answers from `pages`, logs each call. */
+/** mcp-fetch's fetch_url, cached copies and all, as a stub: answers from `pages`, logs each call. */
 const fakeFetch = (pages: (args: Record<string, unknown>) => string) => {
   const calls: Record<string, unknown>[] = [];
   const FETCH = {
@@ -36,6 +38,7 @@ const fakeFetch = (pages: (args: Record<string, unknown>) => string) => {
       calls.push({ name, ...args });
       return { content: [{ type: "text", text: pages(args) }] };
     },
+    cachedAt: async () => Date.parse("2026-11-20T03:00:00Z"),
     egress: async () => new Response("", { status: 500 }),
   };
   return { calls, env: { ...env, FETCH } as unknown as Env };
@@ -428,6 +431,71 @@ describe("righttoknow_request", () => {
     expect(out.events[1].snippet).toMatch(/^Dear S P, I refer to your two requests/);
   });
 
+  it("gives messages in full from the cached page, snippets where it has none", async () => {
+    stubJson();
+    // PAGE holds outgoing-32695 and incoming-50918; META's events are outgoing-32450 and
+    // incoming-50918, so one comes from the cached page and one stays a snippet.
+    const { calls, env: e } = fakeFetch(() => PAGE);
+    const out = json(await run("righttoknow_request", { request: REQ, max_chars: 20 }, e));
+    expect(calls).toEqual([{ name: "fetch_url", url: REQ, format: "raw", cache_only: true }]);
+    const [sent, response] = out.events;
+    expect(sent).toMatchObject({ message: "outgoing-32450", more: "righttoknow_full_request" });
+    expect(sent.snippet).toMatch(/^Under the Freedom of Information Act/);
+    expect(response).toMatchObject({
+      message: "incoming-50918",
+      author: "Freedom of Information, Australian National University",
+      text: "Dear S P,\n\nThis is a […]",
+      truncated: true,
+      length: 62,
+      attachments: [{ name: "FOIs 202600332 Consultation.pdf" }],
+    });
+    expect(response.more).toBeUndefined();
+    expect(out.full_text).toMatch(/cached 2026-11-20; 1 newer message/);
+    expect(out.full_text).toMatch(/hidden or redacted/);
+  });
+
+  it("previews 1,000 characters a message by default, 15,000 for messages picked by id", async () => {
+    stubJson();
+    const long = "y".repeat(20_000);
+    const page = PAGE.replace("This is a notice under section 24AB of the FOI Act.", long);
+    const { env: e } = fakeFetch(() => page);
+    const all = json(await run("righttoknow_request", { request: REQ }, e));
+    expect(all.events[1].text).toHaveLength(1_000 + " […]".length);
+    const one = json(await run("righttoknow_request", { request: REQ, ids: ["50918"] }, e));
+    expect(one.events[0].text).toHaveLength(15_000 + " […]".length);
+    expect(one.events[0].length).toBeGreaterThan(20_000);
+  });
+
+  it("picks messages by id, with or without their prefix", async () => {
+    stubJson();
+    const { env: e } = fakeFetch(() => PAGE);
+    const out = json(await run("righttoknow_request", { request: REQ, ids: ["50918"] }, e));
+    expect(out.events.map((ev: { message: string }) => ev.message)).toEqual(["incoming-50918"]);
+    expect(out.events[0].truncated).toBeUndefined();
+    const both = json(
+      await run("righttoknow_request", { request: REQ, ids: ["outgoing-32450", "50918"] }, e),
+    );
+    expect(both.events).toHaveLength(2);
+  });
+
+  it("says snippets only when nothing is cached, without fetching the page", async () => {
+    stubJson();
+    const calls: Record<string, unknown>[] = [];
+    const FETCH = {
+      call: async (name: string, args: Record<string, unknown>) => {
+        calls.push({ name, ...args });
+        return { content: [{ type: "text", text: `Not cached: ${args.url}` }], isError: true };
+      },
+    };
+    const out = json(
+      await run("righttoknow_request", { request: REQ }, { ...env, FETCH } as unknown as Env),
+    );
+    // The folded page only: an unfolded copy is never used in its place.
+    expect(calls.map((c) => [c.url, c.cache_only])).toEqual([[REQ, true]]);
+    expect(out.full_text).toMatch(/^No cached copy/);
+    expect(out.events[1].more).toBe("righttoknow_full_request");
+  });
+
   it("says when the site has no such request", async () => {
     vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response("", { status: 404 }));
     const r = await run("righttoknow_request", { request: "no_such_request" });
@@ -471,7 +539,7 @@ describe("righttoknow_full_request", () => {
     expect(calls).toHaveLength(0);
   });
 
-  it("uses the kept page while it holds the newest message", async () => {
+  it("uses the cached page while it holds the newest message", async () => {
     stubJson();
     const { calls, env: e } = fakeFetch(() => PAGE);
     // META's newest message is incoming-50918, which PAGE has.
@@ -483,14 +551,32 @@ describe("righttoknow_full_request", () => {
       ),
     );
     expect(calls).toEqual([{ name: "fetch_url", url: REQ, format: "raw", force: false }]);
-    expect(out.page).toBe("kept copy, current");
+    expect(out.page).toBe("cached copy, current");
     expect(out.messages.map((m: { id: string }) => m.id)).toEqual([
       "outgoing-32695",
       "incoming-50918",
     ]);
   });
 
-  it("loads the page again once the request has a message the kept copy lacks", async () => {
+  it("returns only the messages asked for, cut at 15,000 characters by default", async () => {
+    stubJson();
+    const long = "x".repeat(16_000);
+    const page = PAGE.replace("This is a notice under section 24AB of the FOI Act.", long);
+    const { env: e } = fakeFetch(() => page);
+    const out = json(
+      await run(
+        "righttoknow_full_request",
+        { request: REQ, user_confirmed: true, ids: ["incoming-50918"] },
+        e,
+      ),
+    );
+    expect(out.messages).toHaveLength(1);
+    expect(out.messages[0]).toMatchObject({ id: "incoming-50918", truncated: true });
+    expect(out.messages[0].text).toHaveLength(15_000 + " […]".length);
+    expect(out.messages[0].length).toBeGreaterThan(16_000);
+  });
+
+  it("loads the page again once the request has a message the cached copy lacks", async () => {
     stubJson();
     const fresh = PAGE.replace('id="incoming-50918"', 'id="incoming-50918"');
     const stale = PAGE.replace(/<div class="incoming[\s\S]*$/, "");
@@ -509,7 +595,7 @@ describe("righttoknow_full_request", () => {
 });
 
 describe("righttoknow_full_attachment", () => {
-  it("keeps one copy per document, whichever of its URLs is passed", async () => {
+  it("caches one copy per document, whichever of its URLs is passed", async () => {
     const { calls, env: e } = fakeFetch(() => "# Decision");
     const out = json(
       await run(
@@ -569,7 +655,7 @@ describe("the authorities list", () => {
     expect(tagCounts(all)).toMatchObject({ federal: 3, foi_yes: 4, university: 2, vic: 1 });
   });
 
-  it("is kept by mcp-fetch for a week, and parsed once per isolate", async () => {
+  it("is cached by mcp-fetch for a week, and parsed once per isolate", async () => {
     const { calls, env: e } = fakeFetch(() => CSV);
     expect(json(await run("righttoknow_authorities", { refresh: true }, e))).toMatchObject({
       total: 4,
@@ -716,5 +802,64 @@ describe("righttoknow_site and righttoknow_citations", () => {
     stubJson(asked);
     await run("righttoknow_feed", { kind: "list", value: "successful" });
     expect(asked).toEqual(["/feed/list/successful.json"]);
+  });
+});
+
+describe("repeated paragraphs", () => {
+  const scope =
+    "I request all documents created by Council, its councillors or staff between 7 April 2026 " +
+    "and 22 June 2026 relating to the booking or the decision to cancel it.";
+  const cats =
+    "1. Any Delegate Report completed for the cancellation decision under Rule 2.3.4 of " +
+    "Council's Governance Rules;";
+  const msg = (id: string, date: string, text: string): Message => ({
+    id,
+    direction: id.startsWith("incoming") ? "incoming" : "outgoing",
+    author: "",
+    date,
+    text,
+    attachments: [],
+    link: "",
+  });
+
+  it("are replaced by one marker naming what they repeat, whatever the line wrapping", () => {
+    const out = withoutRepeats([
+      msg(
+        "outgoing-1",
+        "2026-08-25T11:32:04+10:00",
+        `Dear Council,\n\nSCOPE:\n\n${scope}\n\n${cats}`,
+      ),
+      msg(
+        "incoming-2",
+        "2026-08-31T13:02:29+10:00",
+        // The agency's restatement, hard-wrapped and with a curly apostrophe.
+        `Dear Mr Amir\n\nSCOPE:\n\n${scope.replace("staff between", "staff\nbetween")}\n\n` +
+          `${cats.replace("'", "’")}\n\nThe estimated charge is $880.60.`,
+      ),
+    ]);
+    expect(out.get("outgoing-1")!.omitted).toEqual([]);
+    const reply = out.get("incoming-2")!;
+    // Short lines stay ("Dear Mr Amir", and "SCOPE:", which labels what the marker replaces);
+    // only one caught between two repeats would go with them.
+    expect(reply.text).toBe(
+      "Dear Mr Amir\n\nSCOPE:\n\n[2 paras (270 chars) repeated from outgoing-1 (2026-08-25)]" +
+        "\n\nThe estimated charge is $880.60.",
+    );
+    expect(reply.omitted).toEqual([
+      { from: "outgoing-1", date: "2026-08-25", paragraphs: 2, chars: 270 },
+    ]);
+  });
+  it("take a short line caught between two repeats with them", () => {
+    const out = withoutRepeats([
+      msg("outgoing-1", "2026-08-25T11:32:04+10:00", `${scope}\n\nCATEGORIES:\n\n${cats}`),
+      msg(
+        "incoming-2",
+        "2026-09-03T19:15:28+10:00",
+        `${scope}\n\nCATEGORIES:\n\n${cats}\n\nNew text.`,
+      ),
+    ]);
+    expect(out.get("incoming-2")!.text).toMatch(
+      /^\[3 paras \(\d+ chars\) repeated from outgoing-1 \(2026-08-25\)\]\n\nNew text\.$/,
+    );
   });
 });
