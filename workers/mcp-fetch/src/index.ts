@@ -101,15 +101,21 @@ const download = async (env: Env, url: string, via?: Via) => {
   };
 };
 
-/** Original bytes, from KV unless `force` says to go back to the origin. */
-const bytesFor = async (env: Env, url: string, force: boolean, via?: Via) => {
+/**
+ * Original bytes, from KV unless `force` says to go back to the origin, or `maxAge` (seconds)
+ * says the kept copy is too old. A copy kept before downloads were dated counts as too old.
+ */
+const bytesFor = async (env: Env, url: string, force: boolean, via?: Via, maxAge?: number) => {
   if (!force) {
-    const hit = await env.CACHE.get(`raw:${url}`, "arrayBuffer");
-    const ct = await env.CACHE.get(`ct:${url}`);
+    const at = maxAge === undefined ? null : Number(await env.CACHE.get(`at:${url}`));
+    const fresh = maxAge === undefined || (!!at && Date.now() - at <= maxAge * 1000);
+    const hit = fresh ? await env.CACHE.get(`raw:${url}`, "arrayBuffer") : null;
+    const ct = hit ? await env.CACHE.get(`ct:${url}`) : null;
     if (hit) return { bytes: new Uint8Array(hit), ct, cached: true, route: "cache" };
   }
   const { bytes, ct, route } = await download(env, url, via);
   await env.CACHE.put(`raw:${url}`, bytes);
+  await env.CACHE.put(`at:${url}`, String(Date.now()));
   if (ct) await env.CACHE.put(`ct:${url}`, ct);
   return { bytes, ct, cached: false, route };
 };
@@ -285,7 +291,8 @@ const Tools = mcpWorker({
   tools: {
     url: tool({
       description:
-        "Fetch one URL and return its content. The original bytes are cached forever, so asking " +
+        "Fetch one URL and return its content. The original bytes are kept (until `force` or " +
+        "`max_age` says otherwise), so asking " +
         "for a different format later never re-downloads. PDFs and Word documents are converted " +
         "with Workers AI. Nothing is followed, crawled or inferred: you get the URL you asked for.",
       input: {
@@ -304,6 +311,12 @@ const Tools = mcpWorker({
           force: {
             type: "boolean",
             description: "Re-download instead of using the cached bytes. Default false.",
+          },
+          max_age: {
+            type: "integer",
+            description:
+              "Re-download if the kept copy is older than this many seconds (604800 is a week). " +
+              "Default: the kept copy is used however old it is.",
           },
           select: {
             type: "string",
@@ -327,13 +340,19 @@ const Tools = mcpWorker({
           },
         },
       },
-      async run({ url, format, force, via, select }, c) {
+      async run({ url, format, force, max_age, via, select }, c) {
         const env = await schema(c);
         const fmt: Format = FORMATS.includes(format as Format) ? (format as Format) : "auto";
         // The server never sees a #fragment, so every fragment of a page shares one download.
         const page = url.split("#")[0] ?? url;
         try {
-          const { bytes, ct, cached, route } = await bytesFor(env, page, force === true, via);
+          const { bytes, ct, cached, route } = await bytesFor(
+            env,
+            page,
+            force === true,
+            via,
+            max_age ?? undefined,
+          );
           const kind = kindOf(page, ct ?? null);
           const cut = await narrow(bytes, url, kind, select);
           const rendered = await render(env, cut.bytes, page, kind, fmt);
