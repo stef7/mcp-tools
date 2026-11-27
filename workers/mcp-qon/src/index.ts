@@ -12,11 +12,13 @@
  */
 import cfg from "../wrangler.json";
 import { version } from "../package.json";
-import { mcpWorker, tool } from "../../../core/mcp";
+import { mcpWorker, tool, type Result } from "../../../core/mcp";
+import { ROUTES } from "../../../core/egress";
 import {
   asEstimates,
   asWritten,
   attachments,
+  BASE,
   callPlain,
   ESTIMATES_ORDER,
   estimatesDownload,
@@ -90,8 +92,71 @@ const parliamentParam = async (p?: number | string) => {
   return n;
 };
 
+// ─── APH's own files, through mcp-fetch ──────────────────────────────────────────────────────
+
+/** What this worker uses of mcp-fetch over RPC: its fetch_url tool. */
+type FetchRpc = { call(name: string, args: object): Promise<Result> };
+const fetcher = (env: Env) => env.FETCH as unknown as FetchRpc;
+
+/** The downloads this worker hands out; qon_file reads nothing else. */
+const QON_FILE = new RegExp(
+  `^${BASE.replace(/\./g, "\\.")}/api/qon/(downloadquestions|downloadestimatesquestions|downloadattachment)\\b`,
+  "i",
+);
+
+type FileRef = { name: string; url: string };
+type FileOpts = { via?: string[] | undefined; force?: boolean | undefined };
+
+/**
+ * One APH file as markdown, via mcp-fetch's fetch_url: it keeps the original bytes, so a second
+ * read is free, and converts PDF and Word with Workers AI. A plain GET, so mcp-fetch's routes
+ * (the home tunnel among them) can reach it even where APH's firewall refuses the API.
+ */
+const markdownOf = async (env: Env, url: string, o: FileOpts = {}) => {
+  const out = await fetcher(env).call("fetch_url", {
+    url,
+    format: "auto",
+    ...(o.via?.length ? { via: o.via } : {}),
+    ...(o.force ? { force: true } : {}),
+  });
+  const text = out.content[0]?.text ?? "";
+  if (out.isError) throw new Error(text || `Could not read ${url}`);
+  return text;
+};
+
+/** Each file with its markdown, or why there is none; one failure costs that file only. */
+const documents = (env: Env, files: FileRef[], o: FileOpts) =>
+  Promise.all(
+    files.map(async (f) => {
+      try {
+        return { ...f, markdown: await markdownOf(env, f.url, o) };
+      } catch (e) {
+        return { ...f, error: failure(e) };
+      }
+    }),
+  );
+
+const FILES = {
+  type: "string",
+  enum: ["links", "markdown"],
+  description:
+    "APH's own files: the question-and-answer download (as APH serves it, usually a PDF) and " +
+    "any answer attachments. links (default): their URLs, to open or save. markdown: also " +
+    "read each one through mcp-fetch, which caches it, and include its text as markdown.",
+} as const;
+
+const VIA = {
+  type: "array",
+  items: { type: "string", enum: [...ROUTES] },
+  description:
+    "For files: markdown, mcp-fetch's routes, in order (e.g. ['tunnel'] for the home " +
+    "connection). Default: mcp-fetch's own.",
+} as const;
+
 export default mcpWorker({
   ...cfg,
+  // FETCH is bound to call mcp-fetch, not to put its tools on this connector.
+  services: [],
   version,
   info: () => ({
     title: "Senate questions on notice",
@@ -105,8 +170,9 @@ export default mcpWorker({
       "'Question on notice no. 716 (48th Parliament)'. Search returns snippets; qon_get gives " +
       "the full text, transfers between portfolios and answer attachments. Senators, " +
       "ministries, committees, portfolios, agencies and estimates rounds may be named rather " +
-      "than given as IDs; qon_list shows the options. Answer attachments and the 'download' " +
-      "links are files on aph.gov.au: read them with a fetch tool.",
+      "than given as IDs; qon_list shows the options. The 'download' links and answer " +
+      "attachments are APH's own files (usually PDFs): give the user the link, or read one as " +
+      "markdown with qon_file, or all of a question's with files: 'markdown' on qon_get.",
   }),
   tools: {
     list: tool({
@@ -212,7 +278,8 @@ export default mcpWorker({
     get: tool({
       description:
         "One written question in full: the question and answer text with their numbering " +
-        "kept, dates, status, any transfers between portfolios, and the answer's attachments.",
+        "kept, dates, status, any transfers between portfolios, and the answer's attachments. " +
+        "files: markdown also reads APH's own download and attachments as markdown.",
       input: {
         type: "object",
         required: ["number"],
@@ -222,9 +289,11 @@ export default mcpWorker({
             type: ["integer", "string"],
             description: "Parliament number, default the current one.",
           },
+          files: FILES,
+          via: VIA,
         },
       },
-      async run({ number, parliament }) {
+      async run({ number, parliament, files: mode, via }, c) {
         const p = await parliamentParam(parliament);
         if (p === "x") throw new Error("Numbers restart each Parliament; name one, e.g. 48.");
         const { rows } = await searchTable<WrittenRow>(
@@ -246,7 +315,17 @@ export default mcpWorker({
               r.IsTransferred ? transfers(r.Id).catch(failure) : Promise.resolve([]),
               attachments(r.Id).catch(failure),
             ]);
-            return { ...asWritten(r, "full"), transfers: moved, attachments: files };
+            const q = asWritten(r, "full");
+            const refs: FileRef[] = [
+              ...(q.download ? [{ name: "question and answer", url: q.download }] : []),
+              ...(Array.isArray(files) ? files.map((f) => ({ name: f.file, url: f.url })) : []),
+            ];
+            return {
+              ...q,
+              transfers: moved,
+              attachments: files,
+              ...(mode === "markdown" ? { documents: await documents(c.env, refs, { via }) } : {}),
+            };
           }),
         );
         // A question put to several portfolios comes back once per portfolio.
@@ -354,9 +433,11 @@ export default mcpWorker({
             type: "integer",
             description: "The search result's `id`, for attachments and transfers.",
           },
+          files: FILES,
+          via: VIA,
         },
       },
-      async run({ committee_id, round_id, portfolio_id, number, id }) {
+      async run({ committee_id, round_id, portfolio_id, number, id, files: mode, via }, c) {
         const q = new URLSearchParams({
           committeeid: String(committee_id),
           estimatesroundid: String(round_id),
@@ -374,6 +455,10 @@ export default mcpWorker({
           PortfolioId: portfolio_id,
           Number: number,
         };
+        const refs: FileRef[] = [
+          { name: "question and answer", url: estimatesDownload(ids) },
+          ...(Array.isArray(files) ? files.map((f) => ({ name: f.file, url: f.url })) : []),
+        ];
         return {
           ...asEstimates({ ...detail, ...ids, Id: id ?? detail?.Id ?? 0 }, "full"),
           answered: aphDate(detail?.AnsweredDate),
@@ -383,7 +468,37 @@ export default mcpWorker({
           ...(files === undefined
             ? { note: "Pass `id` from the search result for attachments and transfers." }
             : { attachments: files, transfers: moved }),
+          ...(mode === "markdown" ? { documents: await documents(c.env, refs, { via }) } : {}),
         };
+      },
+    }),
+
+    file: tool({
+      description:
+        "Read one of APH's question files as markdown: a `download` link from a search or get " +
+        "result, or an attachment `url`. Read through mcp-fetch, which caches it, so asking " +
+        "again is free. To hand the user the file itself (usually a PDF), give them the link.",
+      input: {
+        type: "object",
+        required: ["url"],
+        properties: {
+          url: {
+            type: "string",
+            description:
+              `A ${BASE}/api/qon/downloadquestions/…, downloadestimatesquestions/… or ` +
+              "downloadattachment?attachmentId=… link.",
+          },
+          via: VIA,
+          force: { type: "boolean", description: "Download again instead of using the cache." },
+        },
+      },
+      async run({ url, via, force }, c) {
+        if (!QON_FILE.test(url))
+          throw new Error(
+            `Not a questions-on-notice file: ${url}. Use a download or attachment link from ` +
+              "qon_search, qon_get or qon_get_estimates.",
+          );
+        return markdownOf(c.env, url, { via, force });
       },
     }),
   },

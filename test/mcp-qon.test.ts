@@ -18,9 +18,21 @@ import {
 type Spec = { name: string; annotations: Record<string, boolean> };
 type Out = { content: { text: string }[]; isError?: boolean };
 
-const worker = () => new Worker(createExecutionContext(), env);
-const call = async (name: string, args: Record<string, unknown>) => {
-  const r = (await worker().call(`qon_${name}`, args)) as Out;
+/** mcp-fetch's fetch_url as a stub: answers from `pages`, logs each call. */
+const fakeFetch = (pages: (args: Record<string, unknown>) => Out) => {
+  const calls: Record<string, unknown>[] = [];
+  const FETCH = {
+    call: async (name: string, args: Record<string, unknown>) => {
+      calls.push({ name, ...args });
+      return pages(args);
+    },
+  };
+  return { calls, env: { ...env, FETCH } as unknown as Env };
+};
+
+const worker = (e: Env = env) => new Worker(createExecutionContext(), e);
+const call = async (name: string, args: Record<string, unknown>, e?: Env) => {
+  const r = (await worker(e).call(`qon_${name}`, args)) as Out;
   return { ...r, json: r.isError ? undefined : JSON.parse(r.content[0]!.text) };
 };
 
@@ -117,6 +129,7 @@ describe("the tool list", () => {
       "qon_get",
       "qon_search_estimates",
       "qon_get_estimates",
+      "qon_file",
     ]);
     expect(specs.every((t) => t.annotations.readOnlyHint)).toBe(true);
   });
@@ -347,6 +360,72 @@ describe("qon_get", () => {
     const r = await call("get", { number: 9999, parliament: 47 });
     expect(r.isError).toBe(true);
     expect(r.content[0]!.text).toContain("No question 9999 in the 47th Parliament");
+  });
+});
+
+describe("APH's files as markdown", () => {
+  const files = () => ({
+    "/api/qon/getdata": () => table([{ ...Q715, Status: "Answered" }]),
+    "/api/qon/getattachmentlist": () =>
+      Response.json([{ Id: 99, Attachment_FileName: "QON715.pdf" }]),
+  });
+
+  it("leaves files as links unless asked", async () => {
+    stub(files());
+    const { calls, env: e } = fakeFetch(() => ({ content: [{ text: "x" }] }));
+    const r = await call("get", { number: 715 }, e);
+    expect(r.json.documents).toBeUndefined();
+    expect(calls).toEqual([]);
+  });
+
+  it("reads the download and each attachment through mcp-fetch's fetch_url", async () => {
+    stub(files());
+    const { calls, env: e } = fakeFetch((a) =>
+      String(a.url).includes("attachmentId")
+        ? { content: [{ text: "conversion failed" }], isError: true }
+        : { content: [{ text: "# Question 715\n\nAnswer text" }] },
+    );
+    const r = await call("get", { number: 715, files: "markdown", via: ["tunnel"] }, e);
+    expect(calls).toEqual([
+      {
+        name: "fetch_url",
+        url: "https://www.aph.gov.au/api/qon/downloadquestions/Question-ParliamentNumber48-QuestionNumber715",
+        format: "auto",
+        via: ["tunnel"],
+      },
+      {
+        name: "fetch_url",
+        url: "https://www.aph.gov.au/api/qon/downloadattachment?attachmentId=99",
+        format: "auto",
+        via: ["tunnel"],
+      },
+    ]);
+    expect(r.json.documents).toEqual([
+      {
+        name: "question and answer",
+        url: "https://www.aph.gov.au/api/qon/downloadquestions/Question-ParliamentNumber48-QuestionNumber715",
+        markdown: "# Question 715\n\nAnswer text",
+      },
+      {
+        name: "QON715.pdf",
+        url: "https://www.aph.gov.au/api/qon/downloadattachment?attachmentId=99",
+        error: "conversion failed",
+      },
+    ]);
+  });
+
+  it("qon_file reads one link, and only APH's question files", async () => {
+    const { calls, env: e } = fakeFetch(() => ({ content: [{ text: "# Attachment" }] }));
+    const ok = (await worker(e).call("qon_file", {
+      url: "https://www.aph.gov.au/api/qon/downloadattachment?attachmentId=99",
+      force: true,
+    })) as Out;
+    expect(ok.content[0]!.text).toBe("# Attachment");
+    expect(calls[0]).toMatchObject({ format: "auto", force: true });
+    const bad = (await worker(e).call("qon_file", { url: "https://example.com/x.pdf" })) as Out;
+    expect(bad.isError).toBe(true);
+    expect(bad.content[0]!.text).toContain("Not a questions-on-notice file");
+    expect(calls).toHaveLength(1);
   });
 });
 
