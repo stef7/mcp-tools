@@ -21,14 +21,15 @@ export const BASE = "https://www.aph.gov.au";
 /** APH's firewall (Azure Front Door) answers some cloud IPs with an HTML block page. */
 export class Blocked extends Error {}
 
-const blockedMessage = (status: number) =>
-  `aph.gov.au's firewall refused the request (HTTP ${status}, "Page Blocked by WAF"). It ` +
-  `blocks some cloud IP ranges; the same search works in a browser at ${BASE}/qon.`;
+const blockedMessage = (status: number, how?: string | null) =>
+  `aph.gov.au's firewall refused the request (HTTP ${status}, "Page Blocked by WAF")` +
+  (how ? ` (tried: ${how})` : "") +
+  `. The same search works in a browser at ${BASE}/qon.`;
 
 const readJson = async (res: Response, path: string): Promise<unknown> => {
   const text = await res.text();
   if (/Page Blocked by WAF/i.test(text) || (res.status === 403 && !text.trim().startsWith("{")))
-    throw new Blocked(blockedMessage(res.status));
+    throw new Blocked(blockedMessage(res.status, res.headers.get("x-egress-skipped")));
   if (!res.ok) throw new Error(`aph.gov.au ${path}: HTTP ${res.status} ${text.slice(0, 200)}`);
   try {
     return JSON.parse(text);
@@ -37,19 +38,33 @@ const readJson = async (res: Response, path: string): Promise<unknown> => {
   }
 };
 
-const post = (path: string, body: URLSearchParams) =>
+/**
+ * How a request reaches aph.gov.au: a path on BASE, a method and a form body. The worker's own
+ * is `direct`, falling back to mcp-fetch's smart route when APH's firewall says no (see
+ * index.ts); tests pass their own.
+ */
+export type Net = (
+  path: string,
+  init: { method: "GET" | "POST"; body?: string | undefined },
+) => Promise<Response>;
+
+export const headersFor = (body?: string) => ({
+  Accept: "application/json",
+  ...(body !== undefined && { "Content-Type": "application/x-www-form-urlencoded" }),
+});
+
+/** Cloudflare's own fetch, from whichever colo runs the worker. */
+export const direct: Net = (path, { method, body }) =>
   fetch(`${BASE}${path}`, {
-    method: "POST",
-    headers: { Accept: "application/json", "Content-Type": "application/x-www-form-urlencoded" },
-    body,
+    method,
+    headers: headersFor(body),
+    ...(body !== undefined && { body }),
   });
 
 /** The `{ IsSuccess, Message }` endpoints, with Message unwrapped. */
-export const callWrapped = async <T>(path: string, body: URLSearchParams): Promise<T> => {
-  const got = (await readJson(await post(path, body), path)) as {
-    IsSuccess?: boolean;
-    Message?: string;
-  };
+export const callWrapped = async <T>(net: Net, path: string, body: URLSearchParams): Promise<T> => {
+  const res = await net(path, { method: "POST", body: body.toString() });
+  const got = (await readJson(res, path)) as { IsSuccess?: boolean; Message?: string };
   if (!got.IsSuccess) throw new Error(`aph.gov.au ${path}: ${got.Message ?? "no Message"}`);
   try {
     return JSON.parse(got.Message ?? "null") as T;
@@ -60,11 +75,9 @@ export const callWrapped = async <T>(path: string, body: URLSearchParams): Promi
 };
 
 /** The endpoints that answer plain JSON. */
-export const callPlain = async <T>(path: string, body?: URLSearchParams): Promise<T> =>
+export const callPlain = async <T>(net: Net, path: string, body?: URLSearchParams): Promise<T> =>
   (await readJson(
-    body
-      ? await post(path, body)
-      : await fetch(`${BASE}${path}`, { headers: { Accept: "application/json" } }),
+    await net(path, body ? { method: "POST", body: body.toString() } : { method: "GET" }),
     path,
   )) as T;
 
@@ -93,11 +106,12 @@ export const resetCache = () => listCache.clear();
  * One drop-down list. `current` is the page's "Only current …" box; off, it is every one the
  * database has ever had. The page's blank entry (`x`) is dropped, and so is parliaments' "All".
  */
-export const list = async (name: ListName, current = true): Promise<Option[]> => {
+export const list = async (net: Net, name: ListName, current = true): Promise<Option[]> => {
   const key = `${name}:${current}`;
   const hit = listCache.get(key);
   if (hit && Date.now() - hit.at < LIST_TTL_MS) return hit.options;
   const raw = await callWrapped<{ Id: string; Description: string }[]>(
+    net,
     LISTS[name],
     new URLSearchParams({ isCurrent: String(current) }),
   );
@@ -143,11 +157,11 @@ export const matching = (options: Option[], wanted: string): Option[] => {
  * ones, so a senator who has left can still be named. Ambiguity is an error naming the
  * candidates, never a guess.
  */
-export const resolve = async (name: ListName, value: string): Promise<string> => {
+export const resolve = async (net: Net, name: ListName, value: string): Promise<string> => {
   const v = value.trim();
   if (/^\d+$/.test(v)) return v;
   for (const current of [true, false]) {
-    const found = matching(await list(name, current), v);
+    const found = matching(await list(net, name, current), v);
     if (found.length === 1) return found[0]!.id;
     if (found.length > 1)
       throw new Error(
@@ -577,6 +591,7 @@ export const PAGE = 100;
  * server runs out.
  */
 export const searchTable = async <R>(
+  net: Net,
   path: string,
   form: (start: number, length: number) => URLSearchParams,
   offset: number,
@@ -586,7 +601,7 @@ export const searchTable = async <R>(
   let total = 0;
   while (rows.length < limit) {
     const length = Math.min(PAGE, limit - rows.length);
-    const got = await callWrapped<Table<R>>(path, form(offset + rows.length, length));
+    const got = await callWrapped<Table<R>>(net, path, form(offset + rows.length, length));
     total = got.recordsFiltered ?? got.recordsTotal ?? 0;
     const data = got.data ?? [];
     rows.push(...data);
@@ -731,9 +746,10 @@ export type Transfer = {
 };
 export type Attachment = { Id: number | string; Attachment_FileName?: string };
 
-export const transfers = async (questionId: number | string) =>
+export const transfers = async (net: Net, questionId: number | string) =>
   (
     (await callWrapped<Transfer[] | null>(
+      net,
       "/api/qon/gettransfer",
       new URLSearchParams({ questionId: String(questionId) }),
     )) ?? []
@@ -743,9 +759,10 @@ export const transfers = async (questionId: number | string) =>
     to: t.TransferredTo ?? null,
   }));
 
-export const attachments = async (questionId: number | string) =>
+export const attachments = async (net: Net, questionId: number | string) =>
   (
     (await callPlain<Attachment[] | null>(
+      net,
       "/api/qon/getattachmentlist",
       new URLSearchParams({ questionId: String(questionId) }),
     )) ?? []

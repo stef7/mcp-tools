@@ -11,8 +11,10 @@
  *
  * Plain `http://` URLs skip the tunnel: the request goes to the proxy in absolute form.
  *
- * Deliberately small: GET, HTTP/1.1 with `Connection: close`, so a response ends when the socket
- * does. It handles chunked bodies, gzip and deflate, and redirects; nothing else.
+ * Deliberately small: HTTP/1.1 with `Connection: close`, so a response ends when the socket
+ * does. It sends any method with an optional body, and handles chunked bodies, gzip and deflate,
+ * and redirects; nothing else. A redirect turns a POST into a GET without its body after 301,
+ * 302 and 303, as browsers do, and keeps both after 307 and 308.
  */
 import { connect as tcp } from "cloudflare:sockets";
 import { TrustedCert, startTls } from "./vendor/subtls.mjs";
@@ -20,6 +22,10 @@ import { TrustedCert, startTls } from "./vendor/subtls.mjs";
 export type Proxy = { hostname: string; port: number; username: string; password: string };
 
 export type ProxyFetchOptions = {
+  /** Default GET. */
+  method?: string;
+  /** Sent with a Content-Length, as is. */
+  body?: string | Uint8Array;
   headers?: Record<string, string>;
   /** Replaced in tests. */
   connect?: typeof tcp;
@@ -172,8 +178,16 @@ const basic = (p: Proxy) => "Basic " + btoa(`${p.username}:${p.password}`);
 const once = async (
   proxy: Proxy,
   url: URL,
-  opts: Required<Omit<ProxyFetchOptions, "headers" | "trust">> & ProxyFetchOptions,
+  opts: Required<Omit<ProxyFetchOptions, "headers" | "trust" | "method" | "body">> &
+    ProxyFetchOptions,
 ) => {
+  const method = (opts.method ?? "GET").toUpperCase();
+  const payload =
+    opts.body === undefined
+      ? undefined
+      : typeof opts.body === "string"
+        ? enc.encode(opts.body)
+        : opts.body;
   const secure = url.protocol === "https:";
   const socket = opts.connect(
     { hostname: proxy.hostname, port: proxy.port },
@@ -183,10 +197,17 @@ const once = async (
     `Host: ${url.host}`,
     "Connection: close",
     "Accept-Encoding: gzip, deflate",
-    ...Object.entries(opts.headers ?? {}).map(([k, v]) => `${k}: ${v}`),
+    ...Object.entries(opts.headers ?? {})
+      .filter(([k]) => k.toLowerCase() !== "content-length")
+      .map(([k, v]) => `${k}: ${v}`),
+    ...(payload ? [`Content-Length: ${payload.length}`] : []),
   ];
-  const request = (target: string, extra = "") =>
-    enc.encode(`GET ${target} HTTP/1.1\r\n${extra}${lines.join("\r\n")}\r\n\r\n`);
+  const request = (target: string, extra = "") => {
+    const head = enc.encode(
+      `${method} ${target} HTTP/1.1\r\n${extra}${lines.join("\r\n")}\r\n\r\n`,
+    );
+    return payload ? concat([head, payload], head.length + payload.length) : head;
+  };
   let stream = socket;
   let raw: Uint8Array | undefined;
   try {
@@ -257,10 +278,11 @@ export const proxyFetch = async (proxy: Proxy, input: string, opts: ProxyFetchOp
   const full = { connect: tcp, timeoutMs: 30_000, maxBytes: 25 * 1024 * 1024, ...opts };
   const run = async () => {
     let url = new URL(input);
+    let hopOpts = full;
     for (let hop = 0; hop <= MAX_REDIRECTS; hop++) {
       if (url.protocol !== "https:" && url.protocol !== "http:")
         throw new Error(`cannot proxy ${url.protocol} URLs`);
-      const res = await once(proxy, url, full);
+      const res = await once(proxy, url, hopOpts);
       const next = res.status >= 300 && res.status < 400 && res.headers.get("location");
       if (!next) {
         const out = new Response(res.status === 204 || res.status === 304 ? null : res.body, {
@@ -272,6 +294,12 @@ export const proxyFetch = async (proxy: Proxy, input: string, opts: ProxyFetchOp
         return out;
       }
       url = new URL(next, url);
+      // What browsers do: only 307 and 308 repeat the method and body.
+      const method = (hopOpts.method ?? "GET").toUpperCase();
+      if (res.status !== 307 && res.status !== 308 && method !== "GET" && method !== "HEAD") {
+        const { body: _dropped, ...rest } = hopOpts;
+        hopOpts = { ...rest, method: "GET" };
+      }
     }
     throw new Error(`more than ${MAX_REDIRECTS} redirects`);
   };

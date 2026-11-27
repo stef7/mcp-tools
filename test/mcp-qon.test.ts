@@ -316,6 +316,52 @@ describe("qon_search", () => {
   });
 });
 
+describe("when APH's firewall blocks Cloudflare", () => {
+  const waf = () =>
+    new Response("<html><title>WAF Block Page </title><h1>Page Blocked by WAF</h1>", {
+      status: 403,
+      headers: { "content-type": "text/html" },
+    });
+
+  it("sends the same request through mcp-fetch's smart route", async () => {
+    vi.spyOn(globalThis, "fetch").mockImplementation(async () => waf());
+    const asked: { url: string; opts: Record<string, unknown> }[] = [];
+    const FETCH = {
+      egress: async (url: string, opts: Record<string, unknown>) => {
+        asked.push({ url, opts });
+        const path = new URL(url).pathname;
+        if (path === "/api/qon/GetParliaments/") return wrapped(PARLIAMENTS);
+        if (path === "/api/qon/getdata") return table([Q715], 716);
+        throw new Error(`Unexpected egress of ${path}`);
+      },
+    };
+    const r = await call("search", {}, { ...env, FETCH } as unknown as Env);
+    expect(r.json.results[0].number).toBe(715);
+    const data = asked.find((a) => a.url.endsWith("/api/qon/getdata"))!;
+    expect(data.opts).toMatchObject({
+      method: "POST",
+      via: ["smart"],
+      idempotent: true,
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    });
+    expect(new URLSearchParams(String(data.opts.body)).get("fieldParliament")).toBe("48");
+  });
+
+  it("says what was tried when the smart route is refused too", async () => {
+    vi.spyOn(globalThis, "fetch").mockImplementation(async () => waf());
+    const FETCH = {
+      egress: async () => {
+        const res = waf();
+        res.headers.set("x-egress-skipped", "smart: blocked (HTTP 403)");
+        return res;
+      },
+    };
+    const r = await call("search", {}, { ...env, FETCH } as unknown as Env);
+    expect(r.isError).toBe(true);
+    expect(r.content[0]!.text).toContain("tried: smart: blocked (HTTP 403)");
+  });
+});
+
 describe("qon_get", () => {
   it("returns the full text with transfers and attachments", async () => {
     const seen: Seen[] = [];

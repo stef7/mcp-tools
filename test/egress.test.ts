@@ -347,6 +347,40 @@ describe("the tunnel", () => {
   });
 });
 
+describe("a method other than GET", () => {
+  it("skips the tunnel and the browser, which only fetch pages", async () => {
+    const t = tunnel(() => relayed("from the mac"));
+    const got = await egress({ TUNNEL: t }, URL_, {
+      via: ["tunnel", "browser"],
+      method: "POST",
+      body: "a=1",
+      fetch: site().get,
+    });
+    expect(got.via).toBe("fallback");
+    expect(t.seen).toEqual([]);
+    expect(got.skipped).toEqual([
+      "tunnel: only fetches pages, not POST",
+      "browser: only fetches pages, not POST",
+    ]);
+  });
+
+  it("reaches the fallback with its method and body", async () => {
+    const asked: RequestInit[] = [];
+    const get = (async (_: RequestInfo | URL, init?: RequestInit) => {
+      asked.push(init ?? {});
+      return page("ok");
+    }) as typeof fetch;
+    await egress({}, URL_, {
+      via: [],
+      method: "POST",
+      body: "a=1",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      fetch: get,
+    });
+    expect(asked[0]).toMatchObject({ method: "POST", body: "a=1" });
+  });
+});
+
 describe("the browser", () => {
   it("asks the same relay for the page loaded in Chrome", async () => {
     const t = tunnel(() => relayed("rendered"));

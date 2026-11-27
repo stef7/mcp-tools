@@ -13,13 +13,16 @@
 import cfg from "../wrangler.json";
 import { version } from "../package.json";
 import { mcpWorker, tool, type Result } from "../../../core/mcp";
-import { ROUTES } from "../../../core/egress";
+import { blockedBy, ROUTES } from "../../../core/egress";
 import {
   asEstimates,
   asWritten,
   attachments,
   BASE,
   callPlain,
+  direct,
+  headersFor,
+  type Net,
   ESTIMATES_ORDER,
   estimatesDownload,
   estimatesForm,
@@ -82,10 +85,10 @@ const COMMON = {
 const failure = (e: unknown) => (e instanceof Error ? e.message : String(e));
 
 /** The current Parliament's number, which is the first the list offers. */
-const currentParliament = async () => (await list("parliaments"))[0]?.id ?? "x";
+const currentParliament = async (net: Net) => (await list(net, "parliaments"))[0]?.id ?? "x";
 
-const parliamentParam = async (p?: number | string) => {
-  if (p === undefined || p === "") return currentParliament();
+const parliamentParam = async (net: Net, p?: number | string) => {
+  if (p === undefined || p === "") return currentParliament(net);
   if (String(p).toLowerCase() === "all") return "x";
   const n = String(p).replace(/\D/g, "");
   if (!n) throw new Error(`parliament is a number like 48, or "all"; got "${p}".`);
@@ -94,9 +97,41 @@ const parliamentParam = async (p?: number | string) => {
 
 // ─── APH's own files, through mcp-fetch ──────────────────────────────────────────────────────
 
-/** What this worker uses of mcp-fetch over RPC: its fetch_url tool. */
-type FetchRpc = { call(name: string, args: object): Promise<Result> };
+/** What this worker uses of mcp-fetch over RPC: its fetch_url tool and its egress routes. */
+type FetchRpc = {
+  call(name: string, args: object): Promise<Result>;
+  egress(
+    url: string,
+    opts: {
+      method?: string;
+      body?: string;
+      headers?: Record<string, string>;
+      via?: string[];
+      idempotent?: boolean;
+    },
+  ): Promise<Response>;
+};
 const fetcher = (env: Env) => env.FETCH as unknown as FetchRpc;
+
+/**
+ * Cloudflare's own fetch first, which is free. Only when APH's firewall refuses it does the same
+ * request go through mcp-fetch's smart route (Apify's Unblocker, billed per request). Every call
+ * here only reads, so the smart route may repeat it.
+ */
+const netFor =
+  (env: Env): Net =>
+  async (path, init) => {
+    const res = await direct(path, init);
+    if (!blockedBy(res) || !env.FETCH) return res;
+    await res.body?.cancel();
+    return fetcher(env).egress(`${BASE}${path}`, {
+      method: init.method,
+      ...(init.body !== undefined && { body: init.body }),
+      headers: headersFor(init.body),
+      via: ["smart"],
+      idempotent: true,
+    });
+  };
 
 /** The downloads this worker hands out; qon_file reads nothing else. */
 const QON_FILE = new RegExp(
@@ -193,8 +228,8 @@ export default mcpWorker({
           filter: { type: "string", description: "Keep only entries containing this text." },
         },
       },
-      async run({ of, current_only = true, filter }) {
-        let options = await list(of, current_only);
+      async run({ of, current_only = true, filter }, c) {
+        let options = await list(netFor(c.env), of, current_only);
         if (filter) {
           const f = filter.toLowerCase();
           options = options.filter((o) => o.name.toLowerCase().includes(f));
@@ -234,11 +269,12 @@ export default mcpWorker({
           text: COMMON.text,
         },
       },
-      async run(a) {
+      async run(a, c) {
+        const net = netFor(c.env);
         const [senator, ministry, parliament] = await Promise.all([
-          a.senator ? resolve("senators", a.senator) : undefined,
-          a.ministry ? resolve("ministries", a.ministry) : undefined,
-          parliamentParam(a.parliament),
+          a.senator ? resolve(net, "senators", a.senator) : undefined,
+          a.ministry ? resolve(net, "ministries", a.ministry) : undefined,
+          parliamentParam(net, a.parliament),
         ]);
         const limit = a.limit ?? 20;
         const offset = a.offset ?? 0;
@@ -255,6 +291,7 @@ export default mcpWorker({
           dir: a.dir,
         };
         const { total, rows } = await searchTable<WrittenRow>(
+          net,
           "/api/qon/getdata",
           (start, length) => writtenForm(query, start, length),
           offset,
@@ -294,9 +331,11 @@ export default mcpWorker({
         },
       },
       async run({ number, parliament, files: mode, via }, c) {
-        const p = await parliamentParam(parliament);
+        const net = netFor(c.env);
+        const p = await parliamentParam(net, parliament);
         if (p === "x") throw new Error("Numbers restart each Parliament; name one, e.g. 48.");
         const { rows } = await searchTable<WrittenRow>(
+          net,
           "/api/qon/getdata",
           (start, length) =>
             writtenForm({ parliament: p, questionNumber: String(number) }, start, length),
@@ -312,8 +351,8 @@ export default mcpWorker({
         const full = await Promise.all(
           found.map(async (r) => {
             const [moved, files] = await Promise.all([
-              r.IsTransferred ? transfers(r.Id).catch(failure) : Promise.resolve([]),
-              attachments(r.Id).catch(failure),
+              r.IsTransferred ? transfers(net, r.Id).catch(failure) : Promise.resolve([]),
+              attachments(net, r.Id).catch(failure),
             ]);
             const q = asWritten(r, "full");
             const refs: FileRef[] = [
@@ -372,13 +411,14 @@ export default mcpWorker({
           text: COMMON.text,
         },
       },
-      async run(a) {
+      async run(a, c) {
+        const net = netFor(c.env);
         const [senator, committee, round, portfolio, agency] = await Promise.all([
-          a.senator ? resolve("senators", a.senator) : undefined,
-          a.committee ? resolve("committees", a.committee) : undefined,
-          a.estimates_round ? resolve("estimates_rounds", a.estimates_round) : undefined,
-          a.portfolio ? resolve("portfolios", a.portfolio) : undefined,
-          a.agency ? resolve("agencies", a.agency) : undefined,
+          a.senator ? resolve(net, "senators", a.senator) : undefined,
+          a.committee ? resolve(net, "committees", a.committee) : undefined,
+          a.estimates_round ? resolve(net, "estimates_rounds", a.estimates_round) : undefined,
+          a.portfolio ? resolve(net, "portfolios", a.portfolio) : undefined,
+          a.agency ? resolve(net, "agencies", a.agency) : undefined,
         ]);
         const limit = a.limit ?? 20;
         const offset = a.offset ?? 0;
@@ -398,6 +438,7 @@ export default mcpWorker({
           dir: a.dir,
         };
         const { total, rows } = await searchTable<EstimatesRow>(
+          net,
           "/api/qon/getestimatesdata",
           (start, length) => estimatesForm(query, start, length),
           offset,
@@ -438,6 +479,7 @@ export default mcpWorker({
         },
       },
       async run({ committee_id, round_id, portfolio_id, number, id, files: mode, via }, c) {
+        const net = netFor(c.env);
         const q = new URLSearchParams({
           committeeid: String(committee_id),
           estimatesroundid: String(round_id),
@@ -445,9 +487,12 @@ export default mcpWorker({
           number: String(number),
         });
         const [detail, files, moved] = await Promise.all([
-          callPlain<EstimatesRow & Record<string, unknown>>(`/api/qon/getestimatesquestion?${q}`),
-          id === undefined ? undefined : attachments(id).catch(failure),
-          id === undefined ? undefined : transfers(id).catch(failure),
+          callPlain<EstimatesRow & Record<string, unknown>>(
+            net,
+            `/api/qon/getestimatesquestion?${q}`,
+          ),
+          id === undefined ? undefined : attachments(net, id).catch(failure),
+          id === undefined ? undefined : transfers(net, id).catch(failure),
         ]);
         const ids = {
           CommitteeId: committee_id,

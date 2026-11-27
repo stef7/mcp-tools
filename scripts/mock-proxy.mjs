@@ -11,6 +11,9 @@
  *   /upstream   595, the way Apify reports a site it could not reach
  *   /flaky?id=  502 the first time for each id, then 200 "hello after <n>"
  *   /missing?id= 404 "missing <n>" every time, n counting the requests for that id
+ *   /echo       200 "<METHOD> <body>", for checking what a request carried
+ *   /see-other  303 -> /echo, which a POST follows as a GET
+ *   /temporary  307 -> /echo, which a POST follows as a POST
  *
  * CONNECT to tls.test or other.test does what Unblocker does: TLS ends here, with a certificate for
  * tls.test signed by a test CA (test/fixtures/mock-*.pem), and the same canned paths are served
@@ -43,7 +46,7 @@ const hit = (url) => {
   return hits.get(key);
 };
 
-const server = createServer((req, res) => {
+const server = createServer(async (req, res) => {
   // Requests inside a tunnel are the site's, and carry no proxy credentials.
   if (!req.socket.tunnelled && req.headers["proxy-authorization"] !== AUTH) {
     res.writeHead(407, { "proxy-authenticate": 'Basic realm="mock"' });
@@ -72,6 +75,16 @@ const server = createServer((req, res) => {
   if (url.pathname === "/missing") {
     res.writeHead(404, { "content-type": "text/plain" });
     return res.end(`missing ${hit(url)}`);
+  }
+  if (url.pathname === "/echo") {
+    const chunks = [];
+    for await (const c of req) chunks.push(c);
+    res.writeHead(200, { "content-type": "text/plain" });
+    return res.end(`${req.method} ${Buffer.concat(chunks).toString()}`);
+  }
+  if (url.pathname === "/see-other" || url.pathname === "/temporary") {
+    res.writeHead(url.pathname === "/see-other" ? 303 : 307, { location: "/echo" });
+    return res.end();
   }
   if (url.pathname === "/redirect") {
     res.writeHead(302, { location: "/plain" });
