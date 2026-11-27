@@ -17,6 +17,7 @@
     { "binding": "GHOST", "service": "mcp-ghost" },
     { "binding": "APIFY", "service": "mcp-apify" },
     { "binding": "HAPPYHOUSESITTERS", "service": "mcp-happyhousesitters" },
-    { "binding": "RIGHTTOKNOW", "service": "mcp-righttoknow" }
+    { "binding": "RIGHTTOKNOW", "service": "mcp-righttoknow" },
+    { "binding": "QON", "service": "mcp-qon" }
   ]
 }
