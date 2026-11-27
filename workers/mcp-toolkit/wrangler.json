@@ -16,6 +16,7 @@
     { "binding": "DATA_GOV_AU", "service": "mcp-data-gov-au" },
     { "binding": "GHOST", "service": "mcp-ghost" },
     { "binding": "APIFY", "service": "mcp-apify" },
-    { "binding": "HAPPYHOUSESITTERS", "service": "mcp-happyhousesitters" }
+    { "binding": "HAPPYHOUSESITTERS", "service": "mcp-happyhousesitters" },
+    { "binding": "RIGHTTOKNOW", "service": "mcp-righttoknow" }
   ]
 }
