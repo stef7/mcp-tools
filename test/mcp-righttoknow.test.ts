@@ -478,6 +478,15 @@ describe("righttoknow_request", () => {
     expect(both.events).toHaveLength(2);
   });
 
+  it("takes ids sent as one string by a client with an older schema", async () => {
+    stubJson();
+    const { env: e } = fakeFetch(() => PAGE);
+    for (const ids of ['["incoming-50918"]', "incoming-50918", " 50918 , outgoing-32450"]) {
+      const out = json(await run("righttoknow_request", { request: REQ, ids }, e));
+      expect(out.events.map((ev: { message: string }) => ev.message)).toContain("incoming-50918");
+    }
+  });
+
   it("says snippets only when nothing is cached, without fetching the page", async () => {
     stubJson();
     const calls: Record<string, unknown>[] = [];
@@ -861,5 +870,22 @@ describe("repeated paragraphs", () => {
     expect(out.get("incoming-2")!.text).toMatch(
       /^\[3 paras \(\d+ chars\) repeated from outgoing-1 \(2026-08-25\)\]\n\nNew text\.$/,
     );
+  });
+  it("are never cut through: a preview stops before a marker it would split", async () => {
+    stubJson();
+    // incoming-50918 repeats outgoing-32695's second paragraph just before the 1,000 mark.
+    const page = PAGE.replace(
+      "<p>This is a notice under section 24AB of the FOI Act.</p>",
+      `<p>${"a".repeat(990)}</p>\n<p>For Categories 1 and 2, &#8220;between Specified Officers&#8221; ` +
+        "should also include file notes.\n<br />Thank you.</p>",
+    );
+    const { env: e } = fakeFetch(() => page);
+    const out = json(await run("righttoknow_request", { request: REQ }, e));
+    const text: string = out.events[1].text;
+    expect(text).not.toContain("[1 para");
+    expect(text).toMatch(/a \[…\]$/);
+    expect(out.events[1].omitted).toEqual([
+      { from: "outgoing-32695", date: "2026-09-24", paragraphs: 1, chars: expect.any(Number) },
+    ]);
   });
 });

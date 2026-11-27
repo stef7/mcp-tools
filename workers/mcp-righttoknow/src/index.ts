@@ -94,17 +94,38 @@ const MAX_CHARS = 15_000;
 /** righttoknow_request's default: enough to see what each message says, not the whole thread. */
 const PREVIEW_CHARS = 1_000;
 
-const cut = (text: string, max: number) =>
-  max > 0 && text.length > max
-    ? { text: text.slice(0, max) + " […]", truncated: true as const, length: text.length }
-    : { text };
+/** Cut at `max`, but never through a `[… repeated from …]` marker: stop before it instead. */
+const cut = (text: string, max: number) => {
+  if (max <= 0 || text.length <= max) return { text };
+  let end = max;
+  const open = text.lastIndexOf("[", end);
+  if (open >= 0 && text.indexOf("]", open) >= end && /^\[\d+ paras? \(/.test(text.slice(open)))
+    end = open;
+  return {
+    text: text.slice(0, end).trimEnd() + " […]",
+    truncated: true as const,
+    length: text.length,
+  };
+};
 
-/** `ids` as given (`incoming-51144`, `outgoing-32166`, or a bare `51144`) to a matcher. */
-const picker = (ids?: string[]) =>
-  ids?.length
-    ? (anchor?: string) =>
-        !!anchor && ids.some((i) => i === anchor || anchor.endsWith(`-${String(i).trim()}`))
+/**
+ * `ids` as given (`incoming-51144`, `outgoing-32166`, or a bare `51144`) to a matcher. A client
+ * holding an older schema may send them as one string, comma-separated or as JSON: take that too.
+ */
+const picker = (ids?: string[] | string) => {
+  const list = (
+    typeof ids === "string"
+      ? ids.trim().startsWith("[")
+        ? (JSON.parse(ids) as unknown[])
+        : ids.split(",")
+      : (ids ?? [])
+  )
+    .map((i) => String(i).trim())
+    .filter(Boolean);
+  return list.length
+    ? (anchor?: string) => !!anchor && list.some((i) => i === anchor || anchor.endsWith(`-${i}`))
     : () => true;
+};
 
 const IDS = {
   type: "array",
