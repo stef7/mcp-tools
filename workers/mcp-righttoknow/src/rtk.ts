@@ -24,10 +24,28 @@ export const decode = (s: string): string =>
     return ENTITIES[e.toLowerCase()] ?? m;
   });
 
+/**
+ * Alaveteli shortens long URLs in message bodies to their first ~40 characters plus "...",
+ * keeping the whole URL only in the href. Put the full URL back as the link text. Only when the
+ * visible text is a cut-down copy of the href: any other link text (a name, a redaction) stays.
+ */
+export const expandLinks = (html: string): string =>
+  html.replace(
+    /<a\b[^>]*?\bhref="([^"]*)"[^>]*>([\s\S]*?)<\/a>/gi,
+    (m, href: string, inner: string) => {
+      const full = decode(href);
+      const shown = decode(inner.replace(/<[^>]+>/g, "")).trim();
+      const stem = shown.replace(/(?:\.\.\.|…)$/, "");
+      if (stem === shown || stem.length < 8 || !full.startsWith(stem)) return m;
+      // Re-escape: the result goes back through decode() in htmlToText.
+      return full.replace(/&/g, "&amp;").replace(/</g, "&lt;");
+    },
+  );
+
 /** HTML to readable text: paragraphs and line breaks kept, everything else dropped. */
 export const htmlToText = (html: string): string =>
   decode(
-    html
+    expandLinks(html)
       .replace(/<(script|style)[\s\S]*?<\/\1>/gi, "")
       // Alaveteli writes "\n<br />", so take the source newline with it.
       .replace(/\s*<br\s*\/?>\s*/gi, "\n")

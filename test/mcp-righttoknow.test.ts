@@ -393,6 +393,22 @@ describe("the request page", () => {
     expect(htmlToText("<p>a\n<br />b</p>")).toBe("a\nb");
     expect(decode("&amp;nbsp; &#8220;x&#x201D;")).toBe("&nbsp; “x”");
   });
+
+  it("restores URLs the site shortens in link text, and leaves other link text alone", () => {
+    const long =
+      "https://www.ahpra.gov.au/About-Ahpra/Privacy-Freedom-of-information-and-Information-publication-scheme/Freedom-of-Information/Disclosure-Log.aspx?a=1&amp;b=2";
+    expect(
+      htmlToText(`<p>log at <a href="${long}">https://www.ahpra.gov.au/About-Ahpra/Pri...</a></p>`),
+    ).toBe(`log at ${decode(long)}`);
+    expect(htmlToText(`<a href="${long}">https://www.ahpra.gov.au/About…</a>`)).toBe(decode(long));
+    // Text that is not a prefix of the href (a name, a redaction) is kept as written.
+    expect(htmlToText(`<a href="mailto:x@y.gov.au">[AHPRA request email]</a>`)).toBe(
+      "[AHPRA request email]",
+    );
+    expect(htmlToText(`<a href="https://a.example/x">https://b.example/...</a>`)).toBe(
+      "https://b.example/...",
+    );
+  });
 });
 
 describe("references", () => {
