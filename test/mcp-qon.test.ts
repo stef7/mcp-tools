@@ -362,6 +362,80 @@ describe("when APH's firewall blocks Cloudflare", () => {
   });
 });
 
+describe("qon_search with contains", () => {
+  const row = (n: number, text: string) => ({
+    ...Q715,
+    Id: n,
+    Number: n,
+    QuestionText: `<p>${text}</p>`,
+  });
+
+  it("keeps rows whose text has any term, reading 100 a page, and says where to carry on", async () => {
+    const seen: Seen[] = [];
+    stub(
+      {
+        "/api/qon/getdata": (f) => {
+          const start = Number(f.get("start"));
+          const length = Number(f.get("length"));
+          const data = Array.from({ length }, (_, i) => {
+            const n = 1000 - start - i;
+            return row(
+              n,
+              n % 50 === 0 ? "Exports to Israel" : n % 77 === 0 ? "aid to GAZA" : "Roads",
+            );
+          });
+          return table(data, 1000);
+        },
+      },
+      seen,
+    );
+    const r = await call("search", { contains: ["gaza", "Israel"], limit: 3, text: "none" });
+    const pages = seen
+      .filter((s) => s.path === "/api/qon/getdata")
+      .map((s) => [s.form.get("start"), s.form.get("length")]);
+    expect(pages).toEqual([["0", "100"]]);
+    expect(r.json.results.map((x: { number: number }) => x.number)).toEqual([1000, 950, 924]);
+    expect(r.json.scanned).toBe(77); // 1000 down to 924
+    expect(r.json.next_offset).toBe(77);
+    expect(r.json.total_in_scope).toBe(1000);
+  });
+
+  it("stops at the scan limit", async () => {
+    const seen: Seen[] = [];
+    stub(
+      {
+        "/api/qon/getdata": (f) =>
+          table(
+            Array.from({ length: Number(f.get("length")) }, (_, i) => row(i, "Roads")),
+            1000,
+          ),
+      },
+      seen,
+    );
+    const r = await call("search", { contains: ["Gaza"], scan: 250, text: "none" });
+    const pages = seen
+      .filter((s) => s.path === "/api/qon/getdata")
+      .map((s) => [s.form.get("start"), s.form.get("length")]);
+    expect(pages).toEqual([
+      ["0", "100"],
+      ["100", "100"],
+      ["200", "50"],
+    ]);
+    expect(r.json).toMatchObject({ scanned: 250, returned: 0, next_offset: 250 });
+  });
+});
+
+describe("an attachment list that comes back empty", () => {
+  it("is no attachments, not an error", async () => {
+    stub({
+      "/api/qon/getdata": () => table([Q715]),
+      "/api/qon/getattachmentlist": () => new Response("", { status: 200 }),
+    });
+    const r = await call("get", { number: 715 });
+    expect(r.json.attachments).toEqual([]);
+  });
+});
+
 describe("qon_get", () => {
   it("returns the full text with transfers and attachments", async () => {
     const seen: Seen[] = [];
