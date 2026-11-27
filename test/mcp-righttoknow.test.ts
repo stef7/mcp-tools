@@ -28,7 +28,7 @@ type Spec = {
 type Out = { content: { text: string }[]; isError?: boolean };
 const REQ = "https://www.righttoknow.org.au/request/internal_anu_correspondence_conc";
 
-/** mcp-fetch's fetch_url, kept copies and all, as a stub: answers from `pages`, logs each call. */
+/** mcp-fetch's fetch_url, cached copies and all, as a stub: answers from `pages`, logs each call. */
 const fakeFetch = (pages: (args: Record<string, unknown>) => string) => {
   const calls: Record<string, unknown>[] = [];
   const FETCH = {
@@ -428,10 +428,10 @@ describe("righttoknow_request", () => {
     expect(out.events[1].snippet).toMatch(/^Dear S P, I refer to your two requests/);
   });
 
-  it("gives messages in full from a kept page, snippets where it has none", async () => {
+  it("gives messages in full from the cached page, snippets where it has none", async () => {
     stubJson();
     // PAGE holds outgoing-32695 and incoming-50918; META's events are outgoing-32450 and
-    // incoming-50918, so one comes from the kept page and one stays a snippet.
+    // incoming-50918, so one comes from the cached page and one stays a snippet.
     const { calls, env: e } = fakeFetch(() => PAGE);
     const out = json(await run("righttoknow_request", { request: REQ, max_chars: 20 }, e));
     expect(calls).toEqual([{ name: "fetch_url", url: REQ, format: "raw", cache_only: true }]);
@@ -462,13 +462,13 @@ describe("righttoknow_request", () => {
     expect(both.events).toHaveLength(2);
   });
 
-  it("says snippets only when nothing is kept, without fetching the page", async () => {
+  it("says snippets only when nothing is cached, without fetching the page", async () => {
     stubJson();
     const calls: Record<string, unknown>[] = [];
     const FETCH = {
       call: async (name: string, args: Record<string, unknown>) => {
         calls.push({ name, ...args });
-        return { content: [{ type: "text", text: `Not kept: ${args.url}` }], isError: true };
+        return { content: [{ type: "text", text: `Not cached: ${args.url}` }], isError: true };
       },
     };
     const out = json(
@@ -476,7 +476,7 @@ describe("righttoknow_request", () => {
     );
     // The folded page only: an unfolded copy is never used in its place.
     expect(calls.map((c) => [c.url, c.cache_only])).toEqual([[REQ, true]]);
-    expect(out.full_text).toMatch(/^No kept copy/);
+    expect(out.full_text).toMatch(/^No cached copy/);
     expect(out.events[1].more).toBe("righttoknow_full_request");
   });
 
@@ -523,7 +523,7 @@ describe("righttoknow_full_request", () => {
     expect(calls).toHaveLength(0);
   });
 
-  it("uses the kept page while it holds the newest message", async () => {
+  it("uses the cached page while it holds the newest message", async () => {
     stubJson();
     const { calls, env: e } = fakeFetch(() => PAGE);
     // META's newest message is incoming-50918, which PAGE has.
@@ -535,7 +535,7 @@ describe("righttoknow_full_request", () => {
       ),
     );
     expect(calls).toEqual([{ name: "fetch_url", url: REQ, format: "raw", force: false }]);
-    expect(out.page).toBe("kept copy, current");
+    expect(out.page).toBe("cached copy, current");
     expect(out.messages.map((m: { id: string }) => m.id)).toEqual([
       "outgoing-32695",
       "incoming-50918",
@@ -560,7 +560,7 @@ describe("righttoknow_full_request", () => {
     expect(out.messages[0].length).toBeGreaterThan(16_000);
   });
 
-  it("loads the page again once the request has a message the kept copy lacks", async () => {
+  it("loads the page again once the request has a message the cached copy lacks", async () => {
     stubJson();
     const fresh = PAGE.replace('id="incoming-50918"', 'id="incoming-50918"');
     const stale = PAGE.replace(/<div class="incoming[\s\S]*$/, "");
@@ -579,7 +579,7 @@ describe("righttoknow_full_request", () => {
 });
 
 describe("righttoknow_full_attachment", () => {
-  it("keeps one copy per document, whichever of its URLs is passed", async () => {
+  it("caches one copy per document, whichever of its URLs is passed", async () => {
     const { calls, env: e } = fakeFetch(() => "# Decision");
     const out = json(
       await run(
@@ -639,7 +639,7 @@ describe("the authorities list", () => {
     expect(tagCounts(all)).toMatchObject({ federal: 3, foi_yes: 4, university: 2, vic: 1 });
   });
 
-  it("is kept by mcp-fetch for a week, and parsed once per isolate", async () => {
+  it("is cached by mcp-fetch for a week, and parsed once per isolate", async () => {
     const { calls, env: e } = fakeFetch(() => CSV);
     expect(json(await run("righttoknow_authorities", { refresh: true }, e))).toMatchObject({
       total: 4,

@@ -2,7 +2,7 @@
  * mcp-righttoknow — FOI requests on Right to Know (righttoknow.org.au), read without a login.
  *
  *   righttoknow_search            the site's search, operators included: newest matching events
- *   righttoknow_request           one request: details, history, each message from a kept page
+ *   righttoknow_request           one request: details, history, each message from the cached page
  *                                 if there is one, else a snippet
  *   righttoknow_feed              the latest events on a search, agency, requester or request
  *   righttoknow_authority         an agency's record and request counts, optionally its events
@@ -16,9 +16,9 @@
  *
  * Right to Know is run by a small charity, and puts its HTML pages behind a Cloudflare challenge.
  * Everything but the `full_` tools reads the JSON the site serves without one. The `full_` tools
- * load challenged pages, so each needs `user_confirmed`, and what they load is kept by mcp-fetch
+ * load challenged pages, so each needs `user_confirmed`, and what they load is cached by mcp-fetch
  * and reused until the request changes (or, for documents, for good). The authority list is a
- * challenged CSV too, kept for a week.
+ * challenged CSV too, cached for a week.
  */
 import cfg from "../wrangler.json";
 import { version } from "../package.json";
@@ -63,10 +63,10 @@ async function getJson<T = any>(env: Env, path: string): Promise<T> {
 }
 
 /**
- * A challenged page, through mcp-fetch's fetch_url, which keeps it: `force` loads it again,
- * `max_age` (seconds) loads it again once the kept copy is that old.
+ * A challenged page, through mcp-fetch's fetch_url, which caches it: `force` loads it again,
+ * `max_age` (seconds) loads it again once the cached copy is that old.
  */
-async function kept(
+async function cached(
   env: Env,
   url: string,
   opts: { format?: "raw" | "markdown"; force?: boolean; max_age?: number } = {},
@@ -77,8 +77,8 @@ async function kept(
   return text;
 }
 
-/** A page mcp-fetch already keeps, or undefined. Never goes to the network. */
-async function keptOnly(env: Env, url: string): Promise<string | undefined> {
+/** A page mcp-fetch has already cached, or undefined. Never goes to the network. */
+async function cachedOnly(env: Env, url: string): Promise<string | undefined> {
   try {
     const out = await rpc(env).call("fetch_url", { url, format: "raw", cache_only: true });
     return out.isError ? undefined : out.content[0]?.text;
@@ -200,13 +200,13 @@ const WEEK = 7 * 24 * 3600;
 let authorityCache: { at: number; list: Authority[] } | undefined;
 
 /**
- * Every authority, from the site's CSV export: challenged, so kept by mcp-fetch and loaded again
- * only once the kept copy is a week old (or on `refresh`). Parsed once per isolate per hour.
+ * Every authority, from the site's CSV export: challenged, so cached by mcp-fetch and loaded again
+ * only once the cached copy is a week old (or on `refresh`). Parsed once per isolate per hour.
  */
 async function authorities(env: Env, refresh = false): Promise<Authority[]> {
   if (!refresh && authorityCache && Date.now() - authorityCache.at < 3_600_000)
     return authorityCache.list;
-  const text = await kept(env, CSV_URL, { max_age: WEEK, force: refresh });
+  const text = await cached(env, CSV_URL, { max_age: WEEK, force: refresh });
   if (!/^\s*"?Internal ID"?,/i.test(text))
     throw new Error(`The authorities list did not come back as CSV: ${text.slice(0, 200)}`);
   authorityCache = { at: Date.now(), list: parseAuthorities(text) };
@@ -282,7 +282,7 @@ export default mcpWorker({
       description:
         "One Right to Know request without loading a challenged page: title, authority, " +
         "requester, status, and its dated event history. Each message comes in full if " +
-        "righttoknow_full_request has loaded the page before (that copy is kept), with its " +
+        "righttoknow_full_request has loaded the page before (that copy is cached), with its " +
         "attachments; otherwise as a ~150-character snippet, marked with `more` where " +
         "righttoknow_full_request would give the rest. Accepts a slug " +
         "('internal_anu_correspondence_conc'), a numeric request id, or a request URL.",
@@ -293,7 +293,7 @@ export default mcpWorker({
           request: { type: "string", description: "Slug, numeric id or URL." },
           ids: IDS,
           max_chars: maxCharsInput(
-            "Asking again for its id with max_chars 0 reads the same kept copy: it costs nothing.",
+            "Asking again for its id with max_chars 0 reads the same cached copy: it costs nothing.",
           ),
         },
       },
@@ -303,7 +303,7 @@ export default mcpWorker({
         const [events, html] = await Promise.all([
           getJson<RawEvent[]>(env, FEEDS.request(meta.url_title)),
           // The folded page only: quoted earlier emails are noise, and folded is the default.
-          keptOnly(env, page),
+          cachedOnly(env, page),
         ]);
         const snippets = new Map(events.map((e) => [e.id, e.snippet]));
         const bodies = new Map(html ? parseCorrespondence(html, page).map((m) => [m.id, m]) : []);
@@ -340,11 +340,11 @@ export default mcpWorker({
         return {
           ...summary(meta),
           full_text: !html
-            ? "No kept copy of the page: snippets only. righttoknow_full_request loads it."
+            ? "No cached copy of the page: snippets only. righttoknow_full_request loads it."
             : missing
-              ? `From the kept copy of the page; ${missing} newer message(s) are snippets, ` +
+              ? `From the cached copy of the page; ${missing} newer message(s) are snippets, ` +
                 "which righttoknow_full_request would load."
-              : "Every message, from the kept copy of the page.",
+              : "Every message, from the cached copy of the page.",
           events: out,
         };
       },
@@ -436,7 +436,7 @@ export default mcpWorker({
     authorities: tool({
       description:
         "Find authorities on Right to Know by name and tag, from the site's full list (its CSV " +
-        "export, kept for a week). Matches every word of `query` against name, short name and " +
+        "export, cached for a week). Matches every word of `query` against name, short name and " +
         "slug, so 'home affairs' or 'ANU' both work; `tags` keeps only authorities carrying " +
         "all of them, e.g. ['federal'], ['university'], ['council', 'vic'], ['foi_no']. " +
         "Returns each one's slug (for righttoknow_authority, and requested_from: in " +
@@ -456,7 +456,7 @@ export default mcpWorker({
           refresh: {
             type: "boolean",
             description:
-              "Load the list again even if the kept copy is under a week old. It is a " +
+              "Load the list again even if the cached copy is under a week old. It is a " +
               "challenged page: only when the user asks for it. Default false.",
           },
         },
@@ -648,7 +648,7 @@ export default mcpWorker({
     full_request: tool({
       description:
         "Every message of one Right to Know request in full, with its attachments (name, size, " +
-        "and a url for righttoknow_full_attachment). The page is kept: a later call reuses it " +
+        "and a url for righttoknow_full_attachment). The page is cached: a later call reuses it " +
         "unless the request has a newer message, which the free JSON shows. Try " +
         "righttoknow_request first; its snippets are often enough.",
       confirm: CHALLENGED,
@@ -661,7 +661,7 @@ export default mcpWorker({
             type: "boolean",
             description:
               "Include the quoted earlier emails folded under 'show quoted sections'. A " +
-              "separate page from the folded one, kept separately. Default false.",
+              "separate page from the folded one, cached separately. Default false.",
           },
           messages: {
             type: "string",
@@ -670,11 +670,11 @@ export default mcpWorker({
           },
           ids: IDS,
           max_chars: maxCharsInput(
-            "Asking again for its id with max_chars 0 uses the kept page: no new load.",
+            "Asking again for its id with max_chars 0 uses the cached page: no new load.",
           ),
           force: {
             type: "boolean",
-            description: "Load the page again even if the kept copy is current. Default false.",
+            description: "Load the page again even if the cached copy is current. Default false.",
           },
         },
       },
@@ -684,15 +684,15 @@ export default mcpWorker({
       ) {
         const meta = await requestMeta(env, request);
         const page = `${ORIGIN}/request/${meta.url_title}${unfold ? "?unfold=1" : ""}`;
-        // The newest message the JSON knows of. If the kept page lacks it, the page is stale.
+        // The newest message the JSON knows of. If the cached page lacks it, the page is stale.
         const newest = (meta.info_request_events ?? [])
           .filter((e) => e.incoming_message_id || e.outgoing_message_id)
           .sort((a, b) => Date.parse(b.created_at) - Date.parse(a.created_at))
           .map(anchorOf)[0];
-        let all = parseCorrespondence(await kept(env, page, { force }), page);
+        let all = parseCorrespondence(await cached(env, page, { force }), page);
         let reloaded = force;
         if (!force && newest && !all.some((m) => m.id === newest)) {
-          all = parseCorrespondence(await kept(env, page, { force: true }), page);
+          all = parseCorrespondence(await cached(env, page, { force: true }), page);
           reloaded = true;
         }
         const wanted = picker(ids);
@@ -701,7 +701,7 @@ export default mcpWorker({
           .map((m) => ({ ...m, ...cut(m.text, max_chars) }));
         return {
           ...summary(meta),
-          page: reloaded ? "loaded from Right to Know" : "kept copy, current",
+          page: reloaded ? "loaded from Right to Know" : "cached copy, current",
           ...(newest && !all.some((m) => m.id === newest)
             ? { note: `${newest} is in the event history but not on the page (hidden?).` }
             : {}),
@@ -714,7 +714,7 @@ export default mcpWorker({
       description:
         "Read a document attached to a Right to Know response: a decision letter, schedule or " +
         "released documents, converted to markdown. Pass an attachment `url` from " +
-        "righttoknow_full_request. A document is kept for good once loaded, so asking again " +
+        "righttoknow_full_request. A document is cached for good once loaded, so asking again " +
         "costs nothing.",
       confirm: CHALLENGED,
       input: {
@@ -724,7 +724,7 @@ export default mcpWorker({
           url: { type: "string", description: "Attachment download URL, or its 'View' URL." },
           force: {
             type: "boolean",
-            description: "Load it again even though a copy is kept. Default false.",
+            description: "Load it again even though a copy is cached. Default false.",
           },
         },
       },
@@ -735,7 +735,7 @@ export default mcpWorker({
         // One download per document: the "View" form maps onto the download form.
         const path = u.pathname.replace("/attach/html/", "/attach/").replace(/\.html$/, "");
         const download = ORIGIN + path;
-        return { url: download, text: await kept(env, download, { format: "markdown", force }) };
+        return { url: download, text: await cached(env, download, { format: "markdown", force }) };
       },
     }),
   },

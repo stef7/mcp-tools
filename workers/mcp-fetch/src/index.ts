@@ -103,7 +103,7 @@ const download = async (env: Env, url: string, via?: Via) => {
 
 /**
  * Original bytes, from KV unless `force` says to go back to the origin, or `maxAge` (seconds)
- * says the kept copy is too old. A copy kept before downloads were dated counts as too old.
+ * says the cached copy is too old. A copy cached before downloads were dated counts as too old.
  */
 const bytesFor = async (env: Env, url: string, force: boolean, via?: Via, maxAge?: number) => {
   if (!force) {
@@ -291,7 +291,7 @@ const Tools = mcpWorker({
   tools: {
     url: tool({
       description:
-        "Fetch one URL and return its content. The original bytes are kept (until `force` or " +
+        "Fetch one URL and return its content. The original bytes are cached (until `force` or " +
         "`max_age` says otherwise), so asking " +
         "for a different format later never re-downloads. PDFs and Word documents are converted " +
         "with Workers AI. Nothing is followed, crawled or inferred: you get the URL you asked for.",
@@ -315,14 +315,14 @@ const Tools = mcpWorker({
           max_age: {
             type: "integer",
             description:
-              "Re-download if the kept copy is older than this many seconds (604800 is a week). " +
-              "Default: the kept copy is used however old it is.",
+              "Re-download if the cached copy is older than this many seconds (604800 is a week). " +
+              "Default: the cached copy is used however old it is.",
           },
           cache_only: {
             type: "boolean",
             description:
-              "Never go to the network: answer from the kept copy, or say there is none. For " +
-              "checking what is already kept without fetching it. Default false.",
+              "Never go to the network: answer from the cached copy, or say there is none. For " +
+              "checking what is already cached without fetching it. Default false.",
           },
           select: {
             type: "string",
@@ -353,7 +353,7 @@ const Tools = mcpWorker({
         const page = url.split("#")[0] ?? url;
         // Answered before anything is stored: a miss here is a question, not a failed fetch.
         if (cache_only && !(await env.CACHE.get(`raw:${page}`, "arrayBuffer")))
-          return { content: [{ type: "text", text: `Not kept: ${page}` }], isError: true };
+          return { content: [{ type: "text", text: `Not cached: ${page}` }], isError: true };
         try {
           const { bytes, ct, cached, route } = await bytesFor(
             env,
