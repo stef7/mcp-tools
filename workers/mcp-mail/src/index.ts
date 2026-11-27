@@ -286,7 +286,11 @@ const Worker = mcpWorker({
 
         const textual =
           f.type.startsWith("text/") ||
-          /json|xml|csv|calendar|yaml|javascript/.test(f.type) ||
+          // Whole subtypes only: Office types such as
+          // application/vnd.openxmlformats-officedocument… contain "xml" but are zip files.
+          /^application\/(json|xml|csv|yaml|x-yaml|javascript|ecmascript)$|\+(json|xml)$/.test(
+            f.type,
+          ) ||
           /\.(txt|md|csv|json|ics|vcf|xml|ya?ml|html?)$/i.test(f.filename);
         const image = f.type.startsWith("image/");
         const convert = as === "text" && !textual && !image;
