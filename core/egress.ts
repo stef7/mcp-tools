@@ -93,6 +93,17 @@ export type EgressEnv = {
 
 export type EgressOptions = {
   headers?: Record<string, string>;
+  /**
+   * Default GET. Anything else goes by the smart route and the fallback only: the relay behind
+   * `tunnel` and `browser` fetches pages, so those are skipped, saying why.
+   */
+  method?: string;
+  body?: string;
+  /**
+   * The smart route tries once more after an error status. That is safe for GET and HEAD; say
+   * so here for another method that is just as safe to repeat, such as a POST that only reads.
+   */
+  idempotent?: boolean;
   /** Routes to try, in order; see the top of this file. */
   via?: Via;
   /** The fallback's fetch; tests replace it. */
@@ -258,9 +269,17 @@ const smartPass = (e: unknown) => {
  * the password or the units will not change in a second, nor is a failure with no code (TLS, a
  * timeout, a dropped connection). A retry is noted in `notes`, which is `skipped`.
  */
+const isRead = (method?: string) => {
+  const m = (method ?? "GET").toUpperCase();
+  return m === "GET" || m === "HEAD";
+};
+
 const viaSmart = async (password: string, url: string, opts: EgressOptions, notes: string[]) => {
+  const again = isRead(opts.method) || opts.idempotent === true;
   const attempt = () =>
     proxyFetch({ ...APIFY_PROXY, password }, url, {
+      ...(opts.method && { method: opts.method }),
+      ...(opts.body !== undefined && { body: opts.body }),
       ...(opts.headers && { headers: opts.headers }),
       ...(opts.connect && { connect: opts.connect }),
       trust: opts.trust ?? APIFY_PROXY_CA,
@@ -270,9 +289,9 @@ const viaSmart = async (password: string, url: string, opts: EgressOptions, note
   let first: Response;
   try {
     first = await attempt();
-    if (first.status < 400) return first;
+    if (first.status < 400 || !again) return first;
   } catch (e) {
-    if (!(e instanceof ProxyError) || e.status === 407) throw smartPass(e);
+    if (!(e instanceof ProxyError) || e.status === 407 || !again) throw smartPass(e);
     notes.push(`${smartPass(e).message}; tried again`);
     try {
       return await attempt();
@@ -300,14 +319,22 @@ export const egress = async (
   const headers = opts.headers ?? {};
   const get = opts.fetch ?? fetch;
   const skipped: string[] = [];
+  const method = (opts.method ?? "GET").toUpperCase();
+  const pageOnly = method === "GET" ? undefined : `only fetches pages, not ${method}`;
   const routes: Record<Route, (() => Promise<Response>) | string> = {
     smart: env.APIFY_PROXY_PASSWORD
       ? () => viaSmart(env.APIFY_PROXY_PASSWORD!, url, opts, skipped)
       : "smart: no APIFY_PROXY_PASSWORD",
-    tunnel: env.TUNNEL ? () => viaTunnel(env.TUNNEL!, url, headers) : "tunnel: not bound",
-    browser: env.TUNNEL
-      ? () => viaTunnel(env.TUNNEL!, url, headers, "browser")
-      : "browser: not bound",
+    tunnel: pageOnly
+      ? `tunnel: ${pageOnly}`
+      : env.TUNNEL
+        ? () => viaTunnel(env.TUNNEL!, url, headers)
+        : "tunnel: not bound",
+    browser: pageOnly
+      ? `browser: ${pageOnly}`
+      : env.TUNNEL
+        ? () => viaTunnel(env.TUNNEL!, url, headers, "browser")
+        : "browser: not bound",
   };
   /** The latest blocked answer, and where its note sits in `skipped`. */
   let blocked: { response: Response; via: Route; at: number } | undefined;
@@ -334,7 +361,11 @@ export const egress = async (
   }
   let response: Response;
   try {
-    response = await get(url, { headers });
+    response = await get(url, {
+      headers,
+      ...(method !== "GET" && { method }),
+      ...(opts.body !== undefined && { body: opts.body }),
+    });
   } catch (e) {
     skipped.push(`fallback: ${e instanceof Error ? e.message : String(e)}`);
     if (!blocked) throw new Error(`No route could fetch ${url}: ${skipped.join("; ")}`);

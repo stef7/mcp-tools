@@ -60,6 +60,42 @@ describe("proxyFetch over plain http", () => {
   });
 });
 
+describe("proxyFetch with a method and a body", () => {
+  it("sends them, with a Content-Length", async () => {
+    const res = await proxyFetch(proxy(), "http://site.test/echo", {
+      method: "POST",
+      body: "a=1&b=two",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    });
+    expect(await res.text()).toBe("POST a=1&b=two");
+  });
+
+  it("follows a 303 as a GET without the body, as browsers do", async () => {
+    const res = await proxyFetch(proxy(), "http://site.test/see-other", {
+      method: "POST",
+      body: "a=1",
+    });
+    expect(await res.text()).toBe("GET ");
+  });
+
+  it("repeats the method and body after a 307", async () => {
+    const res = await proxyFetch(proxy(), "http://site.test/temporary", {
+      method: "POST",
+      body: "a=1",
+    });
+    expect(await res.text()).toBe("POST a=1");
+  });
+
+  it("sends them inside the tunnel too", async () => {
+    const res = await proxyFetch(proxy(), "https://tls.test/echo", {
+      method: "POST",
+      body: "isCurrent=true",
+      trust: inject("mockCa"),
+    });
+    expect(await res.text()).toBe("POST isCurrent=true");
+  });
+});
+
 describe("proxyFetch over https", () => {
   it("fails when CONNECT is refused, before any TLS", async () => {
     const bad = { ...proxy(), password: "wrong" };
@@ -215,6 +251,38 @@ describe("the smart route in the cascade", () => {
     expect(got.skipped).toEqual([
       "smart: refused (407): wrong password, or no paid plan or units left",
     ]);
+  });
+
+  it("does not repeat a POST after an error status unless told it is safe to", async () => {
+    const post = (id: string, idempotent?: boolean) =>
+      egress({ APIFY_PROXY_PASSWORD: "secret" }, `https://tls.test/missing?id=${id}`, {
+        via: ["smart"],
+        method: "POST",
+        body: "x=1",
+        connect: toMock,
+        fetch: site,
+        trust: inject("mockCa"),
+        ...(idempotent && { idempotent }),
+      });
+    const once = await post("post-once");
+    expect(await once.response.text()).toBe("missing 1");
+    expect(once.skipped).toEqual([]);
+    const twice = await post("post-twice", true);
+    expect(await twice.response.text()).toBe("missing 2");
+    expect(twice.skipped).toEqual(["smart: HTTP 404; tried again"]);
+  });
+
+  it("carries a POST's body through the smart route", async () => {
+    const got = await egress({ APIFY_PROXY_PASSWORD: "secret" }, "https://tls.test/echo", {
+      via: ["smart"],
+      method: "POST",
+      body: "draw=1",
+      connect: toMock,
+      fetch: site,
+      trust: inject("mockCa"),
+    });
+    expect(got.via).toBe("smart");
+    expect(await got.response.text()).toBe("POST draw=1");
   });
 
   it("does not try again after a failure with no status", async () => {

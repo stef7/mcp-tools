@@ -532,7 +532,18 @@ const Tools = mcpWorker({
  * and the cost of both stay here.
  */
 export default class extends Tools {
-  async egress(url: string, opts: { headers?: Record<string, string>; via?: Via } = {}) {
+  async egress(
+    url: string,
+    opts: {
+      headers?: Record<string, string>;
+      via?: Via;
+      /** Default GET; another method goes by the smart route and the fallback only. */
+      method?: string;
+      body?: string;
+      /** A non-GET request that is safe to repeat, so the smart route may try it twice. */
+      idempotent?: boolean;
+    } = {},
+  ) {
     const { response, via, skipped } = await egress(this.env, url, opts);
     const out = new Response(response.body, response);
     out.headers.set("x-egress-via", via);
