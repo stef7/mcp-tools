@@ -264,6 +264,52 @@ describe("filing and reading", () => {
     expect(asked).toHaveLength(1); // the second page came from the cache
   });
 
+  it("converts a Word file sent with its real type, not mistaking it for XML text", async () => {
+    const raw = [
+      "From: me@proton.me",
+      "Message-ID: <fwd-docx@proton.me>",
+      "Subject: Word JD",
+      'Content-Type: multipart/mixed; boundary="w"',
+      "",
+      "--w",
+      "Content-Type: text/plain",
+      "",
+      "Word JD attached.",
+      "--w",
+      'Content-Type: application/vnd.openxmlformats-officedocument.wordprocessingml.document; name="jd.docx"',
+      'Content-Disposition: attachment; filename="jd.docx"',
+      "Content-Transfer-Encoding: base64",
+      "",
+      "UEsDBBQAAAAIAA==",
+      "--w--",
+    ].join("\r\n");
+    await deliver("me@proton.me", raw);
+    const { messages } = await ok("mail_list", { search: "Word JD attached" });
+    const [mail] = (await ok("mail_get", { ids: [messages[0].id] }))["messages"];
+    let calls = 0;
+    const ai = {
+      toMarkdown: async (doc: { name: string; blob: Blob }) => {
+        calls++;
+        return {
+          id: "1",
+          name: doc.name,
+          mimeType: doc.blob.type,
+          format: "markdown",
+          tokens: 3,
+          data: "# Converted JD",
+        };
+      },
+    };
+    const ctx = createExecutionContext();
+    const w = new Worker(ctx, { ...env, AI: ai as unknown as Ai });
+    const r = (await w.call("mail_get_attachment", { id: mail.files[0].id }, { email: ME })) as Res;
+    await waitOnExecutionContext(ctx);
+    expect(r.isError, r.content[0]?.text).toBeFalsy();
+    expect(r.content[0]!.text).toContain("# Converted JD");
+    expect(r.content[0]!.text).not.toContain("PK");
+    expect(calls).toBe(1);
+  });
+
   it("opens a text attachment as text", async () => {
     const raw = [
       "From: me@proton.me",
