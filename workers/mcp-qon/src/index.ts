@@ -31,6 +31,10 @@ import {
   list,
   LISTS,
   resolve,
+  mentions,
+  scanTable,
+  SCAN_DEFAULT,
+  SCAN_MAX,
   searchTable,
   STATUS,
   transfers,
@@ -202,7 +206,8 @@ export default mcpWorker({
     instructions:
       "Senate only: House of Representatives questions are not in this database. Written " +
       "questions are numbered within a Parliament (the 48th began in 2025), so cite them as " +
-      "'Question on notice no. 716 (48th Parliament)'. Search returns snippets; qon_get gives " +
+      "'Question on notice no. 716 (48th Parliament)'. For words in written questions' text, " +
+      "use qon_search's `contains`, not `keywords`, which matches minister names. Search returns snippets; qon_get gives " +
       "the full text, transfers between portfolios and answer attachments. Senators, " +
       "ministries, committees, portfolios, agencies and estimates rounds may be named rather " +
       "than given as IDs; qon_list shows the options. The 'download' links and answer " +
@@ -246,13 +251,36 @@ export default mcpWorker({
       input: {
         type: "object",
         properties: {
-          keywords: COMMON.keywords,
+          keywords: {
+            type: "string",
+            description:
+              "APH's Keywords box. For written questions it matches minister and portfolio " +
+              "names, not the question text: use `contains` for words in the text.",
+          },
           senator: COMMON.senator,
           ministry: {
             type: "string",
             description:
               "The minister asked, by portfolio: 'Foreign Affairs', 'Defence', 'Prime " +
               "Minister', 'Attorney-General', or an ID. An exact name wins over partial matches.",
+          },
+          contains: {
+            type: "array",
+            items: { type: "string" },
+            description:
+              "Words or phrases to find in the question or answer text: a match has ANY of " +
+              "them, ignoring case, e.g. ['Gaza', 'Israel', 'Palestin']. APH's own Keywords " +
+              "box only matches minister and portfolio names, so this reads the text of each " +
+              "result page (100 questions a request) and keeps the matches. Narrow it with " +
+              "senator, ministry, parliament or dates, which APH applies first.",
+          },
+          scan: {
+            type: "integer",
+            minimum: 1,
+            maximum: SCAN_MAX,
+            description:
+              `With contains: how many questions to read at most, default ${SCAN_DEFAULT}. The ` +
+              "result's next_offset carries on from where it stopped.",
           },
           parliament: {
             type: ["integer", "string"],
@@ -290,14 +318,41 @@ export default mcpWorker({
           orderBy: a.order_by,
           dir: a.dir,
         };
+        const form = (start: number, length: number) => writtenForm(query, start, length);
+        const text = (a.text ?? "snippet") as TextMode;
+        if (a.contains?.length) {
+          const scan = Math.min(a.scan ?? SCAN_DEFAULT, SCAN_MAX);
+          const found = await scanTable<WrittenRow>(
+            net,
+            "/api/qon/getdata",
+            form,
+            mentions(a.contains),
+            offset,
+            limit,
+            scan,
+          );
+          return {
+            filters: {
+              parliament: parliament === "x" ? "all" : Number(parliament),
+              ...(senator ? { senator_id: senator } : {}),
+              ...(ministry ? { ministry_id: ministry } : {}),
+              contains: a.contains,
+            },
+            total_in_scope: found.total,
+            offset,
+            scanned: found.scanned,
+            returned: found.rows.length,
+            ...(found.next_offset !== undefined && { next_offset: found.next_offset }),
+            results: found.rows.map((r) => asWritten(r, text)),
+          };
+        }
         const { total, rows } = await searchTable<WrittenRow>(
           net,
           "/api/qon/getdata",
-          (start, length) => writtenForm(query, start, length),
+          form,
           offset,
           limit,
         );
-        const text = (a.text ?? "snippet") as TextMode;
         return {
           filters: {
             parliament: parliament === "x" ? "all" : Number(parliament),

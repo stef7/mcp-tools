@@ -28,6 +28,8 @@ const blockedMessage = (status: number, how?: string | null) =>
 
 const readJson = async (res: Response, path: string): Promise<unknown> => {
   const text = await res.text();
+  // The attachment list answers a question with none by sending nothing at all.
+  if (res.ok && !text.trim()) return null;
   if (/Page Blocked by WAF/i.test(text) || (res.status === 403 && !text.trim().startsWith("{")))
     throw new Blocked(blockedMessage(res.status, res.headers.get("x-egress-skipped")));
   if (!res.ok) throw new Error(`aph.gov.au ${path}: HTTP ${res.status} ${text.slice(0, 200)}`);
@@ -608,6 +610,52 @@ export const searchTable = async <R>(
     if (data.length < length || offset + rows.length >= total) break;
   }
   return { total, rows };
+};
+
+/** Scanning stops here unless told otherwise: ten pages of 100. */
+export const SCAN_DEFAULT = 1000;
+export const SCAN_MAX = 5000;
+
+/**
+ * Rows that pass `keep`, read a page of 100 at a time from `offset`, until `limit` have passed,
+ * `scan` rows have been read, or the server runs out. For a filter the server cannot apply
+ * itself: written questions' Keywords box matches minister and portfolio names, not the text.
+ * `next_offset` is where to carry on, when there is more to read.
+ */
+export const scanTable = async <R>(
+  net: Net,
+  path: string,
+  form: (start: number, length: number) => URLSearchParams,
+  keep: (row: R) => boolean,
+  offset: number,
+  limit: number,
+  scan: number,
+): Promise<{ total: number; scanned: number; rows: R[]; next_offset?: number }> => {
+  const rows: R[] = [];
+  let total = 0;
+  let at = offset;
+  while (rows.length < limit && at - offset < scan) {
+    const length = Math.min(PAGE, scan - (at - offset));
+    const got = await callWrapped<Table<R>>(net, path, form(at, length));
+    total = got.recordsFiltered ?? got.recordsTotal ?? 0;
+    const data = got.data ?? [];
+    for (const row of data) {
+      at += 1;
+      if (keep(row)) rows.push(row);
+      if (rows.length >= limit) break;
+    }
+    if (data.length < length) break;
+  }
+  return { total, scanned: at - offset, rows, ...(at < total && { next_offset: at }) };
+};
+
+/** True when any of the terms appears in the question or answer, ignoring case. */
+export const mentions = (terms: string[]) => {
+  const wanted = terms.map((t) => t.trim().toLowerCase()).filter(Boolean);
+  return (r: { QuestionText?: string; AnswerText?: string }) => {
+    const text = `${htmlToText(r.QuestionText)}\n${htmlToText(r.AnswerText)}`.toLowerCase();
+    return wanted.some((t) => text.includes(t));
+  };
 };
 
 // ─── rows ────────────────────────────────────────────────────────────────────────────────────
