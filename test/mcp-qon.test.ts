@@ -7,6 +7,7 @@ import { createExecutionContext, env } from "cloudflare:test";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import Worker from "../workers/mcp-qon/src/index";
 import {
+  termsOf,
   aphDate,
   decodeEntities,
   htmlToText,
@@ -422,6 +423,16 @@ describe("qon_search with contains", () => {
       ["200", "50"],
     ]);
     expect(r.json).toMatchObject({ scanned: 250, returned: 0, next_offset: 250 });
+  });
+});
+
+describe("contains, however it is sent", () => {
+  it("takes a list, a JSON list in a string, or comma-separated words", () => {
+    expect(termsOf(["Gaza", "Israel"])).toEqual(["Gaza", "Israel"]);
+    expect(termsOf('["Epiq"]')).toEqual(["Epiq"]);
+    expect(termsOf("Gaza, Israel")).toEqual(["Gaza", " Israel"]);
+    expect(termsOf("[not json")).toEqual(["[not json"]);
+    expect(termsOf(undefined)).toEqual([]);
   });
 });
 
