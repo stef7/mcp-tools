@@ -1,5 +1,6 @@
-// Right to Know runs Alaveteli. Request, authority and user pages have a JSON twin (`.json`),
-// but message bodies and attachments are only in the HTML, and search is only an Atom feed.
+// Right to Know runs Alaveteli. Requests, authorities, users and every feed have JSON forms,
+// which the site serves without a challenge. Message bodies and attachments are only on the HTML
+// request page, and the authority list only in a CSV, both behind a Cloudflare challenge.
 // Everything here is plain string work so it can be tested outside a Worker.
 
 export const ORIGIN = "https://www.righttoknow.org.au";
@@ -44,44 +45,59 @@ const first = (s: string, re: RegExp) => s.match(re)?.[1];
 
 // ---------------------------------------------------------------- feeds
 
-export type FeedEntry = {
-  event_id: number;
-  published: string;
-  title: string;
-  /** "Response", "Request sent", "Clarification sent", "Follow up sent"… */
-  event: string;
-  status?: string | undefined;
-  authority?: string | undefined;
-  authority_slug?: string | undefined;
-  requester?: string | undefined;
-  requester_slug?: string | undefined;
-  snippet?: string | undefined;
-  /** Redirects to the request; pass it to `righttoknow_request`. */
-  url: string;
+/** One event as Alaveteli's JSON feeds give it (InfoRequestEvent#json_for_api, deep). */
+export type RawEvent = {
+  id: number;
+  event_type: string;
+  created_at: string;
+  described_state?: string | null;
+  calculated_state?: string | null;
+  display_status?: string;
+  incoming_message_id?: number | null;
+  outgoing_message_id?: number | null;
+  comment_id?: number | null;
+  snippet?: string;
+  info_request?: { id: number; url_title: string; title: string; display_status?: string };
+  public_body?: { url_name: string; name: string; short_name?: string };
+  user?: { url_name: string; name: string };
 };
 
-export const parseFeed = (xml: string): FeedEntry[] =>
-  [...xml.matchAll(/<entry>([\s\S]*?)<\/entry>/g)].map((m) => {
-    const e = m[1] ?? "";
-    const content = decode(first(e, /<content[^>]*>([\s\S]*?)<\/content>/) ?? "");
-    const who = first(content, /class="requester">([\s\S]*?)<\/div>/) ?? "";
-    const body = who.match(/href="[^"]*\/body\/([^"/]+)"[^>]*>([\s\S]*?)<\/a>/);
-    const user = who.match(/href="[^"]*\/user\/([^"/]+)"[^>]*>([\s\S]*?)<\/a>/);
-    const snippet = first(content, /class="desc">([\s\S]*?)<\/span>/);
-    return {
-      event_id: +(first(e, /InfoRequestEvent\/(\d+)/) ?? 0),
-      published: first(e, /<published>([^<]+)/) ?? "",
-      title: decode(first(e, /<title[^>]*>([\s\S]*?)<\/title>/) ?? ""),
-      event: first(htmlToText(who), /^([\s\S]*?)\s+(?:by|to)\s/) ?? "",
-      status: htmlToText(first(content, /<strong>([\s\S]*?)<\/strong>/) ?? "") || undefined,
-      authority: body ? htmlToText(body[2] ?? "") : undefined,
-      authority_slug: body?.[1],
-      requester: user ? htmlToText(user[2] ?? "") : undefined,
-      requester_slug: user?.[1],
-      snippet: snippet ? htmlToText(snippet) : undefined,
-      url: abs(first(e, /<link[^>]*rel="alternate"[^>]*href="([^"]+)"/) ?? ""),
-    };
-  });
+/** `incoming-51880`, `outgoing-33079` or `comment-12`: the anchor on the request page. */
+export const anchorOf = (e: RawEvent) =>
+  e.incoming_message_id
+    ? `incoming-${e.incoming_message_id}`
+    : e.outgoing_message_id
+      ? `outgoing-${e.outgoing_message_id}`
+      : e.comment_id
+        ? `comment-${e.comment_id}`
+        : undefined;
+
+/** Snippets come with search hits wrapped in <span class="highlight"> and entities left in. */
+export const cleanSnippet = (s = "") =>
+  htmlToText(s.replace(/<span class="highlight">([\s\S]*?)<\/span>/g, "$1"))
+    .replace(/\s+/g, " ")
+    .trim();
+
+export const toEntry = (e: RawEvent) => {
+  const r = e.info_request;
+  const anchor = anchorOf(e);
+  return {
+    event_id: e.id,
+    type: e.event_type,
+    at: e.created_at,
+    status: e.display_status ?? e.described_state ?? e.calculated_state ?? undefined,
+    snippet: e.snippet ? cleanSnippet(e.snippet) : undefined,
+    request: r && { slug: r.url_title, title: r.title, id: r.id, status: r.display_status },
+    authority: e.public_body && {
+      slug: e.public_body.url_name,
+      name: e.public_body.name,
+      short_name: e.public_body.short_name || undefined,
+    },
+    requester: e.user && { slug: e.user.url_name, name: e.user.name },
+    url: r ? `${ORIGIN}/request/${r.url_title}${anchor ? `#${anchor}` : ""}` : undefined,
+  };
+};
+export type FeedEntry = ReturnType<typeof toEntry>;
 
 // ---------------------------------------------------------------- correspondence
 
@@ -146,16 +162,20 @@ export const parseCorrespondence = (html: string, pageUrl: string): Message[] =>
 
 /**
  * Accepts a slug, a numeric request id, or any Right to Know URL for a request or one of its
- * events. Returns either the slug, or a path that redirects to it.
+ * events. Returns the slug, or the numeric id, which `/request/<id>.json` redirects from.
  */
-export const requestRef = (input: string): { slug: string } | { redirect: string } => {
+export const requestRef = (input: string): { slug: string } | { id: string } => {
   const s = input.trim();
-  if (/^\d+$/.test(s)) return { redirect: `/request/${s}` };
+  if (/^\d+$/.test(s)) return { id: s };
   if (!/^https?:|^\//.test(s)) return { slug: s };
   const path = new URL(s, ORIGIN).pathname;
   const slug = first(path, /^\/request\/([^/]+)/);
-  if (slug) return /^\d+$/.test(slug) ? { redirect: `/request/${slug}` } : { slug };
-  if (/^\/request_event\/\d+/.test(path)) return { redirect: path };
+  if (slug) return /^\d+$/.test(slug) ? { id: slug } : { slug };
+  if (/^\/request_event\/\d+/.test(path))
+    throw new Error(
+      "An event link can only be resolved by loading a page Right to Know protects with a " +
+        "challenge. Pass the request's slug instead: every search and feed result carries it.",
+    );
   throw new Error(`Not a Right to Know request reference: ${input}`);
 };
 
@@ -164,16 +184,6 @@ export const slugOf = (input: string, kind: "body" | "user"): string => {
   const s = input.trim();
   return first(s, new RegExp(`/${kind}/([^/?#.]+)`)) ?? s;
 };
-
-/**
- * The request a page belongs to, read from the page itself: its "Link to this" fields, or a
- * redirect body's link. For when the redirect could not be read directly (a challenge in the way,
- * or an egress route that followed it).
- */
-export const slugInPage = (html: string): string | undefined =>
-  [...html.matchAll(/righttoknow\.org\.au\/request\/([a-z0-9_]+)/gi)]
-    .map((m) => m[1] ?? "")
-    .find((s) => s && !/^\d+$/.test(s));
 
 // ---------------------------------------------------------------- authorities
 

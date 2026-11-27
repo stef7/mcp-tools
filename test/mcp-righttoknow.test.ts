@@ -1,68 +1,244 @@
 /**
  * mcp-righttoknow, against trimmed copies of what righttoknow.org.au really sent (27 Nov 2026).
- * The site is never called: `fetch` is stubbed per test.
+ * The site is never called: `fetch` is stubbed per test, and mcp-fetch is a stub binding.
  */
 import { createExecutionContext, env } from "cloudflare:test";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import Worker from "../workers/mcp-righttoknow/src/index";
 import {
+  cleanSnippet,
   decode,
   findAuthorities,
   htmlToText,
   parseAuthorities,
-  parseCsv,
   parseCorrespondence,
-  parseFeed,
+  parseCsv,
   requestRef,
-  slugInPage,
   slugOf,
   tagCounts,
+  toEntry,
+  type RawEvent,
 } from "../workers/mcp-righttoknow/src/rtk";
 
-type Spec = { name: string; annotations: Record<string, boolean> };
-const worker = () => new Worker(createExecutionContext(), env);
+type Spec = {
+  name: string;
+  annotations: Record<string, boolean>;
+  inputSchema: { required?: string[] };
+};
+type Out = { content: { text: string }[]; isError?: boolean };
 const REQ = "https://www.righttoknow.org.au/request/internal_anu_correspondence_conc";
 
-const FEED = `<?xml version="1.0" encoding="UTF-8"?>
-<feed xml:lang="en-US" xmlns="http://www.w3.org/2005/Atom">
-    <entry>
-      <id>tag:www.righttoknow.org.au,2005:InfoRequestEvent/525727</id>
-      <published>2026-11-27T08:38:54+11:00</published>
-      <link type="text/html" rel="alternate" href="https://www.righttoknow.org.au/request_event/525727"/>
-      <title type="html">Development of the &quot;Building an understanding of antisemitism&quot; eLearn module</title>
-      <content type="html">
-&lt;div class=&quot;request_listing&quot;&gt;
-  &lt;div class=&quot;request_left&quot;&gt;
-    &lt;div class=&quot;requester&quot;&gt;
-      Response by &lt;a href=&quot;https://www.righttoknow.org.au/body/home_affairs&quot;&gt;Department of Home Affairs&lt;/a&gt; to &lt;a href=&quot;https://www.righttoknow.org.au/user/mekomit_dotexe&quot;&gt;Mekomit Dotexe&lt;/a&gt; on &lt;time datetime=&quot;2026-11-27T08:38:54+11:00&quot;&gt;November 27, 2026&lt;/time&gt;.
-    &lt;/div&gt;
-    &lt;p&gt;
-      &lt;i class=&quot;icon-standalone icon_waiting_classification&quot;&gt;&lt;/i&gt;
-      &lt;strong&gt;
-        Awaiting classification
-      &lt;/strong&gt;
-    &lt;/p&gt;
-  &lt;/div&gt;
-  &lt;div class=&quot;request_right&quot;&gt;
-    &lt;span class=&quot;desc&quot;&gt;
-      OFFICIAL: Sensitive
+/** mcp-fetch's fetch_url, kept copies and all, as a stub: answers from `pages`, logs each call. */
+const fakeFetch = (pages: (args: Record<string, unknown>) => string) => {
+  const calls: Record<string, unknown>[] = [];
+  const FETCH = {
+    call: async (name: string, args: Record<string, unknown>) => {
+      calls.push({ name, ...args });
+      return { content: [{ type: "text", text: pages(args) }] };
+    },
+    egress: async () => new Response("", { status: 500 }),
+  };
+  return { calls, env: { ...env, FETCH } as unknown as Env };
+};
+const worker = (e: Env = env) => new Worker(createExecutionContext(), e);
+const run = async (name: string, args: object, e?: Env) =>
+  (await worker(e).call(name, args)) as Out;
+const json = (r: Out) => JSON.parse(r.content[0]!.text);
 
- FOI Request:&amp;nbsp;&amp;nbsp; FA 26/11/01978...
-    &lt;/span&gt;
-  &lt;/div&gt;
-&lt;/div&gt;
-</content>
-    </entry>
-    <entry>
-      <id>tag:www.righttoknow.org.au,2005:InfoRequestEvent/525684</id>
-      <published>2026-11-26T23:55:25+11:00</published>
-      <link type="text/html" rel="alternate" href="https://www.righttoknow.org.au/request_event/525684"/>
-      <title type="html">Development of the APS antisemitism foundation module</title>
-      <content type="html">&lt;div class=&quot;requester&quot;&gt;
-      Request sent to &lt;a href=&quot;https://www.righttoknow.org.au/body/dewr&quot;&gt;Department of Employment and Workplace Relations&lt;/a&gt; by &lt;a href=&quot;https://www.righttoknow.org.au/user/mekomit_dotexe&quot;&gt;Mekomit Dotexe&lt;/a&gt; on November 26, 2026.
-    &lt;/div&gt;&lt;strong&gt;Delayed&lt;/strong&gt;</content>
-    </entry>
-</feed>`;
+/** `/feed/search/antisemitism.json`, two events. */
+const SEARCH: RawEvent[] = [
+  {
+    id: 525741,
+    event_type: "response",
+    created_at: "2026-11-27T13:48:04.554+11:00",
+    described_state: null,
+    calculated_state: null,
+    last_described_at: null,
+    incoming_message_id: 51880,
+    outgoing_message_id: null,
+    comment_id: null,
+    display_status: "Response",
+    snippet:
+      '...ivities;\n• inform debate on a matter of public importance. There is significant public interest in how\nthe University responds to complaints alleging <span class="highlight">antisemitism</span>. This matter has been raised at\nSenate Estimates on 5 June and 29 October 2026 and reported in the national press, and it\nsits alongside the work of...',
+    info_request: {
+      id: 15604,
+      url_title: "internal_anu_correspondence_conc",
+      title: "Internal ANU correspondence concerning Dr Andrew Hammond, March to August 2026",
+      display_status: "Awaiting classification",
+    },
+    public_body: {
+      id: 723,
+      url_name: "anu",
+      name: "Australian National University",
+      short_name: "ANU",
+    },
+    user: { id: 10154, url_name: "s_p", name: "S P" },
+  },
+  {
+    id: 525727,
+    event_type: "response",
+    created_at: "2026-11-27T08:38:54.562+11:00",
+    described_state: null,
+    calculated_state: null,
+    last_described_at: null,
+    incoming_message_id: 51872,
+    outgoing_message_id: null,
+    comment_id: null,
+    display_status: "Response",
+    snippet:
+      '...eedom of Information Act\n 1982 (Cth), for documents held by the Department, including documents of\n the Office of Australia\'s Special Envoy to Combat <span class="highlight">Antisemitism</span>.\n\n The Australian Government response to the Special Envoy\'s Plan to Combat\n <span class="highlight">Antisemitism</span>, published by the Department, records that the Special Envo...',
+    info_request: {
+      id: 15912,
+      url_title: "development_of_the_building_an_u",
+      title: 'Development of the "Building an understanding of antisemitism" eLearn module',
+      display_status: "Awaiting classification",
+    },
+    public_body: {
+      id: 786,
+      url_name: "home_affairs",
+      name: "Department of Home Affairs",
+      short_name: "Home Affairs",
+    },
+    user: { id: 10267, url_name: "mekomit_dotexe", name: "Mekomit Dotexe" },
+  },
+];
+
+/** `/request/internal_anu_correspondence_conc/feed.json`, three of its events. */
+const REQUEST_FEED: RawEvent[] = [
+  {
+    id: 525741,
+    event_type: "response",
+    created_at: "2026-11-27T13:48:04.554+11:00",
+    described_state: null,
+    calculated_state: null,
+    last_described_at: null,
+    incoming_message_id: 51880,
+    outgoing_message_id: null,
+    comment_id: null,
+    display_status: "Response",
+    snippet:
+      "Dear S P,\n\n &nbsp;\n\n I refer to your request for access to documents under the Freedom of\n Information Act 1982 (Cth) (the FOI Act), reference FOI 202600332...",
+    info_request: {
+      id: 15604,
+      url_title: "internal_anu_correspondence_conc",
+      title: "Internal ANU correspondence concerning Dr Andrew Hammond, March to August 2026",
+      display_status: "Awaiting classification",
+    },
+    public_body: {
+      id: 723,
+      url_name: "anu",
+      name: "Australian National University",
+      short_name: "ANU",
+    },
+    user: { id: 10154, url_name: "s_p", name: "S P" },
+  },
+  {
+    id: 522775,
+    event_type: "response",
+    created_at: "2026-10-06T16:04:21.701+11:00",
+    described_state: null,
+    calculated_state: "waiting_response",
+    last_described_at: "2026-10-19T23:59:04.053+11:00",
+    incoming_message_id: 50918,
+    outgoing_message_id: null,
+    comment_id: null,
+    display_status: "Awaiting response",
+    snippet:
+      "Dear S P,\n\nI refer to your two requests for access to documents under the Freedom of Information Act 1982 (Cth) (the FOI Act), received by the Australi...",
+    info_request: {
+      id: 15604,
+      url_title: "internal_anu_correspondence_conc",
+      title: "Internal ANU correspondence concerning Dr Andrew Hammond, March to August 2026",
+      display_status: "Awaiting classification",
+    },
+    public_body: {
+      id: 723,
+      url_name: "anu",
+      name: "Australian National University",
+      short_name: "ANU",
+    },
+    user: { id: 10154, url_name: "s_p", name: "S P" },
+  },
+  {
+    id: 517967,
+    event_type: "sent",
+    created_at: "2026-09-08T22:05:02.175+10:00",
+    described_state: "waiting_response",
+    calculated_state: "waiting_response",
+    last_described_at: "2026-09-08T22:05:02.418+10:00",
+    incoming_message_id: null,
+    outgoing_message_id: 32450,
+    comment_id: null,
+    display_status: "Clarification",
+    snippet:
+      "Under the Freedom of Information Act 1982 (Cth), I request the documents described below, held by any of the Specified Officers during the Period.\n\nDE...",
+    info_request: {
+      id: 15604,
+      url_title: "internal_anu_correspondence_conc",
+      title: "Internal ANU correspondence concerning Dr Andrew Hammond, March to August 2026",
+      display_status: "Awaiting classification",
+    },
+    public_body: {
+      id: 723,
+      url_name: "anu",
+      name: "Australian National University",
+      short_name: "ANU",
+    },
+    user: { id: 10154, url_name: "s_p", name: "S P" },
+  },
+];
+
+const META = {
+  id: 15604,
+  url_title: "internal_anu_correspondence_conc",
+  title: "Internal ANU correspondence concerning Dr Andrew Hammond, March to August 2026",
+  created_at: "2026-09-08T22:05:01.807+10:00",
+  updated_at: "2026-11-27T13:48:04.604+11:00",
+  described_state: "waiting_response",
+  display_status: "Awaiting classification",
+  awaiting_description: true,
+  law_used: "foi",
+  tags: [],
+  user: { id: 10154, url_name: "s_p", name: "S P" },
+  public_body: {
+    id: 723,
+    url_name: "anu",
+    name: "Australian National University",
+    short_name: "ANU",
+  },
+  info_request_events: [
+    {
+      id: 517967,
+      event_type: "sent",
+      created_at: "2026-09-08T22:05:02.175+10:00",
+      described_state: "waiting_response",
+      calculated_state: "waiting_response",
+      incoming_message_id: null,
+      outgoing_message_id: 32450,
+      comment_id: null,
+    },
+    {
+      id: 522775,
+      event_type: "response",
+      created_at: "2026-10-06T16:04:21.701+11:00",
+      described_state: null,
+      calculated_state: "waiting_response",
+      incoming_message_id: 50918,
+      outgoing_message_id: null,
+      comment_id: null,
+    },
+    {
+      id: 523590,
+      event_type: "overdue",
+      created_at: "2026-10-09T00:00:00.000+11:00",
+      described_state: null,
+      calculated_state: null,
+      incoming_message_id: null,
+      outgoing_message_id: null,
+      comment_id: null,
+    },
+  ],
+};
 
 const PAGE = `<div class="outgoing correspondence js-collapsible" id="outgoing-32695">
     <div class="correspondence__header correspondence__header--with-delivery-status">
@@ -120,92 +296,69 @@ const PAGE = `<div class="outgoing correspondence js-collapsible" id="outgoing-3
 </div>
 <div class="sidebar">Requests like this</div>`;
 
-const META = {
-  id: 15604,
-  url_title: "internal_anu_correspondence_conc",
-  title: "Internal ANU correspondence concerning Dr Andrew Hammond, March to August 2026",
-  created_at: "2026-09-08T22:05:01.807+10:00",
-  updated_at: "2026-11-27T13:48:04.604+11:00",
-  described_state: "waiting_response",
-  display_status: "Awaiting classification",
-  awaiting_description: true,
-  law_used: "foi",
-  tags: [],
-  user: { id: 10154, url_name: "s_p", name: "S P" },
-  public_body: {
-    id: 723,
-    url_name: "anu",
-    name: "Australian National University",
-    short_name: "ANU",
-  },
-  info_request_events: [
-    {
-      id: 517967,
-      event_type: "sent",
-      created_at: "2026-09-08T22:05:02.175+10:00",
-      described_state: "waiting_response",
-      calculated_state: "waiting_response",
-      incoming_message_id: null,
-      outgoing_message_id: 32450,
-    },
-    {
-      id: 522775,
-      event_type: "response",
-      created_at: "2026-10-06T16:04:21.701+11:00",
-      described_state: null,
-      calculated_state: "waiting_response",
-      incoming_message_id: 50918,
-      outgoing_message_id: null,
-    },
-    {
-      id: 523590,
-      event_type: "overdue",
-      created_at: "2026-10-09T00:00:00.000+11:00",
-      described_state: null,
-      calculated_state: null,
-      incoming_message_id: null,
-      outgoing_message_id: null,
-    },
-  ],
-};
+/** Answers the free JSON endpoints; anything else (an HTML page) fails the test. */
+const stubJson = (asked: string[] = []) =>
+  vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+    const url = new URL(String(input instanceof Request ? input.url : input));
+    asked.push(url.pathname);
+    if (
+      url.pathname === "/request/15604.json" ||
+      url.pathname === "/request/internal_anu_correspondence_conc.json"
+    )
+      return Response.json(META);
+    if (url.pathname === "/request/internal_anu_correspondence_conc/feed.json")
+      return Response.json(REQUEST_FEED);
+    if (url.pathname.startsWith("/feed/")) return Response.json(SEARCH);
+    throw new Error(`Unexpected fetch of ${url.pathname}`);
+  });
 
-const urlOf = (input: RequestInfo | URL) =>
-  new URL(String(input instanceof Request ? input.url : input));
+afterEach(() => vi.restoreAllMocks());
 
 describe("the tool list", () => {
-  it("carries the worker's prefix and only reads", async () => {
+  it("keeps the challenged pages behind righttoknow_full_*, each needing user_confirmed", async () => {
     const specs = (await worker().tools({})) as Spec[];
     expect(specs.map((t) => t.name)).toEqual([
       "righttoknow_search",
       "righttoknow_request",
-      "righttoknow_authorities",
+      "righttoknow_feed",
       "righttoknow_authority",
       "righttoknow_user",
-      "righttoknow_feed",
-      "righttoknow_attachment",
+      "righttoknow_authorities",
+      "righttoknow_site",
+      "righttoknow_citations",
+      "righttoknow_link",
+      "righttoknow_full_request",
+      "righttoknow_full_attachment",
     ]);
-    expect(specs.every((t) => t.annotations.readOnlyHint)).toBe(true);
+    for (const t of specs) {
+      const full = t.name.startsWith("righttoknow_full_");
+      expect(t.annotations.readOnlyHint).toBe(!full);
+      expect(t.inputSchema.required?.includes("user_confirmed") ?? false).toBe(full);
+    }
   });
 });
 
-describe("the search feed", () => {
-  it("reads each event's request, authority, requester, status and snippet", () => {
-    const [a, b] = parseFeed(FEED);
+describe("feed events", () => {
+  it("carry the request's slug, so nothing needs an event link resolved", () => {
+    const [a, b] = SEARCH.map(toEntry);
     expect(a).toMatchObject({
-      event_id: 525727,
-      published: "2026-11-27T08:38:54+11:00",
-      title: 'Development of the "Building an understanding of antisemitism" eLearn module',
-      event: "Response",
-      status: "Awaiting classification",
-      authority: "Department of Home Affairs",
-      authority_slug: "home_affairs",
-      requester: "Mekomit Dotexe",
-      requester_slug: "mekomit_dotexe",
-      url: "https://www.righttoknow.org.au/request_event/525727",
+      event_id: 525741,
+      type: "response",
+      request: { slug: "internal_anu_correspondence_conc", id: 15604 },
+      authority: { slug: "anu", short_name: "ANU" },
+      requester: { slug: "s_p", name: "S P" },
+      url: `${REQ}#incoming-51880`,
     });
-    // Entities are escaped twice in the feed; both layers come off.
-    expect(a!.snippet).toMatch(/FOI Request: FA 26\/11\/01978/);
-    expect(b).toMatchObject({ event: "Request sent", authority_slug: "dewr", status: "Delayed" });
+    // The search hit's highlight markup is gone, and so are the entities.
+    expect(a!.snippet).toContain("complaints alleging antisemitism");
+    expect(a!.snippet).not.toMatch(/<|&nbsp;/);
+    expect(b).toMatchObject({ authority: { slug: "home_affairs" } });
+  });
+
+  it("clean up a snippet's markup and spacing", () => {
+    expect(cleanSnippet('Dear S P,\n\n &nbsp;\n\n I <span class="highlight">refer</span>...')).toBe(
+      "Dear S P, I refer...",
+    );
   });
 });
 
@@ -215,7 +368,6 @@ describe("the request page", () => {
     expect(rest).toHaveLength(0);
     expect(out).toMatchObject({
       id: "outgoing-32695",
-      direction: "outgoing",
       author: "S P",
       date: "2026-09-24T16:36:19+10:00",
       text: "Good afternoon,\n\nFor Categories 1 and 2, “between Specified Officers” should also include file notes.\nThank you.",
@@ -232,7 +384,6 @@ describe("the request page", () => {
         view_url: `${REQ}/response/50918/attach/html/2/FOIs%20202600332%20Consultation.pdf.html`,
       },
     ]);
-    expect(inc!.link).toBe(`${REQ}#incoming-50918`);
   });
 
   it("keeps one line break where the site writes a newline before <br />", () => {
@@ -242,48 +393,31 @@ describe("the request page", () => {
 });
 
 describe("references", () => {
-  it("takes a slug, an id, or a request or event URL", () => {
+  it("take a slug, an id or a request URL, and refuse an event link", () => {
     expect(requestRef("internal_anu_correspondence_conc")).toEqual({
       slug: "internal_anu_correspondence_conc",
     });
-    expect(requestRef("15604")).toEqual({ redirect: "/request/15604" });
+    expect(requestRef("15604")).toEqual({ id: "15604" });
     expect(requestRef(`${REQ}#incoming-50918`)).toEqual({
       slug: "internal_anu_correspondence_conc",
     });
-    expect(requestRef("https://www.righttoknow.org.au/request_event/525741")).toEqual({
-      redirect: "/request_event/525741",
-    });
-    expect(() => requestRef("https://www.righttoknow.org.au/body/anu")).toThrow();
+    expect(() => requestRef("https://www.righttoknow.org.au/request_event/525741")).toThrow(/slug/);
     expect(slugOf("https://www.righttoknow.org.au/body/home_affairs", "body")).toBe("home_affairs");
-    expect(slugOf("oaic", "body")).toBe("oaic");
   });
 });
 
-describe("the request tool", () => {
-  afterEach(() => vi.restoreAllMocks());
-
-  it("follows an event URL to the request, then joins the JSON and the page", async () => {
+describe("righttoknow_request", () => {
+  it("joins the request's JSON and its feed's snippets, loading no HTML", async () => {
     const asked: string[] = [];
-    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
-      const url = urlOf(input);
-      asked.push(url.pathname);
-      if (url.pathname === "/request_event/522775")
-        return new Response(null, { status: 302, headers: { location: `${REQ}#incoming-50918` } });
-      if (url.pathname.endsWith(".json")) return Response.json(META);
-      return new Response(PAGE, { headers: { "content-type": "text/html" } });
-    });
-    const res = (await worker().call("righttoknow_request", {
-      request: "https://www.righttoknow.org.au/request_event/522775",
-      messages: "latest",
-      max_chars: 20,
-    })) as { content: { text: string }[]; isError?: boolean };
-    expect(res.isError).toBeUndefined();
-    const out = JSON.parse(res.content[0]!.text);
-    expect(asked[0]).toBe("/request_event/522775");
+    stubJson(asked);
+    const out = json(await run("righttoknow_request", { request: "15604" }));
+    expect(asked).toEqual([
+      "/request/15604.json",
+      "/request/internal_anu_correspondence_conc/feed.json",
+    ]);
     expect(out).toMatchObject({
-      url: REQ,
-      status: "waiting_response",
-      authority: { slug: "anu", short_name: "ANU" },
+      slug: "internal_anu_correspondence_conc",
+      authority: { slug: "anu" },
       requester: { slug: "s_p" },
     });
     expect(out.events.map((e: { message?: string }) => e.message)).toEqual([
@@ -291,49 +425,111 @@ describe("the request tool", () => {
       "incoming-50918",
       undefined,
     ]);
-    expect(out.messages).toHaveLength(1);
-    expect(out.messages[0]).toMatchObject({ id: "incoming-50918", truncated: true });
-    expect(out.messages[0].text).toBe("Dear S P,\n\nThis is a […]");
+    expect(out.events[1].snippet).toMatch(/^Dear S P, I refer to your two requests/);
   });
 
   it("says when the site has no such request", async () => {
     vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response("", { status: 404 }));
-    const res = (await worker().call("righttoknow_request", {
-      request: "no_such_request",
-      messages: "none",
-    })) as { content: { text: string }[]; isError?: boolean };
-    expect(res.isError).toBe(true);
-    expect(res.content[0]!.text).toContain("Not found on Right to Know");
+    const r = await run("righttoknow_request", { request: "no_such_request" });
+    expect(r.isError).toBe(true);
+    expect(r.content[0]!.text).toContain("Not found on Right to Know");
   });
 });
 
-describe("the feed tool", () => {
-  it("reads a request's feed at /request/<slug>/feed, where /feed/request/ redirects", async () => {
-    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
-      expect(urlOf(input).pathname).toBe("/request/internal_anu_correspondence_conc/feed");
-      return new Response(FEED, { headers: { "content-type": "application/atom+xml" } });
-    });
-    const res = (await worker().call("righttoknow_feed", {
-      kind: "request",
-      value: "internal_anu_correspondence_conc",
-    })) as { content: { text: string }[] };
-    expect(JSON.parse(res.content[0]!.text).count).toBe(2);
+describe("the feeds", () => {
+  it("are read as JSON, `since` keeping only newer events", async () => {
+    const asked: string[] = [];
+    stubJson(asked);
+    const out = json(
+      await run("righttoknow_search", {
+        query: '"Royal Commission" requested_from:anu',
+        since: "2026-11-27T10:00:00+11:00",
+      }),
+    );
+    expect(asked).toEqual(["/feed/search/%22Royal%20Commission%22%20requested_from%3Aanu.json"]);
+    expect(out.entries.map((e: { event_id: number }) => e.event_id)).toEqual([525741]);
   });
 
-  afterEach(() => vi.restoreAllMocks());
+  it("read a request's feed at /request/<slug>/feed.json", async () => {
+    const asked: string[] = [];
+    stubJson(asked);
+    await run("righttoknow_feed", { kind: "request", value: REQ });
+    expect(asked).toEqual(["/request/internal_anu_correspondence_conc/feed.json"]);
+  });
+});
 
-  it("keeps only events after `since`", async () => {
-    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
-      expect(urlOf(input).pathname).toBe("/feed/body/dewr");
-      return new Response(FEED, { headers: { "content-type": "application/atom+xml" } });
-    });
-    const res = (await worker().call("righttoknow_feed", {
-      kind: "body",
-      value: "https://www.righttoknow.org.au/body/dewr",
-      since: "2026-11-27T00:00:00+11:00",
-    })) as { content: { text: string }[] };
-    const out = JSON.parse(res.content[0]!.text);
-    expect(out.entries.map((e: { event_id: number }) => e.event_id)).toEqual([525727]);
+describe("righttoknow_full_request", () => {
+  it("refuses without user_confirmed, saying why", async () => {
+    const { calls, env: e } = fakeFetch(() => PAGE);
+    const r = await run(
+      "righttoknow_full_request",
+      { request: "internal_anu_correspondence_conc" },
+      e,
+    );
+    expect(r.isError).toBe(true);
+    expect(r.content[0]!.text).toMatch(/Cloudflare challenge/);
+    expect(calls).toHaveLength(0);
+  });
+
+  it("uses the kept page while it holds the newest message", async () => {
+    stubJson();
+    const { calls, env: e } = fakeFetch(() => PAGE);
+    // META's newest message is incoming-50918, which PAGE has.
+    const out = json(
+      await run(
+        "righttoknow_full_request",
+        { request: "internal_anu_correspondence_conc", user_confirmed: true, max_chars: 0 },
+        e,
+      ),
+    );
+    expect(calls).toEqual([{ name: "fetch_url", url: REQ, format: "raw", force: false }]);
+    expect(out.page).toBe("kept copy, current");
+    expect(out.messages.map((m: { id: string }) => m.id)).toEqual([
+      "outgoing-32695",
+      "incoming-50918",
+    ]);
+  });
+
+  it("loads the page again once the request has a message the kept copy lacks", async () => {
+    stubJson();
+    const fresh = PAGE.replace('id="incoming-50918"', 'id="incoming-50918"');
+    const stale = PAGE.replace(/<div class="incoming[\s\S]*$/, "");
+    const { calls, env: e } = fakeFetch((a) => (a.force ? fresh : stale));
+    const out = json(
+      await run(
+        "righttoknow_full_request",
+        { request: "internal_anu_correspondence_conc", user_confirmed: true },
+        e,
+      ),
+    );
+    expect(calls.map((c) => c.force)).toEqual([false, true]);
+    expect(out.page).toBe("loaded from Right to Know");
+    expect(out.messages).toHaveLength(2);
+  });
+});
+
+describe("righttoknow_full_attachment", () => {
+  it("keeps one copy per document, whichever of its URLs is passed", async () => {
+    const { calls, env: e } = fakeFetch(() => "# Decision");
+    const out = json(
+      await run(
+        "righttoknow_full_attachment",
+        {
+          url: `${REQ}/response/50918/attach/html/2/FOIs%20202600332%20Consultation.pdf.html`,
+          user_confirmed: true,
+        },
+        e,
+      ),
+    );
+    expect(calls).toEqual([
+      {
+        name: "fetch_url",
+        url: `${REQ}/response/50918/attach/2/FOIs%20202600332%20Consultation.pdf`,
+        format: "markdown",
+        force: false,
+      },
+    ]);
+    expect(out.text).toBe("# Decision");
   });
 });
 
@@ -358,62 +554,167 @@ describe("the authorities list", () => {
     const [anu] = parseAuthorities(CSV);
     expect(anu).toMatchObject({
       slug: "anu",
-      name: "Australian National University",
       short_name: "ANU",
       tags: { wikidata: "Q127990", federal: true, foi_yes: true, university: true },
-      disclosure_log: "https://www.anu.edu.au/freedom-of-information/disclosure-log",
     });
     expect(anu!.publication_scheme).toBeUndefined();
   });
 
-  it("finds by every word and every tag, exact short names first", () => {
+  it("finds by every word and every tag, closer matches first", () => {
     const all = parseAuthorities(CSV);
     // A name starting with the query outranks one merely containing it.
     expect(findAuthorities(all, "university").map((a) => a.slug)).toEqual(["unimelb", "anu"]);
     expect(findAuthorities(all, "anu").map((a) => a.slug)).toEqual(["anu"]);
     expect(findAuthorities(all, "", ["university", "vic"]).map((a) => a.slug)).toEqual(["unimelb"]);
-    expect(findAuthorities(all, "home affairs", ["federal"]).map((a) => a.slug)).toEqual([
-      "home_affairs",
-    ]);
     expect(tagCounts(all)).toMatchObject({ federal: 3, foi_yes: 4, university: 2, vic: 1 });
   });
 
-  it("is fetched through mcp-fetch, and summarised by tag when nothing is asked", async () => {
-    const asked: object[] = [];
-    const FETCH = {
-      call: async (name: string, args: object) => {
-        asked.push({ name, ...args });
-        return { content: [{ type: "text", text: CSV }] };
-      },
-    };
-    const w = new Worker(createExecutionContext(), { ...env, FETCH } as unknown as Env);
-    const call = async (args: object) =>
-      JSON.parse(
-        ((await w.call("righttoknow_authorities", args)) as { content: { text: string }[] })
-          .content[0]!.text,
-      );
-    expect(await call({ refresh: true })).toMatchObject({ total: 4, tags: { foi_yes: 4 } });
-    expect(asked[0]).toEqual({
-      name: "fetch_url",
-      url: "https://www.righttoknow.org.au/body/all-authorities.csv",
-      format: "raw",
-      force: true,
+  it("is kept by mcp-fetch for a week, and parsed once per isolate", async () => {
+    const { calls, env: e } = fakeFetch(() => CSV);
+    expect(json(await run("righttoknow_authorities", { refresh: true }, e))).toMatchObject({
+      total: 4,
+      tags: { foi_yes: 4 },
     });
-    const found = await call({ query: "ANU", notes: false });
+    expect(calls).toEqual([
+      {
+        name: "fetch_url",
+        url: "https://www.righttoknow.org.au/body/all-authorities.csv",
+        format: "raw",
+        max_age: 604800,
+        force: true,
+      },
+    ]);
+    const found = json(await run("righttoknow_authorities", { query: "ANU" }, e));
     expect(found).toMatchObject({ matched: 1, authorities: [{ slug: "anu" }] });
     expect(found.authorities[0].notes).toBeUndefined();
-    // Parsed once per isolate: the second call did not fetch again.
-    expect(asked).toHaveLength(1);
+    expect(calls).toHaveLength(1);
   });
 });
 
-describe("a challenged redirect", () => {
-  it("is read off the page instead", () => {
+describe("righttoknow_link", () => {
+  const link = async (args: object) => json(await run("righttoknow_link", args)).url as string;
+
+  it("pre-fills a new request the way the site's API page describes", async () => {
     expect(
-      slugInPage(
-        '<input value="https://www.righttoknow.org.au/request/15604" /> Printed from ' +
-          "https://www.righttoknow.org.au/request/internal_anu_correspondence_conc on",
-      ),
-    ).toBe("internal_anu_correspondence_conc");
+      await link({
+        action: "new_request",
+        authority: "https://www.righttoknow.org.au/body/defence",
+        title: "Test Request",
+        default_letter: "Test request body",
+        tags: "openlylocal spending_id:12345",
+      }),
+    ).toBe(
+      "https://www.righttoknow.org.au/new/defence?title=Test+Request&default_letter=Test+request+body&tags=openlylocal+spending_id%3A12345",
+    );
+    const r = await run("righttoknow_link", {
+      action: "new_request",
+      authority: "defence",
+      default_letter: "a",
+      body: "b",
+    });
+    expect(r.isError).toBe(true);
+  });
+
+  it("builds the forms on a request, and alerts on anything", async () => {
+    const slug = "internal_anu_correspondence_conc";
+    expect(await link({ action: "reply", request: REQ, incoming_message_id: 51880 })).toBe(
+      `${REQ}/followups/new/51880`,
+    );
+    expect(await link({ action: "internal_review", request: slug })).toBe(
+      `${REQ}/followups/new?internal_review=1`,
+    );
+    expect(await link({ action: "download_zip", request: slug })).toBe(`${REQ}/download`);
+    expect(await link({ action: "track", request: slug })).toBe(`${REQ}/track`);
+    expect(await link({ action: "track", query: "requested_from:anu" })).toBe(
+      "https://www.righttoknow.org.au/track/search/requested_from%3Aanu",
+    );
+    expect(await link({ action: "change_request", authority: "anu" })).toBe(
+      "https://www.righttoknow.org.au/change_request/new/anu",
+    );
+    expect((await run("righttoknow_link", { action: "annotate" })).isError).toBe(true);
+  });
+
+  it("fetches nothing", async () => {
+    const spy = vi.spyOn(globalThis, "fetch");
+    await link({ action: "contact" });
+    expect(spy).not.toHaveBeenCalled();
+  });
+});
+
+describe("righttoknow_site and righttoknow_citations", () => {
+  it("rank authorities by slug from the statistics JSON, totals from /version.json", async () => {
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const path = new URL(String(input instanceof Request ? input.url : input)).pathname;
+      if (path === "/version.json")
+        return Response.json({
+          alaveteli_version: "0.46.8.0",
+          ruby_version: "3.4.10",
+          alaveteli_git_commit: "be36b67",
+          visible_request_count: 14567,
+        });
+      expect(path).toBe("/statistics.json");
+      return Response.json({
+        public_bodies: [
+          {
+            id: "info_requests_successful_count-highest",
+            title: "Public bodies with the most successful requests",
+            y_axis: "Percentage of total requests",
+            y_values: [62.06896551724138],
+            totals: [29],
+            public_bodies: [
+              {
+                name: "National Indigenous Australians Agency",
+                url: "https://www.righttoknow.org.au/body/niaa",
+              },
+            ],
+          },
+        ],
+        users: {
+          last_28_day_requesters: [{ user: { url_name: "tyler_2", name: "Tyler" }, count: 9 }],
+        },
+        requests: { hides_by_week: [] },
+      });
+    });
+    const out = json(await run("righttoknow_site", {}));
+    expect(out.totals).toEqual({ alaveteli_version: "0.46.8.0", visible_request_count: 14567 });
+    expect(out.authorities[0].ranking).toEqual([
+      { slug: "niaa", name: "National Indigenous Australians Agency", value: 62.1, requests: 29 },
+    ]);
+    expect(out.users.last_28_day_requesters).toEqual([
+      { slug: "tyler_2", name: "Tyler", count: 9 },
+    ]);
+  });
+
+  it("lists citations with the request each one cites", async () => {
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      expect(String(input instanceof Request ? input.url : input)).toBe(
+        "https://www.righttoknow.org.au/citations.json?page=2",
+      );
+      return Response.json([
+        {
+          id: 32,
+          source_url: "https://www.smh.com.au/national/x.html",
+          type: "journalism",
+          created_at: "2026-05-11T13:31:27.772+10:00",
+          title: null,
+          description: null,
+          citable_path: "/request/documents_relating_to_mr2600103",
+        },
+      ]);
+    });
+    const out = json(await run("righttoknow_citations", { page: 2 }));
+    expect(out.citations[0]).toEqual({
+      source_url: "https://www.smh.com.au/national/x.html",
+      type: "journalism",
+      at: "2026-05-11T13:31:27.772+10:00",
+      cites: "https://www.righttoknow.org.au/request/documents_relating_to_mr2600103",
+    });
+  });
+
+  it("read the site-wide list feeds", async () => {
+    const asked: string[] = [];
+    stubJson(asked);
+    await run("righttoknow_feed", { kind: "list", value: "successful" });
+    expect(asked).toEqual(["/feed/list/successful.json"]);
   });
 });

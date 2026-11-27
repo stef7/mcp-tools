@@ -21,7 +21,7 @@ workers/mcp-data-gov-au/     data.gov.au over CKAN, including raw SQL
 workers/mcp-ghost/           Ghost publications, with member sign-in for paid posts
 workers/mcp-apify/           what Apify is costing you, by service and by Actor
 workers/mcp-happyhousesitters/ house sits on happyhousesitters.com.au, ranked around a date
-workers/mcp-righttoknow/     FOI requests on Right to Know: search, read, agencies, attachments
+workers/mcp-righttoknow/     FOI requests on Right to Know: JSON only, challenged pages behind `full_` tools
 workers/mcp-helios/          Helios Voting: read, verify and run elections. Its own door, not in the toolkit
 workers/mcp-printify/        Printify: search its API, call it, upload artwork. Its own door too
 workers/mcp-nc/              Nextcloud calendars over CalDAV, read and write. Its own door too
