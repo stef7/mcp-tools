@@ -398,13 +398,9 @@ describe("the request page", () => {
     const long =
       "https://www.ahpra.gov.au/About-Ahpra/Privacy-Freedom-of-information-and-Information-publication-scheme/Freedom-of-Information/Disclosure-Log.aspx?a=1&amp;b=2";
     expect(
-      htmlToText(
-        `<p>log at <a href="${long}">https://www.ahpra.gov.au/About-Ahpra/Pri...</a></p>`,
-      ),
+      htmlToText(`<p>log at <a href="${long}">https://www.ahpra.gov.au/About-Ahpra/Pri...</a></p>`),
     ).toBe(`log at ${decode(long)}`);
-    expect(htmlToText(`<a href="${long}">https://www.ahpra.gov.au/About…</a>`)).toBe(
-      decode(long),
-    );
+    expect(htmlToText(`<a href="${long}">https://www.ahpra.gov.au/About…</a>`)).toBe(decode(long));
     // Text that is not a prefix of the href (a name, a redaction) is kept as written.
     expect(htmlToText(`<a href="mailto:x@y.gov.au">[AHPRA request email]</a>`)).toBe(
       "[AHPRA request email]",
