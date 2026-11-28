@@ -26,6 +26,7 @@ import {
   ESTIMATES_ORDER,
   estimatesDownload,
   estimatesForm,
+  estimatesSearchPage,
   aphDate,
   htmlToText,
   isAphErrorPage,
@@ -42,6 +43,7 @@ import {
   transfers,
   WRITTEN_ORDER,
   writtenForm,
+  writtenSearchPage,
   type EstimatesRow,
   type ListName,
   type Status,
@@ -216,7 +218,10 @@ export default mcpWorker({
       "Senate only: House of Representatives questions are not in this database. Written " +
       "questions are numbered within a Parliament (the 48th began in 2025), so cite them as " +
       "'Question on notice no. 716 (48th Parliament)'. For words in written questions' text, " +
-      "use qon_search's `contains`, not `keywords`, which matches minister names. Search returns snippets; qon_get gives " +
+      "use qon_search's `contains`, not `keywords`, which matches minister names. Every search " +
+      "gives a search_page link that runs the same search on APH's own site, and each result a " +
+      "page link (and, for the current Parliament's written questions, a ParlWork link), for " +
+      "the user to check themselves. Search returns snippets; qon_get gives " +
       "the full text, transfers between portfolios and answer attachments. Senators, " +
       "ministries, committees, portfolios, agencies and estimates rounds may be named rather " +
       "than given as IDs; qon_list shows the options. The 'download' links and answer " +
@@ -353,6 +358,7 @@ export default mcpWorker({
             scanned: found.scanned,
             returned: found.rows.length,
             ...(found.next_offset !== undefined && { next_offset: found.next_offset }),
+            search_page: writtenSearchPage(query),
             results: found.rows.map((r) => asWritten(r, text)),
           };
         }
@@ -372,6 +378,7 @@ export default mcpWorker({
           total,
           offset,
           returned: rows.length,
+          search_page: writtenSearchPage(query),
           results: rows.map((r) => asWritten(r, text)),
         };
       },
@@ -517,6 +524,7 @@ export default mcpWorker({
           total,
           offset,
           returned: rows.length,
+          search_page: estimatesSearchPage(query),
           results: rows.map((r) => asEstimates(r, text)),
         };
       },

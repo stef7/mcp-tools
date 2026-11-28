@@ -40,7 +40,8 @@ export const failureOf = (path: string, status: number, body: string) => {
   if (status >= 500 && /Value cannot be null/i.test(body))
     return (
       `aph.gov.au ${path}: APH's server failed (HTTP ${status}, "${title ?? "Value cannot be null"}"). ` +
-      "This is a fault at APH, not a lack of results; try again later. Its download links " +
+      "This is a fault at APH, not a lack of results; try again later. APH's own search " +
+      "pages read the same database, so they may fail too; its download links and ParlWork " +
       "may still work in the meantime."
     );
   return `aph.gov.au ${path}: HTTP ${status} ${title ?? body.slice(0, 200)}`;
@@ -739,8 +740,85 @@ export const textFor = (html: string | undefined, mode: TextMode) => {
 export const writtenDownload = (parliament: number | string, number: number | string) =>
   `${BASE}/api/qon/downloadquestions/Question-ParliamentNumber${parliament}-QuestionNumber${number}`;
 
+// ─── links to APH's own pages ────────────────────────────────────────────────────────────────
+
+/** The parameters APH's search pages read from their address, empty ones left out. */
+const query = (params: Record<string, string | number | undefined>) => {
+  const q = new URLSearchParams();
+  for (const [k, v] of Object.entries(params)) if (v !== undefined && v !== "") q.set(k, String(v));
+  return q.toString();
+};
+
+/**
+ * APH's written-questions search page, filled in and run. The page reads keywords, senator and
+ * ministry (as IDs), parliament, questionNumber, dateFrom, dateTo and status from its address,
+ * and ticking off "only current" lets a former senator or ministry show.
+ */
+export const writtenSearchPage = (q: WrittenQuery) =>
+  `${BASE}/qon?${query({
+    keywords: q.keywords,
+    senator: q.senator,
+    ministry: q.ministry,
+    parliament: q.parliament,
+    questionNumber: q.questionNumber,
+    dateFrom: q.dateFrom,
+    dateTo: q.dateTo,
+    status: q.status && q.status !== "all" ? q.status : undefined,
+    onlyCurrentSenators: "false",
+    onlyCurrentMinistries: "false",
+  })}`;
+
 export const writtenPage = (parliament: number | string, number: number | string) =>
-  `${BASE}/qon?parliament=${parliament}&questionNumber=${number}&onlyCurrentSenators=false&onlyCurrentMinistries=false`;
+  writtenSearchPage({ parliament: String(parliament), questionNumber: String(number) });
+
+/**
+ * ParlWork, the Senate's own system, which shows a current question at
+ * parlwork.aph.gov.au/senate/questions/<number>. Numbers restart each Parliament, so the link
+ * is only given for the current one.
+ */
+export const parlworkPage = (number: number | string) =>
+  `https://parlwork.aph.gov.au/senate/questions/${number}`;
+
+/**
+ * The Senate Estimates page, whose question search reads these from its address. The search
+ * sits at the foot of the page under "Questions on notice" (#qon), below the committee boxes.
+ */
+const ESTIMATES_PAGE = `${BASE}/Parliamentary_Business/Senate_Estimates`;
+
+export const estimatesSearchPage = (q: EstimatesQuery) =>
+  `${ESTIMATES_PAGE}?${query({
+    keywords: q.keywords,
+    senator: q.senator,
+    committee: q.committee,
+    estimatesRound: q.round,
+    portfolio: q.portfolio,
+    agency: q.agency,
+    questionNumber: q.questionNumber,
+    portfolioQuestionNumber: q.portfolioQuestionNumber,
+    dateFrom: q.dateFrom,
+    dateTo: q.dateTo,
+    status: q.status && q.status !== "all" ? q.status : undefined,
+    onlyCurrentSenators: "false",
+    onlyCurrentCommittees: "false",
+    onlyCurrentPortfolios: "false",
+    onlyCurrentAgencies: "false",
+  })}#qon`;
+
+export const estimatesPage = (r: {
+  CommitteeId?: number | string;
+  EstimatesRoundId?: number | string;
+  PortfolioId?: number | string;
+  Number?: number | string;
+}) =>
+  estimatesSearchPage({
+    committee: r.CommitteeId === undefined ? undefined : String(r.CommitteeId),
+    round: r.EstimatesRoundId === undefined ? undefined : String(r.EstimatesRoundId),
+    portfolio: r.PortfolioId === undefined ? undefined : String(r.PortfolioId),
+    questionNumber: r.Number === undefined ? undefined : String(r.Number),
+  });
+
+/** The Parliament ParlWork covers; written results from it get a ParlWork link. */
+export const PARLWORK_FROM = 48;
 
 export const asWritten = (r: WrittenRow, text: TextMode) => {
   const p = r.ParliamentNumber;
@@ -762,6 +840,7 @@ export const asWritten = (r: WrittenRow, text: TextMode) => {
     question: textFor(r.QuestionText, text),
     answer: textFor(r.AnswerText, text),
     page: p ? writtenPage(p, r.Number) : undefined,
+    parlwork: p && p >= PARLWORK_FROM ? parlworkPage(r.Number) : undefined,
     download: p ? writtenDownload(p, r.Number) : undefined,
   };
 };
@@ -825,6 +904,8 @@ export const asEstimates = (r: EstimatesRow, text: TextMode) => ({
   multi_portfolio: r.IsMultiPortfolioQuestion ?? false,
   question: textFor(r.QuestionText, text),
   answer: textFor(r.AnswerText, text),
+  page:
+    r.CommitteeId && r.EstimatesRoundId && r.PortfolioId && r.Number ? estimatesPage(r) : undefined,
   download:
     r.CommitteeId && r.EstimatesRoundId && r.PortfolioId && r.Number
       ? estimatesDownload(r)
