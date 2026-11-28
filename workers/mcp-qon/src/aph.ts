@@ -779,7 +779,10 @@ export const writtenPage = (parliament: number | string, number: number | string
 export const parlworkPage = (number: number | string) =>
   `https://parlwork.aph.gov.au/senate/questions/${number}`;
 
-/** The Senate Estimates page, whose question search reads these from its address. */
+/**
+ * The Senate Estimates page, whose question search reads these from its address. The search
+ * sits at the foot of the page under "Questions on notice" (#qon), below the committee boxes.
+ */
 const ESTIMATES_PAGE = `${BASE}/Parliamentary_Business/Senate_Estimates`;
 
 export const estimatesSearchPage = (q: EstimatesQuery) =>
@@ -799,7 +802,7 @@ export const estimatesSearchPage = (q: EstimatesQuery) =>
     onlyCurrentCommittees: "false",
     onlyCurrentPortfolios: "false",
     onlyCurrentAgencies: "false",
-  })}`;
+  })}#qon`;
 
 export const estimatesPage = (r: {
   CommitteeId?: number | string;

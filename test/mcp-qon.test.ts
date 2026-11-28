@@ -468,6 +468,7 @@ describe("links to APH's own pages", () => {
       estimatesSearchPage({ committee: "4", round: "30", agency: "645", status: "all" }),
     );
     expect(u.pathname).toBe("/Parliamentary_Business/Senate_Estimates");
+    expect(u.hash).toBe("#qon");
     expect(u.searchParams.get("committee")).toBe("4");
     expect(u.searchParams.get("estimatesRound")).toBe("30");
     expect(u.searchParams.get("agency")).toBe("645");
