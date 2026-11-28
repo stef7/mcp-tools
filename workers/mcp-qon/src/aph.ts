@@ -26,13 +26,38 @@ const blockedMessage = (status: number, how?: string | null) =>
   (how ? ` (tried: ${how})` : "") +
   `. The same search works in a browser at ${BASE}/qon.`;
 
+/**
+ * What a failed answer means, in words. APH's estimates endpoints answer "Value cannot be null.
+ * Parameter name: values" when its database is having trouble: on 28 Nov 2026 they answered it
+ * for questions read without trouble the day before. It is not how APH says "no results", so it
+ * is reported as a failure to retry later, never as an empty result.
+ */
+export const failureOf = (path: string, status: number, body: string) => {
+  const title = /<title>([\s\S]*?)<\/title>/i
+    .exec(body)?.[1]
+    ?.replace(/<br\s*\/?>/gi, " ")
+    .trim();
+  if (status >= 500 && /Value cannot be null/i.test(body))
+    return (
+      `aph.gov.au ${path}: APH's server failed (HTTP ${status}, "${title ?? "Value cannot be null"}"). ` +
+      "This is a fault at APH, not a lack of results; try again later. Its download links " +
+      "may still work in the meantime."
+    );
+  return `aph.gov.au ${path}: HTTP ${status} ${title ?? body.slice(0, 200)}`;
+};
+
+/** APH's own error page, as mcp-fetch hands it back when the plain fetch's answer stands. */
+export const isAphErrorPage = (text: string) =>
+  /There seems to be a problem with the page/i.test(text) ||
+  /^---\s*\ndescription:\s*5\d\d\b/i.test(text);
+
 const readJson = async (res: Response, path: string): Promise<unknown> => {
   const text = await res.text();
   // The attachment list answers a question with none by sending nothing at all.
   if (res.ok && !text.trim()) return null;
   if (/Page Blocked by WAF/i.test(text) || (res.status === 403 && !text.trim().startsWith("{")))
     throw new Blocked(blockedMessage(res.status, res.headers.get("x-egress-skipped")));
-  if (!res.ok) throw new Error(`aph.gov.au ${path}: HTTP ${res.status} ${text.slice(0, 200)}`);
+  if (!res.ok) throw new Error(failureOf(path, res.status, text));
   try {
     return JSON.parse(text);
   } catch {

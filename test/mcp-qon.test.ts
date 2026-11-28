@@ -7,6 +7,8 @@ import { createExecutionContext, env } from "cloudflare:test";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import Worker from "../workers/mcp-qon/src/index";
 import {
+  failureOf,
+  isAphErrorPage,
   termsOf,
   aphDate,
   decodeEntities,
@@ -433,6 +435,38 @@ describe("contains, however it is sent", () => {
     expect(termsOf("Gaza, Israel")).toEqual(["Gaza", " Israel"]);
     expect(termsOf("[not json")).toEqual(["[not json"]);
     expect(termsOf(undefined)).toEqual([]);
+  });
+});
+
+describe("APH's failures", () => {
+  const nullValues =
+    "<!DOCTYPE html><html><head><title>Value cannot be null.<br>Parameter name: values</title>";
+
+  it("calls 'Value cannot be null' a fault at APH, not an empty result", async () => {
+    stub({ "/api/qon/getestimatesdata": () => new Response(nullValues, { status: 500 }) });
+    const r = await call("search_estimates", { keywords: "Pinczewski" });
+    expect(r.isError).toBe(true);
+    expect(r.content[0]!.text).toContain("APH's server failed (HTTP 500");
+    expect(r.content[0]!.text).toContain("not a lack of results");
+  });
+
+  it("gives other failures their page title, not the page", () => {
+    expect(failureOf("/x", 502, "<html><title>Bad Gateway</title><body>…</body>")).toBe(
+      "aph.gov.au /x: HTTP 502 Bad Gateway",
+    );
+  });
+
+  it("knows APH's error page when mcp-fetch hands it back as content", async () => {
+    const page =
+      "---\ndescription: 500 Page not found\n---\n\n# 500 Error\n\nThere seems to be a problem with the page.";
+    expect(isAphErrorPage(page)).toBe(true);
+    expect(isAphErrorPage("# Question 482\n\nAnswer: Council noted…")).toBe(false);
+    const { env: e } = fakeFetch(() => ({ content: [{ text: page }] }));
+    const r = (await worker(e).call("qon_file", {
+      url: "https://www.aph.gov.au/api/qon/downloadestimatesquestions/EstimatesQuestion-CommitteeId4-EstimatesRoundId30-PortfolioId41-QuestionNumber380",
+    })) as Out;
+    expect(r.isError).toBe(true);
+    expect(r.content[0]!.text).toContain("with its error page");
   });
 });
 
