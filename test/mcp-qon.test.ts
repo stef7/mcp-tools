@@ -7,7 +7,9 @@ import { createExecutionContext, env } from "cloudflare:test";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import Worker from "../workers/mcp-qon/src/index";
 import {
+  estimatesSearchPage,
   failureOf,
+  writtenSearchPage,
   isAphErrorPage,
   termsOf,
   aphDate,
@@ -435,6 +437,49 @@ describe("contains, however it is sent", () => {
     expect(termsOf("Gaza, Israel")).toEqual(["Gaza", " Israel"]);
     expect(termsOf("[not json")).toEqual(["[not json"]);
     expect(termsOf(undefined)).toEqual([]);
+  });
+});
+
+describe("links to APH's own pages", () => {
+  it("fill in the written search page with what its address reads", () => {
+    const u = new URL(
+      writtenSearchPage({
+        keywords: "Defence",
+        senator: "747",
+        parliament: "48",
+        status: "answered",
+        dateFrom: "2026-01-01",
+      }),
+    );
+    expect(u.origin + u.pathname).toBe("https://www.aph.gov.au/qon");
+    expect(Object.fromEntries(u.searchParams)).toEqual({
+      keywords: "Defence",
+      senator: "747",
+      parliament: "48",
+      dateFrom: "2026-01-01",
+      status: "answered",
+      onlyCurrentSenators: "false",
+      onlyCurrentMinistries: "false",
+    });
+  });
+
+  it("fill in the estimates search page, leaving out what is empty", () => {
+    const u = new URL(
+      estimatesSearchPage({ committee: "4", round: "30", agency: "645", status: "all" }),
+    );
+    expect(u.pathname).toBe("/Parliamentary_Business/Senate_Estimates");
+    expect(u.searchParams.get("committee")).toBe("4");
+    expect(u.searchParams.get("estimatesRound")).toBe("30");
+    expect(u.searchParams.get("agency")).toBe("645");
+    expect(u.searchParams.has("status")).toBe(false);
+    expect(u.searchParams.has("keywords")).toBe(false);
+  });
+
+  it("come with search results, and ParlWork with the current Parliament's questions", async () => {
+    stub({ "/api/qon/getdata": () => table([Q715], 716) });
+    const r = await call("search", { senator: "Shoebridge" });
+    expect(new URL(r.json.search_page).searchParams.get("senator")).toBe("747");
+    expect(r.json.results[0].parlwork).toBe("https://parlwork.aph.gov.au/senate/questions/715");
   });
 });
 
