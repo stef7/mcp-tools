@@ -28,6 +28,7 @@ import {
   estimatesForm,
   aphDate,
   htmlToText,
+  isAphErrorPage,
   list,
   LISTS,
   resolve,
@@ -161,6 +162,13 @@ const markdownOf = async (env: Env, url: string, o: FileOpts = {}) => {
   });
   const text = out.content[0]?.text ?? "";
   if (out.isError) throw new Error(text || `Could not read ${url}`);
+  // mcp-fetch returns a site's error page as content when its plain fetch was the last resort.
+  if (isAphErrorPage(text))
+    throw new Error(
+      `aph.gov.au answered ${url} with its error page ("There seems to be a problem with the ` +
+        `page"), not the file. That is a fault at APH; try again later, with force: true so the ` +
+        "error page is not served from mcp-fetch's cache.",
+    );
   return text;
 };
 
