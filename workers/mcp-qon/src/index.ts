@@ -12,7 +12,7 @@
  */
 import cfg from "../wrangler.json";
 import { version } from "../package.json";
-import { mcpWorker, tool, type Result } from "../../../core/mcp";
+import { mcpWorker, textOf, tool, type Result } from "../../../core/mcp";
 import { blockedBy, ROUTES } from "../../../core/egress";
 import {
   asEstimates,
@@ -162,7 +162,7 @@ const markdownOf = async (env: Env, url: string, o: FileOpts = {}) => {
     ...(o.via?.length ? { via: o.via } : {}),
     ...(o.force ? { force: true } : {}),
   });
-  const text = out.content[0]?.text ?? "";
+  const text = textOf(out);
   if (out.isError) throw new Error(text || `Could not read ${url}`);
   // mcp-fetch returns a site's error page as content when its plain fetch was the last resort.
   if (isAphErrorPage(text))
@@ -593,9 +593,11 @@ export default mcpWorker({
 
     file: tool({
       description:
-        "Read one of APH's question files as markdown: a `download` link from a search or get " +
-        "result, or an attachment `url`. Read through mcp-fetch, which caches it, so asking " +
-        "again is free. To hand the user the file itself (usually a PDF), give them the link.",
+        "Read one of APH's question files: a `download` link from a search or get result, or an " +
+        "attachment `url`. as markdown (default) gives its text. as images gives its pages as " +
+        "pictures to read by eye, for a scanned answer whose text comes back empty. Read " +
+        "through mcp-fetch, which caches it, so asking again is free. To hand the user the " +
+        "file itself (usually a PDF), give them the link.",
       input: {
         type: "object",
         required: ["url"],
@@ -606,16 +608,43 @@ export default mcpWorker({
               `A ${BASE}/api/qon/downloadquestions/…, downloadestimatesquestions/… or ` +
               "downloadattachment?attachmentId=… link.",
           },
+          as: {
+            type: "string",
+            enum: ["markdown", "images"],
+            description:
+              "markdown (default): the text. images: the embedded page images of a scanned PDF.",
+          },
+          from_image: {
+            type: "integer",
+            minimum: 1,
+            description: "With as images: the first image to return, 1-based. Default 1.",
+          },
+          max_images: {
+            type: "integer",
+            minimum: 1,
+            maximum: 20,
+            description: "With as images: how many at most, default 4.",
+          },
           via: VIA,
           force: { type: "boolean", description: "Download again instead of using the cache." },
         },
       },
-      async run({ url, via, force }, c) {
+      async run({ url, via, force, as, from_image, max_images }, c) {
         if (!QON_FILE.test(url))
           throw new Error(
             `Not a questions-on-notice file: ${url}. Use a download or attachment link from ` +
               "qon_search, qon_get or qon_get_estimates.",
           );
+        if (as === "images")
+          // mcp-fetch's answer goes back whole: its images are the point.
+          return fetcher(c.env).call("fetch_url", {
+            url,
+            format: "images",
+            ...(from_image ? { from_image } : {}),
+            ...(max_images ? { max_images } : {}),
+            ...(via?.length ? { via } : {}),
+            ...(force ? { force: true } : {}),
+          });
         return markdownOf(c.env, url, { via, force });
       },
     }),

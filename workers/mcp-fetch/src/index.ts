@@ -14,6 +14,7 @@
  *   D1  docs        one row per URL: the extracted text and where it came from
  *   D1  docs_fts    FTS5 index over docs.text, for ranked search
  */
+import { base64, pdfImages } from "../../../core/pdf-images";
 import cfg from "../wrangler.json";
 import { version } from "../package.json";
 import { mcpWorker, tool, type Ctx } from "../../../core/mcp";
@@ -26,7 +27,7 @@ import {
 } from "../../../core/web";
 import { egress, ROUTES, type Via } from "../../../core/egress";
 
-const FORMATS = ["auto", "markdown", "text", "raw"] as const;
+const FORMATS = ["auto", "markdown", "text", "raw", "images"] as const;
 type Format = (typeof FORMATS)[number];
 
 /** Kept byte-for-byte from the previous version so no migration is needed. */
@@ -57,6 +58,96 @@ const ensureSchema = async (env: Env) => {
   if (ready) return;
   await env.DB.exec(DDL.replace(/\n\s*/g, " ").replace(/; /g, ";\n").trim());
   ready = true;
+};
+
+// ─── Pictures ──────────────────────────────────────────────────────────────────────────────────
+
+/** Image types a model can be shown as they are. */
+const SHOWABLE = ["image/jpeg", "image/png", "image/gif", "image/webp"];
+/** Larger than this, a model will not take an image. */
+const IMAGE_MAX = 5 * 1024 * 1024;
+/** What one answer carries at most, so a long scan does not swamp the reply. */
+const IMAGES_BUDGET = 8 * 1024 * 1024;
+
+/**
+ * A scanned PDF's page images, or an image file itself, as image content: the pages a model
+ * reads by eye when there is no text layer. `from` is 1-based; `max` caps how many come back.
+ */
+const asImages = async (
+  bytes: Uint8Array,
+  ct: string | null,
+  kind: string,
+  url: string,
+  from: number,
+  max: number,
+) => {
+  if (ct && SHOWABLE.includes(ct)) {
+    if (bytes.length > IMAGE_MAX)
+      return {
+        content: [{ type: "text" as const, text: `${url} is an image over 5 MB.` }],
+        isError: true,
+      };
+    return {
+      content: [
+        { type: "text" as const, text: `${url} (${ct}, ${bytes.length} bytes)` },
+        { type: "image" as const, data: base64(bytes), mimeType: ct },
+      ],
+    };
+  }
+  if (kind !== "pdf")
+    return {
+      content: [
+        {
+          type: "text" as const,
+          text: `format "images" is for PDFs and image files; ${url} is ${ct ?? kind}.`,
+        },
+      ],
+      isError: true,
+    };
+  const got = await pdfImages(bytes);
+  const chosen = got.images.slice(Math.max(from, 1) - 1);
+  const content: (
+    { type: "text"; text: string } | { type: "image"; data: string; mimeType: string }
+  )[] = [];
+  const notes: string[] = [];
+  let used = 0;
+  let shown = 0;
+  let last = 0;
+  for (const img of chosen) {
+    if (shown >= max) break;
+    if (img.data.length > IMAGE_MAX) {
+      notes.push(`image ${img.index}: over 5 MB (${img.width}×${img.height}), left out`);
+      continue;
+    }
+    if (used + img.data.length > IMAGES_BUDGET && shown > 0) break;
+    content.push({ type: "image", data: base64(img.data), mimeType: img.mimeType });
+    used += img.data.length;
+    shown += 1;
+    last = img.index;
+  }
+  const remaining = got.images.filter((i) => i.index > last).length;
+  const head = [
+    `${url}: ${got.found} embedded image(s), ${got.images.length} usable; ` +
+      (shown
+        ? `showing ${shown}, ending at image ${last}, in stored order (for a scan, page order).`
+        : "none shown."),
+    ...(remaining && shown
+      ? [
+          `${remaining} more: ask again with from_image ${got.images.findIndex((i) => i.index > last) + 1}.`,
+        ]
+      : []),
+    ...got.skipped,
+    ...notes,
+    ...(got.found === 0
+      ? [
+          "No embedded images: this PDF draws its pages as text and shapes, so read it with format auto.",
+        ]
+      : []),
+  ].join("\n");
+  return {
+    content: [{ type: "text" as const, text: head }, ...content],
+    ...(shown ? {} : { isError: true }),
+  };
 };
 
 // ─── Fetching ──────────────────────────────────────────────────────────────────────────────────
@@ -306,7 +397,9 @@ const Tools = mcpWorker({
             description:
               "auto (default): markdown for HTML, PDF and Word, so links are kept; as-is for " +
               "anything else. markdown: always convert with Workers AI. text: plain text with " +
-              "tags and links stripped, no conversion. raw: exactly what the server sent.",
+              "tags and links stripped, no conversion. raw: exactly what the server sent. images: " +
+              "a PDF's embedded page images (a scan with no text layer), or an image file, " +
+              "returned as images to look at.",
           },
           force: {
             type: "boolean",
@@ -323,6 +416,19 @@ const Tools = mcpWorker({
             description:
               "Never go to the network: answer from the cached copy, or say there is none. For " +
               "checking what is already cached without fetching it. Default false.",
+          },
+          from_image: {
+            type: "integer",
+            minimum: 1,
+            description: "With format images: the first image to return, 1-based. Default 1.",
+          },
+          max_images: {
+            type: "integer",
+            minimum: 1,
+            maximum: 20,
+            description:
+              "With format images: how many to return at most, default 4. Answers stop at about " +
+              "8 MB of images whatever this says.",
           },
           select: {
             type: "string",
@@ -346,7 +452,10 @@ const Tools = mcpWorker({
           },
         },
       },
-      async run({ url, format, force, max_age, cache_only, via, select }, c) {
+      async run(
+        { url, format, force, max_age, cache_only, via, select, from_image, max_images },
+        c,
+      ) {
         const env = await schema(c);
         const fmt: Format = FORMATS.includes(format as Format) ? (format as Format) : "auto";
         // The server never sees a #fragment, so every fragment of a page shares one download.
@@ -363,6 +472,16 @@ const Tools = mcpWorker({
             cache_only ? undefined : (max_age ?? undefined),
           );
           const kind = kindOf(page, ct ?? null);
+          // Pictures go back as they are; nothing is stored as text for them.
+          if (fmt === "images")
+            return asImages(
+              bytes,
+              ct ?? null,
+              kind,
+              page,
+              from_image ?? 1,
+              Math.min(max_images ?? 4, 20),
+            );
           const cut = await narrow(bytes, url, kind, select);
           const rendered = await render(env, cut.bytes, page, kind, fmt);
           const text = (cut.note ?? "") + rendered.text;

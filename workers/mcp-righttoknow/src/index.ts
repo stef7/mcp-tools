@@ -22,7 +22,7 @@
  */
 import cfg from "../wrangler.json";
 import { version } from "../package.json";
-import { mcpWorker, tool, type Result } from "../../../core/mcp";
+import { mcpWorker, textOf, tool, type Result } from "../../../core/mcp";
 import { BLOCKED } from "../../../core/egress";
 import { BROWSER_UA } from "../../../core/web";
 import {
@@ -74,7 +74,7 @@ async function cached(
   opts: { format?: "raw" | "markdown"; force?: boolean; max_age?: number } = {},
 ): Promise<string> {
   const out = await rpc(env).call("fetch_url", { url, format: "raw", ...opts });
-  const text = out.content[0]?.text ?? "";
+  const text = textOf(out);
   if (out.isError) throw new Error(`Could not load ${url}: ${text}`);
   return text;
 }
@@ -83,7 +83,7 @@ async function cached(
 async function cachedOnly(env: Env, url: string): Promise<string | undefined> {
   try {
     const out = await rpc(env).call("fetch_url", { url, format: "raw", cache_only: true });
-    return out.isError ? undefined : out.content[0]?.text;
+    return out.isError ? undefined : textOf(out);
   } catch {
     return undefined; // mcp-fetch unreachable: snippets only.
   }

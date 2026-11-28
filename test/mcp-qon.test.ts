@@ -21,7 +21,7 @@ import {
 } from "../workers/mcp-qon/src/aph";
 
 type Spec = { name: string; annotations: Record<string, boolean> };
-type Out = { content: { text: string }[]; isError?: boolean };
+type Out = { content: { type?: string; text: string }[]; isError?: boolean };
 
 /** mcp-fetch's fetch_url as a stub: answers from `pages`, logs each call. */
 const fakeFetch = (pages: (args: Record<string, unknown>) => Out) => {
@@ -440,6 +440,25 @@ describe("contains, however it is sent", () => {
   });
 });
 
+describe("qon_file as images", () => {
+  it("asks mcp-fetch for the page images and returns its answer whole", async () => {
+    const answer = {
+      content: [
+        { type: "text", text: "1 embedded image(s), 1 usable; showing 1" },
+        { type: "image", data: "/9j/AA==", mimeType: "image/jpeg" },
+      ],
+    };
+    const { calls, env: e } = fakeFetch(() => answer as unknown as Out);
+    const r = (await worker(e).call("qon_file", {
+      url: "https://www.aph.gov.au/api/qon/downloadattachment?attachmentId=69438bc7-d7ee-42ea-810f-c70c6298be72",
+      as: "images",
+      max_images: 2,
+    })) as unknown as typeof answer;
+    expect(calls[0]).toMatchObject({ name: "fetch_url", format: "images", max_images: 2 });
+    expect(r.content[1]).toEqual({ type: "image", data: "/9j/AA==", mimeType: "image/jpeg" });
+  });
+});
+
 describe("links to APH's own pages", () => {
   it("fill in the written search page with what its address reads", () => {
     const u = new URL(
@@ -507,7 +526,7 @@ describe("APH's failures", () => {
       "---\ndescription: 500 Page not found\n---\n\n# 500 Error\n\nThere seems to be a problem with the page.";
     expect(isAphErrorPage(page)).toBe(true);
     expect(isAphErrorPage("# Question 482\n\nAnswer: Council noted…")).toBe(false);
-    const { env: e } = fakeFetch(() => ({ content: [{ text: page }] }));
+    const { env: e } = fakeFetch(() => ({ content: [{ type: "text", text: page }] }));
     const r = (await worker(e).call("qon_file", {
       url: "https://www.aph.gov.au/api/qon/downloadestimatesquestions/EstimatesQuestion-CommitteeId4-EstimatesRoundId30-PortfolioId41-QuestionNumber380",
     })) as Out;
@@ -583,7 +602,7 @@ describe("APH's files as markdown", () => {
 
   it("leaves files as links unless asked", async () => {
     stub(files());
-    const { calls, env: e } = fakeFetch(() => ({ content: [{ text: "x" }] }));
+    const { calls, env: e } = fakeFetch(() => ({ content: [{ type: "text", text: "x" }] }));
     const r = await call("get", { number: 715 }, e);
     expect(r.json.documents).toBeUndefined();
     expect(calls).toEqual([]);
@@ -593,8 +612,8 @@ describe("APH's files as markdown", () => {
     stub(files());
     const { calls, env: e } = fakeFetch((a) =>
       String(a.url).includes("attachmentId")
-        ? { content: [{ text: "conversion failed" }], isError: true }
-        : { content: [{ text: "# Question 715\n\nAnswer text" }] },
+        ? { content: [{ type: "text", text: "conversion failed" }], isError: true }
+        : { content: [{ type: "text", text: "# Question 715\n\nAnswer text" }] },
     );
     const r = await call("get", { number: 715, files: "markdown", via: ["tunnel"] }, e);
     expect(calls).toEqual([
@@ -626,7 +645,9 @@ describe("APH's files as markdown", () => {
   });
 
   it("qon_file reads one link, and only APH's question files", async () => {
-    const { calls, env: e } = fakeFetch(() => ({ content: [{ text: "# Attachment" }] }));
+    const { calls, env: e } = fakeFetch(() => ({
+      content: [{ type: "text", text: "# Attachment" }],
+    }));
     const ok = (await worker(e).call("qon_file", {
       url: "https://www.aph.gov.au/api/qon/downloadattachment?attachmentId=99",
       force: true,
