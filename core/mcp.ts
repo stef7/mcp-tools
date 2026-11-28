@@ -101,7 +101,22 @@ export type Spec = {
   inputSchema: JSONSchema;
   annotations: Annotations;
 };
-export type Result = { content: { type: "text"; text: string }[]; isError?: boolean };
+/** What a tool returns: text, and images or files where the tool has them. */
+export type Content =
+  | { type: "text"; text: string }
+  | { type: "image"; data: string; mimeType: string }
+  | {
+      type: "resource";
+      resource: { uri: string; mimeType?: string; blob?: string; text?: string };
+    };
+export type Result = { content: Content[]; isError?: boolean };
+
+/** The text blocks of a result, joined: what a worker reading another's answer usually wants. */
+export const textOf = (r: Result) =>
+  r.content
+    .map((c) => (c.type === "text" ? c.text : ""))
+    .filter(Boolean)
+    .join("\n");
 
 /** `initialize` extras: everything but `instructions` goes into `serverInfo`. */
 type Info = { title?: string; description?: string; websiteUrl?: string; instructions?: string };
